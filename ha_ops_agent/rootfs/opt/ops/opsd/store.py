@@ -630,6 +630,57 @@ MIGRATIONS: tuple[str, ...] = (
         FROM activity;
     UPDATE activity SET item = 'a-' || id;
     """,
+    # 18: maintenance items (`opsd.maintenance`). SQLite cannot change a CHECK in place, so the table is
+    # rebuilt with the same columns and the new kind; the generated `needs` column is recomputed.
+    """
+    CREATE TABLE items_v18 (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('update', 'reminder', 'investigation', 'proposal', 'check', 'backup',
+            'reload', 'window', 'maintenance')),
+        kicker TEXT NOT NULL DEFAULT '',
+        ref TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('proposed', 'waiting', 'scheduled', 'running', 'done', 'failed',
+            'cancelled', 'expired')),
+        gist TEXT NOT NULL DEFAULT '',
+        need TEXT,
+        about TEXT,
+        actions TEXT NOT NULL DEFAULT '[]',
+        phase TEXT,
+        follows TEXT,
+        facts TEXT NOT NULL DEFAULT '[]',
+        agent TEXT,
+        change TEXT,
+        footnote TEXT,
+        quiet INTEGER NOT NULL DEFAULT 0,
+        revision INTEGER NOT NULL DEFAULT 1,
+        as_of TEXT NOT NULL,
+        at TEXT NOT NULL,
+        needs_since TEXT,
+        resolved_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT '{}',
+        confirm TEXT,
+        derived INTEGER NOT NULL DEFAULT 1,
+        push TEXT NOT NULL DEFAULT '{}',
+        needs INTEGER GENERATED ALWAYS AS (state = 'waiting' OR (state = 'failed' AND need IS NOT NULL)) VIRTUAL,
+        CHECK ((state = 'waiting') = (need IS NOT NULL) OR (state = 'failed'))
+    );
+    INSERT INTO items_v18 (id, key, kind, kicker, ref, title, state, gist, need, about, actions, phase, follows,
+            facts, agent, change, footnote, quiet, revision, as_of, at, needs_since, resolved_at, created_at,
+            updated_at, source, confirm, derived, push)
+        SELECT id, key, kind, kicker, ref, title, state, gist, need, about, actions, phase, follows, facts, agent,
+            change, footnote, quiet, revision, as_of, at, needs_since, resolved_at, created_at, updated_at, source,
+            confirm, derived, push
+        FROM items;
+    DROP TABLE items;
+    ALTER TABLE items_v18 RENAME TO items;
+    CREATE INDEX items_needs ON items(needs, needs_since);
+    CREATE INDEX items_at ON items(at);
+    CREATE INDEX items_state ON items(state, resolved_at);
+    """,
 )
 
 # Update runs in these states own the update pipeline; at most one exists.

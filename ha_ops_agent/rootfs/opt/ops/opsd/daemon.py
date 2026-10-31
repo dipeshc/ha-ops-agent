@@ -17,17 +17,18 @@ import logging
 import os
 import signal
 import sqlite3
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from opsd import __version__, proposals, quiet, updatefix
+from opsd import __version__, dashboards, inventory, maintenance, privsep, proposals, quiet, updatefix
 from opsd.activity import ActivityLog
 from opsd.aicontrol import AiControl
 from opsd.api import CORE_WS_URL, LiveAPI, core_release_age_days, github_release_age_days
-from opsd.approvals import Approvals
+from opsd.approvals import ApprovalError, Approvals
 from opsd.assistant import Assistant
 from opsd.backups import Backups
 from opsd.baseline import (
@@ -70,6 +71,7 @@ from opsd.runner import (
     ABORTED_RUN_FLOOR_USD,
     GUARD_ANOMALY_DAYS,
     GUARD_ANOMALY_KEY,
+    MAINTENANCE_PLAN,
     MAX_CLAUDE_RUNS_PER_DAY,
     TRIAGE,
     UPDATE_REVIEW,
@@ -298,6 +300,7 @@ class Daemon:
                 "updates.resume": self._on_updates_resume,
                 "updates.approved": self._on_updates_approved,
                 "changes.execute": self._on_change_approved,
+                "maintenance.dashboard": self._on_dashboard_approved,
             },
         )
         self.inbound = InboundGate(store=self.store, queue=self.queue)
@@ -331,6 +334,12 @@ class Daemon:
         self.updates: UpdateManager | None = None
         # The pending updates the last health check saw (the plan is re-made when they differ).
         self._updates_seen: list[dict[str, Any]] | None = None
+        # Proactive maintenance (opsd.maintenance), set up below once the store is known to work.
+        self.maintenance: maintenance.MaintenanceManager | None = None
+        self.dashboards: dashboards.DashboardWriter | None = None
+        self.evidence: EvidenceSource | None = None
+        if self.store is not None:
+            self.evidence = EvidenceSource(cache=EvidenceCache(self.store, clock=lambda: datetime.now(UTC)))
         if self.store is not None:
             approvals = Approvals(self.store)
             self.updates = UpdateManager(
@@ -354,9 +363,11 @@ class Daemon:
                 redactor=self.redactor,
                 tz=lambda: self.tz,
                 hub=self.hub,
-                evidence=EvidenceSource(cache=EvidenceCache(self.store, clock=lambda: datetime.now(UTC))),
+                evidence=self.evidence,
                 house_domains=self._house_domains,
                 propose_fix=self._propose_fix,
+                removals=lambda: self.maintenance.removals() if self.maintenance is not None else [],
+                before_plan=self._maintenance_before_plan,
             )
         # "Back up now" and the act-mode self-heal (same ops and audited executor as the updates).
         self.backups: Backups | None = None
@@ -408,6 +419,17 @@ class Daemon:
                 self.backups.activity = self.activity.record
             if self.changes is not None:
                 self.changes.activity = self.activity.record
+        if self.store is not None:
+            self.maintenance = maintenance.MaintenanceManager(
+                store=self.store, gather=self._maintenance_gather, evidence=self.evidence, git=options.git_on,
+                generated=options.profile.dashboards.generated, plan=self._maintenance_plan,
+                propose=self._propose_maintenance if self.repo is not None else None,
+                publish=lambda: self.hub.publish("maintenance", None, {}),
+            )  # fmt: skip
+            self.dashboards = dashboards.DashboardWriter(
+                store=self.store, options=options, approvals=Approvals(self.store), ws=self._ws_command,
+                backup_dir=paths.data / "maintenance" / "dashboards",
+            )  # fmt: skip
         # One record per item. Every surface reads it; it is re-derived whenever a record it shows changes.
         self.items: ItemBook | None = None
         self._items_due = False
@@ -439,6 +461,7 @@ class Daemon:
             health_at=raw.get("at") if isinstance(raw, dict) else None,
             health_items=[i for i in (raw.get("items") or []) if isinstance(i, dict)] if isinstance(raw, dict) else [],
             redact=cached[1].redact,
+            acting=self.options.acting,
         )
 
     def _on_live(self, event: LiveEvent) -> None:
@@ -1286,6 +1309,8 @@ class Daemon:
                 await self._updates_upkeep(before_check=True)
             await self.health_cycle(trigger)
             await self._updates_upkeep(before_check=False)
+            if self.maintenance is not None:
+                await self.maintenance.scan(trigger)
         except Exception:
             _LOGGER.exception("health cycle crashed", extra={"trigger": trigger})
             await self.publish_status("failed")
@@ -1360,6 +1385,129 @@ class Daemon:
                                       entities=entities)  # fmt: skip
         self._changes_changed()
         return row
+
+    # ------------------------------------------------------------ maintenance
+
+    def _readable_names(self) -> list[str]:
+        """The config files the agent may read (the export's own rules): tracked ones with git, else on disk."""
+        root, reads = self.paths.ha_config, self.options.reads
+        if self.options.git_on:
+            return privsep.tracked_readable_files(root, reads)
+        return privsep.disk_files(root, reads)
+
+    async def _maintenance_gather(self) -> maintenance.Gathered:
+        """The scan's local reads (read-only: repairs, the log, entries, dashboards, add-ons, readable YAML)."""
+        async with LiveAPI(self.client) as api:
+            core = await api.supervisor("/core/info")
+            issues = await api.ws("repairs/list_issues")
+            logs = await api.ws("system_log/list")
+            entries = await api.ws("config_entries/get")
+            config = await api.core_rest("/config")
+            registry = await api.ws("config/entity_registry/list")
+            problems: list[str] = []
+            try:
+                resources = await api.ws("lovelace/resources")
+            except Exception as err:  # noqa: BLE001 - a missing source is a problem, never a crash
+                resources = []
+                problems.append(f"dashboard resources unreadable: {clean_text(str(err), 120)}")
+            boards, configs, board_problems = await dashboards.read_all(api.ws)
+            addons = await api.supervisor("/addons")
+        try:
+            names = await asyncio.to_thread(self._readable_names)
+        except (subprocess.SubprocessError, OSError) as err:
+            # The YAML features are one part of the inventory: the other signals still count.
+            names = []
+            problems.append(f"config files unreadable: {clean_text(str(err), 120)}")
+        texts = await asyncio.to_thread(inventory.read_yaml, self.paths.ha_config, names)
+        custom = {d: inventory.manifest(self.paths.custom_components, d)
+                  for d in custom_domains(self.paths.custom_components)}  # fmt: skip
+        inv = inventory.build(entries=entries, components=(config or {}).get("components") if isinstance(config, dict)
+                              else None, texts=texts, custom=custom, registry=registry, resources=resources,
+                              dashboards=boards, addons=addons, problems=problems + board_problems)  # fmt: skip
+        return maintenance.Gathered(
+            installed=str((core or {}).get("version") or "") if isinstance(core, dict) else "",
+            issues=issues.get("issues") if isinstance(issues, dict) else [],
+            logs=logs, inventory=inv, configs=configs,
+        )  # fmt: skip
+
+    async def _maintenance_plan(self, prompt: str) -> RunResult:
+        """The capability-free maintenance plan run; skipped (not an error) when AI is off or capped."""
+        redactor = self.redactor()
+        outcome = await self.runner.run_agent(MAINTENANCE_PLAN, redactor.redact(prompt), principal=AGENT_SELF,
+                                              now=datetime.now(UTC), redactor=redactor, wait_s=600.0)  # fmt: skip
+        return outcome.run
+
+    async def _maintenance_before_plan(self) -> None:
+        if self.maintenance is not None and self.maintenance.due(before_update=True):
+            await self.maintenance.scan("before_update")
+
+    async def _propose_maintenance(self, finding: maintenance.Finding, why: str,
+                                   edits: list[updatefix.Edit]) -> dict[str, Any]:  # fmt: skip
+        """A finding's YAML migration as an ordinary proposal; ChangeRefused when not."""
+        if self.store is None or self.repo is None:
+            raise ChangeRefused("git proposals are off on this install")
+        now = datetime.now(UTC)
+        entities = await registry_entities(self.client)
+        row = await asyncio.to_thread(maintenance.propose_yaml, self.store, self.repo, self.options,
+                                      finding=finding, why=why, edits=edits, day=self.day(now), now=now,
+                                      entities=entities)  # fmt: skip
+        self._changes_changed()
+        return row
+
+    async def _ws_command(self, msg_type: str, **fields: Any) -> Any:
+        """One websocket command on its own connection (every one passes the self-guard)."""
+        async with LiveAPI(self.client) as api:
+            return await api.ws(msg_type, **fields)
+
+    async def request_dashboard(self, finding: str, user: str, shown: list[str]) -> dict[str, Any]:
+        """A pending approval for a finding's dashboard plan, exactly as the admin saw it."""
+        writer, store = self.dashboards, self.store
+        if writer is None or store is None:
+            raise ApprovalError("dashboard changes are unavailable")
+        problem = writer.allowed()
+        if problem is not None:
+            raise ApprovalError(problem)
+        bound = (maintenance.dashboard_plan(store, finding) or {}).get("binding")
+        if not isinstance(bound, dict) or [str(bound.get("after"))] != shown:
+            raise ApprovalError("The plan changed; open it again.")
+        now_bound, _ = await writer.binding_now(bound)
+        if now_bound != bound:
+            raise ApprovalError("The dashboard changed since the plan was made; the next scan makes a new plan.")
+        title = f"Dashboard {bound.get('url_path')}: maintenance plan"
+        return writer.approvals.request_dashboard(bound, title=title, user=user)
+
+    async def _confirm_dashboard(self, approval: str, user: str) -> bool:
+        writer, store = self.dashboards, self.store
+        if writer is None or store is None:
+            return False
+        found = store.approval(approval) or {}
+        bound = (found.get("plan") or {}).get("binding")
+        now_bound, _ = await writer.binding_now(bound) if isinstance(bound, dict) else (None, None)
+        state = writer.approvals.confirm_dashboard(approval, user=user, binding_now=now_bound)
+        if state != "approved":
+            return False
+        self.queue.put(Event("maintenance.dashboard", "panel", Priority.APPROVAL, {"approval": approval},
+                             dedupe_key=f"maintenance.dashboard:{approval}"))  # fmt: skip
+        return True
+
+    async def _on_dashboard_approved(self, event: Event) -> None:
+        approval = event.payload.get("approval")
+        if self.dashboards is None or self.maintenance is None or self.store is None or not isinstance(approval, str):
+            return
+        found = self.store.approval(approval) or {}
+        bound = (found.get("plan") or {}).get("binding") or {}
+        finding = str(bound.get("finding") or "")
+        try:
+            outcome = await self.dashboards.execute(approval)
+        except Exception:
+            _LOGGER.exception("dashboard plan crashed")
+            outcome = dashboards.Outcome("refused", "the dashboard change crashed before it was saved")
+        if not finding:
+            return
+        self.maintenance.record_result(finding, outcome, str(bound.get("url_path") or ""))
+        if self.activity is not None:
+            self.activity.record("maintenance", f"Dashboard change {outcome.state}", outcome.detail,
+                                 item=f"maint:{finding}")  # fmt: skip
 
     async def _update_review(self, prompt: str) -> RunResult:
         """The capability-free release-note review; skipped (not an error) when AI is off or capped."""
@@ -1453,6 +1601,9 @@ class Daemon:
                 self.queue.put(Event("changes.execute", "panel", Priority.APPROVAL, {"approval": approval},
                                      dedupe_key=f"changes.execute:{approval}"))  # fmt: skip
             return state == "approved"
+        if kind == "approve_dashboard":
+            approval = args.get("approval")
+            return isinstance(approval, str) and await self._confirm_dashboard(approval, user)
         if kind == "backup_now":
             return self.start_backup(by=f"panel:{user[:64]}", admin=True)
         if kind == "ack":

@@ -918,7 +918,8 @@ async def test_an_unknown_outcome_is_verified_not_retried(rig: Rig) -> None:
 
 def test_internal_capabilities_are_never_on_the_socket() -> None:
     names = set(internal())
-    assert names == {"backup.create", "update.install", "update.rollback", "change.apply", "change.revert"}
+    assert names == {"backup.create", "update.install", "update.rollback", "change.apply", "change.revert",
+                     "dashboard.save"}  # fmt: skip
     verbs = {CAPABILITIES[n].verb for n in names}
     assert not verbs & cli_verbs()
     for verb in verbs:

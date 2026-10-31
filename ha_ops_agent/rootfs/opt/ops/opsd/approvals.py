@@ -39,6 +39,13 @@ single use and expiry, bound to the job (its id, entity,
 versions, state and finish time). The daemon uses it in the next update
 window only, and only while the job still waits for that reboot; the
 executor still requires the job's own update approval for the reboot call.
+
+A dashboard migration plan (`kind: dashboard`, subject `dashboard:<finding>`, `opsd.dashboards`) uses
+the same request, single use and expiry. Its `plan_hash` binds the finding, the dashboard's url_path,
+the SHA-256 of its JSON before and after the edit, and the edit itself; it is recomputed from the
+dashboard as Home Assistant serves it when the tap arrives and again right before the save, so a
+dashboard that changed in between voids it. Update, change and reboot paths never accept it, and the
+reverse.
 """
 
 import hashlib
@@ -97,6 +104,25 @@ def is_change(found: Mapping[str, Any]) -> bool:
 
 def is_reboot(found: Mapping[str, Any]) -> bool:
     return (found.get("plan") or {}).get("kind") == "reboot"
+
+
+def is_dashboard(found: Mapping[str, Any]) -> bool:
+    return (found.get("plan") or {}).get("kind") == "dashboard"
+
+
+def is_update(found: Mapping[str, Any]) -> bool:
+    """An update approval: none of the other kinds that share the records."""
+    return not (is_change(found) or is_reboot(found) or is_dashboard(found))
+
+
+def dashboard_subject(finding: str) -> str:
+    return f"dashboard:{finding}"
+
+
+def dashboard_hash(binding: Mapping[str, Any], created_at: str) -> str:
+    canonical = json.dumps({"dashboard": dict(binding), "created_at": created_at}, sort_keys=True,
+                           separators=(",", ":"), default=str)  # fmt: skip
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def reboot_subject(entity_id: str, version: str) -> str:
@@ -180,7 +206,7 @@ class Approvals:
         if found is None:
             return "unknown"
         by = f"user:{user[:64]}"
-        if is_change(found) or is_reboot(found):
+        if not is_update(found):
             self._audit("refused", by, found, "not an update approval")
             return "refused"
         if found["state"] != "pending":
@@ -220,7 +246,7 @@ class Approvals:
         approval's own copy of the plan, its plan id or its hash breaks it.
         """
         plan = found.get("plan") or {}
-        if is_change(found) or is_reboot(found):
+        if not is_update(found):
             return False
         run = self._store.update_run(int(plan.get("plan") or 0))
         source = next((i for i in (run or {}).get("plan", []) if i.get("entity_id") == plan.get("entity_id")), None)
@@ -266,7 +292,7 @@ class Approvals:
         self.expire()
         now = self._clock()
         by_entity = {str(i.get("entity_id")): i for i in plan}
-        live = [a for a in self._store.approvals(states=LIVE, limit=200) if not is_change(a) and not is_reboot(a)]
+        live = [a for a in self._store.approvals(states=LIVE, limit=200) if is_update(a)]
         result_marks: dict[str, dict[str, Any]] = {}
         for found in live:
             plan_item = found["plan"]
@@ -314,7 +340,7 @@ class Approvals:
         found = self._store.approval(approval_id)
         if found is None or found["state"] != "used" or found["used_by_job"] != job.id or not found["decided_by"]:
             return False
-        if is_change(found):
+        if not is_update(found):
             return False
         if not self.bound(found):
             return False
@@ -474,6 +500,78 @@ class Approvals:
                                         detail="the update changed since the reboot was approved")  # fmt: skip
             return False
         return self._store.decide_approval(approval_id, expect=("approved",), to="used", now=now, job=job.id)
+
+    # ------------------------------------------------ dashboard migrations
+
+    def request_dashboard(self, binding: Mapping[str, Any], *, title: str, user: str) -> dict[str, Any]:
+        """A pending approval for one dashboard migration plan (`confirm_dashboard` approves it)."""
+        if len(self._store.approvals(states=("pending",), limit=MAX_PENDING + 1)) >= MAX_PENDING:
+            raise ApprovalError("too many approvals waiting for confirmation")
+        now = self._clock()
+        target = dashboard_subject(str(binding["finding"]))
+        for old in self._store.approvals(states=LIVE, limit=200):
+            if old["subject"] == target:
+                self._store.decide_approval(old["id"], expect=LIVE, to="void", now=now, detail="superseded")
+        approval_id = secrets.token_hex(16)
+        created = now.astimezone(UTC).isoformat(timespec="seconds")
+        plan = {"kind": "dashboard", "binding": dict(binding), "title": title[:120]}
+        self._store.create_approval(approval_id=approval_id, plan=plan, plan_hash=dashboard_hash(binding, created),
+                                    subject=target, requested_by=user, run_when="now", now=now,
+                                    expires_at=now + APPROVAL_TTL)  # fmt: skip
+        found = self._store.approval(approval_id)
+        if found is None:
+            raise ApprovalError("the approval could not be saved")
+        self._audit("requested", f"panel:{user[:64]}", found)
+        return found
+
+    @staticmethod
+    def dashboard_bound(found: Mapping[str, Any], binding_now: Mapping[str, Any] | None) -> bool:
+        """The approval's hash still matches the binding recomputed from the dashboard as it is now."""
+        if not is_dashboard(found) or binding_now is None:
+            return False
+        recomputed = dashboard_hash(binding_now, str(found["created_at"]))
+        return hmac.compare_digest(recomputed, str(found["plan_hash"]))
+
+    def confirm_dashboard(self, approval_id: str, *, user: str, binding_now: Mapping[str, Any] | None) -> str:
+        """The admin's approval of a dashboard plan: `approved`, `refused`, `expired`, `void` or `unknown`."""
+        now = self._clock()
+        found = self._store.approval(approval_id)
+        if found is None or not is_dashboard(found):
+            return "unknown"
+        by = f"user:{user[:64]}"
+        if found["state"] != "pending":
+            self._audit("refused", by, found, f"already {found['state']}")
+            return "refused"
+        if not user or not hmac.compare_digest(user.encode(), str(found["requested_by"]).encode()):
+            self._audit("refused", by, found, "not the admin who asked")
+            return "refused"
+        if now >= datetime.fromisoformat(found["expires_at"]):
+            self._store.decide_approval(approval_id, expect=("pending",), to="expired", now=now)
+            return "expired"
+        if not self.dashboard_bound(found, binding_now):
+            self._store.decide_approval(approval_id, expect=("pending",), to="void", now=now,
+                                        detail="the dashboard changed before it was confirmed")  # fmt: skip
+            self._audit("void", by, found, "changed before confirmation")
+            return "void"
+        if not self._store.decide_approval(approval_id, expect=("pending",), to="approved", now=now, by=user):
+            return "refused"
+        self._audit("approved", by, found)
+        return "approved"
+
+    def consume_dashboard(self, approval_id: str, binding_now: Mapping[str, Any] | None) -> bool:
+        """Single use, right before the dashboard is saved: approved, unexpired, still bound."""
+        found = self._store.approval(approval_id)
+        now = self._clock()
+        if found is None or not is_dashboard(found) or found["state"] != "approved" or not found["decided_by"]:
+            return False
+        if now >= datetime.fromisoformat(found["expires_at"]):
+            self._store.decide_approval(approval_id, expect=("approved",), to="expired", now=now)
+            return False
+        if not self.dashboard_bound(found, binding_now):
+            self._store.decide_approval(approval_id, expect=("approved",), to="void", now=now,
+                                        detail="the dashboard changed since the plan was approved")  # fmt: skip
+            return False
+        return self._store.decide_approval(approval_id, expect=("approved",), to="used", now=now)
 
     def void_subject(self, subject: str, *, detail: str) -> None:
         for found in self._store.approvals(states=LIVE, limit=200):

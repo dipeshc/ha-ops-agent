@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- Synthetic test fixture: a release blog post with deprecations ahead; made-up integrations and text. -->
+<html><body>
+<h2><a class="title-link" name="whats-new" href="#whats-new"></a> What is new</h2>
+<h2><a class="title-link" name="a-marketplace" href="#a-marketplace"></a> A built-in Marketplace for community extensions</h2>
+<p>Made-up highlights.</p>
+
+<h2><a class="title-link" name="new-integrations" href="#new-integrations"></a> New integrations</h2>
+<ul>
+<li><strong><a href="/integrations/acme_weather/">Acme Weather</a></strong>, added by an example contributor.</li>
+<li><strong><a href="/integrations/acme_kettle/">Acme Kettle</a></strong>, added by an example contributor.</li>
+</ul>
+
+<h2><a class="title-link" name="backward-incompatible-changes" href="#backward-incompatible-changes"></a>
+Backward-incompatible changes</h2>
+<details class="details-block-item"><summary class="details-block-title"><span>Acme Sprinkler</span></summary>
+<div class="details-block-content"><p>Setting up Acme Sprinkler in YAML is deprecated and will be removed in
+2030.6. Your configuration is imported on start.</p>
+<p>(<a href="/integrations/acme_sprinkler/">acme_sprinkler docs</a>)</p></div>
+</details>
+<details class="details-block-item"><summary class="details-block-title"><span>Acme Lights</span></summary>
+<div class="details-block-content"><p>The <code>acme_lights.flash</code> action is removed.</p>
+<p>(<a href="/integrations/acme_lights/">acme_lights docs</a>)</p></div>
+</details>
+<details class="details-block-item"><summary class="details-block-title"><span>Frontend</span></summary>
+<div class="details-block-content"><p>The <code>custom:acme-gauge</code> card option <code>max_value</code> is
+renamed to <code>max</code>.</p></div>
+</details>
+<p>If you are a custom integration developer, read the developer blog:</p>
+<ul>
+<li><a href="/blog/x">The <code>acme_helper.legacy_api</code> is removed</a></li>
+</ul>
+
+<h2><a class="title-link" name="farewell-to-the-following" href="#farewell-to-the-following"></a>
+Farewell to the following</h2>
+<ul>
+<li><strong>Acme Legacy Hub</strong> was removed: the vendor shut down its cloud.</li>
+</ul>
+</body></html>

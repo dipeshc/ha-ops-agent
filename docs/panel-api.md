@@ -28,7 +28,7 @@ An unknown route answers `404 {"error": "not_found"}`; any error, such as
 {
   "id": "u-7f3a91c2",                 // URL-safe handle, [A-Za-z0-9_-]{1,64}
   "key": "updates:update.home_assistant_operating_system@17.1",
-  "kind": "update",                   // update | reminder | investigation | proposal | check | backup | reload | window
+  "kind": "update",                   // update | reminder | investigation | proposal | check | backup | reload | window | maintenance
   "kicker": "Operating system update",// optional subtype label; the panel falls back to a label for `kind`
   "ref": "#18",                       // optional short reference shown beside the kicker
   "title": "Home Assistant OS 17.0 → 17.1",
@@ -81,6 +81,7 @@ daemon decides; the panel never counts or infers it.
 | `waiting`, or `failed` with a need | Needs you | Needs you / Failed |
 | `running` | In progress | Running |
 | `proposed`, `scheduled` | Coming up | Proposed / Scheduled |
+| `proposed` maintenance replacement candidates and suggestions | Suggestions | Proposed |
 | `done`, `failed`, `cancelled`, `expired` resolved today (house time) | Today | Done / Failed / Cancelled / Expired |
 
 "Installed, reboot pending" is `waiting` with a need. It is never
@@ -94,7 +95,7 @@ daemon decides; the panel never counts or infers it.
 {
   "as_of": "…",
   "needs_count": 2,                   // == sections.needs.length; also the nav badge
-  "sections": { "needs": [Item], "running": [Item], "coming": [Item], "today": [Item] },
+  "sections": { "needs": [Item], "running": [Item], "coming": [Item], "suggestions": [Item], "today": [Item] },
   "calm": "Checked at 05:30, nothing new since the baseline. …",  // the All-quiet text; null when needs is not empty
   "strip": [ { "label": "Health", "value": "checked 05:30, nothing new" },
              { "label": "Backup", "value": "03:59, encrypted" },

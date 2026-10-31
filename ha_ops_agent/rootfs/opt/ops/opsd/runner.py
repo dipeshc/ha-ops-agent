@@ -209,7 +209,21 @@ UPDATE_REVIEW = Profile(
     settings=lambda options: RunSettings(options.claude.model_standard, 6, min(0.5, options.limits.run_max_usd)),
 )
 
-PROFILES: dict[str, Profile] = {p.name: p for p in (TRIAGE, CHAT, FOLLOWUP, INVESTIGATE, SUMMARY, UPDATE_REVIEW)}
+# A plan for each new maintenance finding (opsd.maintenance) from its (fenced, untrusted) evidence. No
+# capabilities: its answer is advice shown as the agent's words, and the YAML or dashboard edits it suggests
+# only become a proposal or a plan the admin approves.
+MAINTENANCE_PLAN = Profile(
+    name="maintenance_plan",
+    prompt_file="profiles/maintenance_plan.md",
+    schema_file="maintenance-plan.schema.json",
+    capabilities=frozenset(),
+    budget_class=BudgetClass.AGENT,
+    settings=lambda options: RunSettings(options.claude.model_standard, 8, min(0.5, options.limits.run_max_usd)),
+)
+
+PROFILES: dict[str, Profile] = {
+    p.name: p for p in (TRIAGE, CHAT, FOLLOWUP, INVESTIGATE, SUMMARY, UPDATE_REVIEW, MAINTENANCE_PLAN)
+}
 
 
 def _words(items: list[str]) -> str:

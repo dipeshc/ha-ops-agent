@@ -61,6 +61,11 @@ git:
   # What the agent may propose: automations, alerts, templates.
   proposals: [automations, templates]
 
+# Storage dashboards something else writes (a script, another tool). Dashboard migrations the agent
+# plans never edit them; their plan tells you to change the tool that writes them instead.
+dashboards:
+  generated: [energy-report]
+
 # Documents Claude reads first, relative to the configuration directory (never under ops/).
 docs:
   runbook: RUNBOOK.md

@@ -371,7 +371,7 @@ function views() {
   return viewsP;
 }
 function getJSON(path, body) { return api(body ? "POST" : "GET", path, body); }
-const SECTIONS = ["needs", "running", "coming", "today"];
+const SECTIONS = ["needs", "running", "coming", "suggestions", "today"];
 async function loadHome() {
   const r = await getJSON("api/home");
   if (r.status !== 200) { S.homeErr = r.status === 0 ? null : r.data.message || "Home could not be loaded."; render(); return; }
@@ -551,8 +551,8 @@ function firstId() {
 }
 
 /* ---------------------------------------------------------------- one row, one detail: the same renderings everywhere */
-const GLYPH = { update: "up", reminder: "bell", investigation: "search", proposal: "doc", check: "shield", reload: "reload", backup: "moon", window: "up" };
-const KIND = { update: "Update", reminder: "Reminder", investigation: "Investigation", proposal: "Proposed change", check: "Health check", reload: "Reload", backup: "Backup", window: "Update window" };
+const GLYPH = { update: "up", reminder: "bell", investigation: "search", proposal: "doc", check: "shield", reload: "reload", backup: "moon", window: "up", maintenance: "search" };
+const KIND = { update: "Update", reminder: "Reminder", investigation: "Investigation", proposal: "Proposed change", check: "Health check", reload: "Reload", backup: "Backup", window: "Update window", maintenance: "Maintenance" };
 const TONE = { waiting: "warn", failed: "err", running: "run", done: "ok" };
 const WORD = { proposed: "Proposed", waiting: "Needs you", scheduled: "Scheduled", running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled", expired: "Expired" };
 const word = (t) => WORD[t.state] || "Unknown state";
@@ -569,7 +569,7 @@ function section(title, count, rows, more) {
     h("h2", null, title, count != null ? h("span", { class: "cnt", text: String(count) }) : null, more || null),
     h("div", { class: "group" }, rows));
 }
-/* Home: Needs you, In progress, Coming up, Today, the status strip. The daemon decides which section holds an item. */
+/* Home: Needs you, In progress, Coming up, Suggestions, Today, the status strip. The daemon decides which section holds an item. */
 function homeList(selected) {
   const d = S.home;
   if (!d) return [h("p", { class: "empty", text: S.homeErr || "Loading…" })];
@@ -579,6 +579,7 @@ function homeList(selected) {
   else out.push(h("div", { class: "calm" }, h("span", { class: "g" }, icon("checkc")), h("div", null, h("h2", { text: "All quiet" }), d.calm ? h("p", { text: d.calm }) : null)));
   if ((s.running || []).length) out.push(section("In progress", null, rows("running")));
   if ((s.coming || []).length) out.push(section("Coming up", null, rows("coming")));
+  if ((s.suggestions || []).length) out.push(section("Suggestions", null, rows("suggestions")));
   if ((s.today || []).length) out.push(section("Today", null, rows("today"), h("button", { onclick: () => go("#history") }, "History")));
   if ((d.strip || []).length) out.push(h("div", { class: "strip" }, d.strip.map((x) => h("span", null, h("b", { text: x.label }), ` ${x.value}`))));
   return out;

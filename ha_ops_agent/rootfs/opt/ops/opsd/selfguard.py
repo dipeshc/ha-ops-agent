@@ -16,7 +16,13 @@ Assistant call passes through:
   (never `force`), each only inside `approved_os_flow(<that path>)`, which `updexec.Executors`
   enters after it verified the approval of that OS job; single use, closed when the block ends.
 - `check_ws` in `HAWebSocket`: only the commands in `WS_COMMANDS`, with the two subscriptions and
-  the AI switch helper pinned to their exact arguments.
+  the AI switch helper pinned to their exact arguments. The dashboard reads (`lovelace/config`, the
+  dashboard list and the frontend resources) are reads.
+- One dashboard write: `lovelace/config/save` with exactly `{url_path, config}`, only inside
+  `approved_dashboard_write(<url_path>, generated=...)`, which `dashboards.DashboardWriter` enters after
+  it consumed the admin's approval of that dashboard's plan (or, to restore it, after a failed save of
+  that approved plan). Single use, for that one url_path, closed when the block ends; never the default
+  dashboard, a malformed url_path or one the house profile marks as generated.
 
 Proposals (the only path that writes the config repository) are checked by `self_path`, and update
 jobs by `check_update`.
@@ -109,6 +115,72 @@ def approved_os_flow(path: str) -> Iterator[None]:
     finally:
         scope.close()
         _OS_FLOW.reset(token)
+
+
+# Home Assistant's rule for a storage dashboard's url_path: lower case, with a hyphen. The default dashboard
+# has none and is never written.
+DASHBOARD_PATH_RE = re.compile(r"[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+")
+LOVELACE_SAVE = "lovelace/config/save"
+
+
+class _DashboardScope:
+    """One approved dashboard save: single use, for one url_path, closed when its `with` block ends."""
+
+    def __init__(self, url_path: str) -> None:
+        self.url_path = url_path
+        self._lock = threading.Lock()
+        self._open = True
+
+    def take(self, url_path: Any) -> bool:
+        with self._lock:
+            if not self._open or url_path != self.url_path:
+                return False
+            self._open = False
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._open = False
+
+
+_DASHBOARD: ContextVar[_DashboardScope | None] = ContextVar("opsd_selfguard_dashboard", default=None)
+
+
+def dashboard_unwritable(url_path: Any, generated: frozenset[str]) -> str | None:
+    """Why the agent may never write this dashboard (the default one, a malformed path, a generated one), or None."""
+    if not isinstance(url_path, str) or not url_path:
+        return "the default dashboard is never written by the agent"
+    if len(url_path) > 100 or not DASHBOARD_PATH_RE.fullmatch(url_path):
+        return f"{url_path[:60]!r} is not a dashboard url_path"
+    if url_path in generated:
+        return f"{url_path} is generated (dashboards.generated in the house profile): change what writes it instead"
+    return None
+
+
+@contextlib.contextmanager
+def approved_dashboard_write(url_path: str, *, generated: frozenset[str]) -> Iterator[None]:
+    """Let exactly one `lovelace/config/save` for `url_path` through, for the calls made inside.
+
+    Only `dashboards.DashboardWriter` enters it, after it consumed the admin's approval of that dashboard's plan.
+    """
+    problem = dashboard_unwritable(url_path, generated)
+    if problem is not None:
+        raise SelfTargetError(problem)
+    scope = _DashboardScope(url_path)
+    token = _DASHBOARD.set(scope)
+    try:
+        yield
+    finally:
+        scope.close()
+        _DASHBOARD.reset(token)
+
+
+def _dashboard_save_allows(data: Mapping[str, Any]) -> bool:
+    """True once for the save the current approved scope names, with exactly a url_path and a config mapping."""
+    scope = _DASHBOARD.get()
+    if scope is None or set(data) != {"url_path", "config"} or not isinstance(data.get("config"), Mapping):
+        return False
+    return scope.take(data.get("url_path"))
 
 
 def _os_flow_allows(path: str, body: Any) -> bool:
@@ -222,6 +294,7 @@ WS_COMMANDS = frozenset({
     "config/auth/list", "repairs/list_issues", "system_log/list", "homeassistant/expose_entity/list",
     "hacs/repository/info", "update/release_notes", "history/history_during_period",
     "recorder/statistics_during_period", "vacuum/get_segments", "input_boolean/list", "input_boolean/create",
+    "lovelace/config", "lovelace/dashboards/list", "lovelace/resources",
 })  # fmt: skip
 
 
@@ -230,16 +303,25 @@ def check_ws(msg_type: str, fields: Mapping[str, Any] | None = None) -> None:
     kind = str(msg_type)
     # `id` numbers the message on the connection; it is not an argument.
     data = {k: v for k, v in (fields or {}).items() if k != "id"}
+    if kind == LOVELACE_SAVE:
+        if not _dashboard_save_allows(data):
+            raise SelfTargetError(f"websocket {kind}: refused (only the approved dashboard plan's one save)")
+        return
     if kind not in WS_COMMANDS:
         raise SelfTargetError(f"websocket {kind[:60]!r}: refused (not a command the agent sends)")
     pinned = {
         "subscribe_events": {"event_type": INBOUND_EVENT},
         "subscribe_trigger": {"trigger": {"platform": "state", "entity_id": AI_SWITCH_ENTITY}},
+        "lovelace/dashboards/list": {},
+        "lovelace/resources": {},
     }.get(kind)
     if pinned is not None and data != pinned:
         raise SelfTargetError(f"websocket {kind}: refused (only the agent's own subscription)")
     if kind == "input_boolean/create" and data.get("name") != AI_SWITCH_NAME:
         raise SelfTargetError("websocket input_boolean/create: only the agent's AI switch")
+    if kind == "lovelace/config" and not set(data) <= {"url_path"}:
+        # A read; `force` and anything else are not arguments the agent sends.
+        raise SelfTargetError("websocket lovelace/config: only a url_path")
 
 
 def check_update(entity_id: str, kind: str, slug: str | None = None, title: str | None = None) -> None:

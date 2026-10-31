@@ -474,6 +474,19 @@ REGISTRY: tuple[Capability, ...] = (
         origins=frozenset({Origin.AGENT_SELF}),
         internal=True,
     ),
+    # Saves one storage dashboard named in a migration plan the admin approved (opsd.dashboards): a backup of its
+    # JSON first, a read-back, and a restore on failure. Approval-only and daemon-internal; the self-guard lets
+    # exactly that one save through and never one of a dashboard the profile marks as generated.
+    Capability(
+        "dashboard.save",
+        "dashboard-save",
+        "save one storage dashboard as the approved migration plan shows it",
+        "opsd.dashboards:exec_internal",
+        tier=PolicyTier.APPROVE,
+        effects=frozenset({Effect.MUTATE_HA}),
+        origins=frozenset({Origin.AGENT_SELF}),
+        internal=True,
+    ),
     # Update executors: daemon-internal, never offered to Claude.
     Capability(
         "backup.create",

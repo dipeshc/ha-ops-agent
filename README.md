@@ -36,32 +36,17 @@ plain, tested code for everything that acts.
 - **Config changes as proposals (optional, needs git).** If your
   configuration is a git repository, the agent can propose changes to
   automations, alerts and templates as commits that only you can apply.
-
-### Maintenance ahead
-
-Home Assistant announces deprecations several releases before it removes
-something. The agent reads the signals that concern your install: repairs
-(the main one, especially those with a "breaks in" version), deprecation
-warnings in the Core log, the release notes of recent and upcoming
-releases, archived HACS repositories, and Core integrations that now cover
-a custom one. It matches them against what you use (integrations, YAML,
-custom integrations, dashboard cards, add-ons) and keeps one item for each:
-
-- **Deprecation ahead**: what is affected, when it is removed, how many
-  releases are left, and a plan. It asks you only once the removal is two
-  releases away or closer; until then it waits quietly under *Coming up*.
-- **Replacement candidate**: a Core integration that may replace a custom
-  one, with what it covers, what the entity ids change means and the risk.
-  Always a plan for you, never automatic.
-- **Suggestion**: shown under *Suggestions*, never pushed.
-
-Nothing fixes itself. With git on, a YAML migration is a one-tap proposal;
-otherwise the plan lists the lines to change. A dashboard migration is a
-plan you approve: the daemon backs up the dashboard, saves the change,
-reads it back and restores the backup if anything differs. It never edits
-a YAML-mode dashboard or one listed under `dashboards.generated` in your
-profile. A Core update that would remove something you still use always
-asks.
+- **Maintenance ahead.** Home Assistant announces deprecations several
+  releases before it removes something. The agent matches repairs, Core log
+  warnings, release notes, archived HACS repositories and Core integrations
+  that now cover a custom one against what you use, and keeps one item for
+  each with the removal version and a plan. It asks you only once a removal
+  is two releases away; replacement candidates and suggestions wait under
+  *Suggestions*. With git on, a YAML migration is a one-tap proposal. A
+  dashboard migration is a plan you approve: the agent backs the dashboard
+  up, saves the change, reads it back and restores the backup if anything
+  differs. A Core update that would remove something you still use always
+  asks.
 
 Everything it does is an *item* on the panel's Home page, with its history.
 It pushes only when an item needs you, when Home Assistant is down, or when

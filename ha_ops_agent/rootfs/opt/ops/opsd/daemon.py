@@ -181,7 +181,7 @@ def _unsent(baseline: Baseline, items: list[Item], outcome: str | None) -> Basel
 
 
 def fallback_push(items: list[Item], now: datetime | None = None) -> Message | None:
-    """A deterministic summary when Claude could not triage (or skipped a critical item)."""
+    """A deterministic summary when the AI could not triage (or skipped a critical item)."""
     at = now or datetime.now(UTC)
     notable = [i for i in items if i.severity in ("critical", "warning") and not waits_quietly(i, at)]
     if not notable:
@@ -244,7 +244,7 @@ class Daemon:
         try:
             self.store, recovered = Store.open_or_recover(paths.store_file)
         except StoreUnavailable as err:
-            # Degraded: deterministic checks and safety pushes go on; Claude, quotas,
+            # Degraded: deterministic checks and safety pushes go on; the AI, quotas,
             # audit-dependent capabilities and inbound events are off until fixed.
             self.store_error = str(err)[:300]
             _LOGGER.critical("store unavailable; running degraded", extra={"error": self.store_error})
@@ -274,7 +274,7 @@ class Daemon:
         self.hub = Hub()
         self._started_at = datetime.now(UTC)
         self._last_overdue_request: datetime | None = None
-        # Claude only ever runs as the unprivileged ops user; tests on a
+        # The AI only ever runs as the unprivileged ops user; tests on a
         # developer machine turn this off.
         self.require_privsep = True
         self.selftest: SelfTest | None = None
@@ -668,7 +668,7 @@ class Daemon:
         if options.llm.provider == "none":
             provider = "AI is off: llm.provider is none"
         elif not claude_token(options, self.paths):
-            provider = "AI is off: no Claude token configured"
+            provider = "AI is off: no AI token configured"
         if not (options.all_problems or provider):
             return None
         return {
@@ -909,7 +909,7 @@ class Daemon:
         baseline = _unsent(advance(baseline, snapshot, now), pushed, pushed_outcome)
         by_key = {i.key: i for i in items}
         acked: set[str] = set()
-        # In-run acks were validated when Claude made them.
+        # In-run acks were validated when the AI made them.
         for ack in effects.acks:
             baseline = apply_ack(
                 baseline, by_key[ack.key], reason=ack.reason, days=ack.days, accept=ack.accept, now=now
@@ -962,7 +962,7 @@ class Daemon:
         """The deterministic safety net.
 
         Critical items ALWAYS produce a deterministic urgent push from the
-        reserved safety bucket, whatever Claude did or said. Without a usable
+        reserved safety bucket, whatever the AI did or said. Without a usable
         triage, warnings get a non-urgent deterministic summary.
         """
         outcomes: list[str] = []
@@ -1291,7 +1291,7 @@ class Daemon:
             await self.publish_status("failed")
         finally:
             self._complete_task(event, payload={"trigger": "daily"})
-            # Daily retention, also when no Claude run happened.
+            # Daily retention, also when no AI run happened.
             self.runner.prune(datetime.now(UTC))
 
     async def _updates_upkeep(self, *, before_check: bool) -> None:
@@ -1571,7 +1571,7 @@ class Daemon:
         return server
 
     async def run_selftest(self) -> SelfTest:
-        """Prove the privilege boundary live; Claude is blocked until this passes."""
+        """Prove the privilege boundary live; the AI is blocked until this passes."""
         result = await asyncio.to_thread(run_selftest, self.paths, daemon_pid=os.getpid())
         self.selftest = result
         write_json_atomic(self.paths.data / "selftest.json", result.to_json())
@@ -1686,7 +1686,7 @@ class Daemon:
         """Degraded start: tell the admin once, from the safety budget."""
         message = Message(
             "Ops Agent: agent degraded",
-            "The Ops Agent cannot open its store (/data/ops.db) and is running without Claude triage, "
+            "The Ops Agent cannot open its store (/data/ops.db) and is running without AI triage, "
             f"capability calls and inbound events. Health checks and safety alerts continue. Error: {self.store_error}",
             urgent=True,
             budget_class=BudgetClass.SAFETY,

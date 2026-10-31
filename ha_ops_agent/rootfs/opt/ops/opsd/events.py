@@ -5,7 +5,7 @@ from the admin's phone) becomes an `Event` on one bounded priority queue.
 The queue drops duplicates of an event that is still pending or in flight
 (`dedupe_key`), so a burst of triggers cannot stack runs. The dispatcher
 hands each event to its handler as a task, so a long health check does not
-hold up later events; the single Claude slot is enforced by the agent
+hold up later events; the single AI slot is enforced by the agent
 runner, not here.
 
 The scheduler is driven by the store: it claims due tasks with a
@@ -14,7 +14,7 @@ compare-and-set (a task fires once even across restarts), turns them into
 
 Deterministic safety alerts (Core down, critical items) do not depend on
 any of this: the liveness loop pushes directly, and the health handler's
-safety push does not depend on Claude.
+safety push does not depend on the AI.
 """
 
 import asyncio

@@ -1,4 +1,4 @@
-"""The one budget for Claude runs.
+"""The one budget for AI runs.
 
 What bounds use deterministically: a daily run cap per profile, each run's
 `--max-turns`, and its timeout (the run time it reserved). On top of that,
@@ -15,7 +15,7 @@ the agent's share of each subscription window (5-hour, 7-day) stays under
   reports, else pro, the smallest), and run time per window is capped at
   the same share.
 
-A run reserves its share in one store transaction before Claude starts; the
+A run reserves its share in one store transaction before the AI starts; the
 reservation is replaced by the actual figures when it ends. The kill switch
 and the usage-limit backoff are in `aicontrol`.
 """

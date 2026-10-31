@@ -18,7 +18,7 @@ from opsd.selfguard import SELF_SLUG
 _LOGGER = logging.getLogger(__name__)
 
 # Daily caps per bucket. "safety" (deterministic daemon pushes: critical items,
-# Core down, the kill switch) has its own reserve that Claude's pushes cannot use
+# Core down, the kill switch) has its own reserve that the AI's pushes cannot use
 # up. "user" (answers to the admin's own messages) has its own budget so chat and
 # the agent's pushes cannot starve each other. "normal" (everything else, Needs
 # you included) is capped by `notify.max_pushes_per_day`.

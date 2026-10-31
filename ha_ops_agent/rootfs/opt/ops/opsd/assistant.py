@@ -29,7 +29,7 @@
   is killed. Steps are normal runs under every usage cap; a blocked step
   waits for the block to lift (at most three times) and then stops.
 
-Chat and follow-ups run one at a time, so they wait for the single Claude
+Chat and follow-ups run one at a time, so they wait for the single AI
 slot without holding dispatcher slots, and a flood of replies cannot crowd
 out the health check. Limits: 30 chat turns and 20 chat runs a day, the
 `user` budget class, 3 follow-up runs a day, 30 manual retries a day.
@@ -861,7 +861,7 @@ class Assistant:
                                             context=self._context_text())  # fmt: skip
         self._investigating[thread] = card.id
         try:
-            # Checked again once the Claude slot is held: a cancel while waiting never starts the step.
+            # Checked again once the AI slot is held: a cancel while waiting never starts the step.
             outcome = await self.runner.run_agent(
                 INVESTIGATE, redactor.redact(prompt), principal=_principal(task), now=now, redactor=redactor,
                 thread_id=thread, generation=task.generation, wait_s=CHAT_WAIT_S,

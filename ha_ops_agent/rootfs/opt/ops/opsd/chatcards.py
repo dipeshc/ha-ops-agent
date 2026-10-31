@@ -31,8 +31,8 @@ _TEXT: dict[str, str] = {
     "share_reserve": "Saving budget for monitoring: chat has used half of the agent's {window} share, and the rest"
     " is kept for health checks and update reviews.",
     "run_cap_reached": "Today's limit for chat runs is reached.",
-    "usage_limited": "Claude reported a usage limit, so the agent is backing off.",
-    "account_busy": "Your Claude subscription is near its limit from other use, so the agent yields.",
+    "usage_limited": "The AI provider reported a usage limit, so the agent is backing off.",
+    "account_busy": "Your AI subscription is near its limit from other use, so the agent yields.",
     "skipped_busy": "The agent was busy with another run for too long.",
     "chat_cap": "Today's chat limit ({limit} messages) is reached.",
     "busy": "Not sent: the agent's queue is full.",

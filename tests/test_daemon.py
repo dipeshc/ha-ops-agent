@@ -1,4 +1,4 @@
-"""End-to-end health cycles against the fake HA, with Claude stubbed."""
+"""End-to-end health cycles against the fake HA, with the AI stubbed."""
 
 import asyncio
 import json
@@ -58,7 +58,7 @@ class Harness:
             kwargs["core_release_age"] = lambda v: 9.0
             return await original_collect(api, *args, **kwargs)
 
-        # Called during a fake run, as Claude calling opsctl would (raw request lines).
+        # Called during a fake run, as the AI calling opsctl would (raw request lines).
         self.in_run_requests: list[dict[str, Any]] = []
         self.in_run_responses: list[dict[str, Any]] = []
         self.current: Daemon | None = None
@@ -137,10 +137,10 @@ async def test_broken_custom_integration_runs_claude_and_notifies(h: Harness) ->
     outcome = await h.daemon().health_cycle("daily")
     assert len(h.claude_calls) == 1 and "entities:acme_solar" in h.claude_calls[0]
     assert "hunter22secret" not in h.claude_calls[0]
-    assert h.exports, "Claude must run in the export, not the live config"
+    assert h.exports, "The AI must run in the export, not the live config"
     claude_push, safety = h.pushes()[-2:]
     assert claude_push["title"] == "Agent: Acme Solar down" and claude_push["data"]["tag"] == "ha-ops-agent"
-    # The deterministic safety push always fires for critical items, even after Claude's urgent push.
+    # The deterministic safety push always fires for critical items, even after the AI's urgent push.
     assert safety["title"] == "Ops Agent: critical" and safety["data"]["push"] == {
         "interruption-level": "time-sensitive"
     }
@@ -223,7 +223,7 @@ async def test_non_urgent_claude_push_does_not_suppress_critical(h: Harness) -> 
     baseline = read_json(h.paths.baseline_file, {})
     ack = baseline["acks"]["entities:acme_solar"]
     assert ack["accepted"] is False and ack["by"] == "claude"
-    assert "light.kitchen" not in baseline["unavailable"]  # Claude cannot accept critical
+    assert "light.kitchen" not in baseline["unavailable"]  # the AI cannot accept critical
 
 
 async def test_rate_limited_claude_push_still_gets_safety_net(h: Harness) -> None:
@@ -384,7 +384,7 @@ async def test_privsep_run_drops_to_ops(h: Harness, monkeypatch: pytest.MonkeyPa
     d.runner.ops_account = lambda: Account(1001, 1002, frozenset({1002}))
     d.runner.isolation_problems = lambda paths, account: []
     d.require_privsep = True
-    # Without a passing live self-test Claude is blocked.
+    # Without a passing live self-test the AI is blocked.
     assert (await d.health_cycle("daily")).result == "isolation_failed" and seen == []
     from opsd.selftest import Check, SelfTest
 
@@ -514,7 +514,7 @@ async def test_in_run_effects(h: Harness) -> None:
     assert [r["ok"] for r in h.in_run_responses] == [True, True, True, True, False]
     assert "accept refused" in h.in_run_responses[2]["output"]
     titles = [p["title"] for p in h.pushes()]
-    # Claude's in-run push, then the deterministic safety push.
+    # The AI's in-run push, then the deterministic safety push.
     assert titles[-2:] == ["Agent: Acme Solar down", "Ops Agent: critical"]
     baseline = read_json(h.paths.baseline_file, {})
     assert baseline["acks"]["entities:acme_solar"]["by"] == "claude"
@@ -776,7 +776,7 @@ async def test_degraded_without_store(h: Harness, monkeypatch: pytest.MonkeyPatc
     await d.health_cycle("catch_up")
     h.fake.config_ok = False
     outcome = await d.health_cycle("daily")
-    # No Claude without the ledger and audit log; the safety push still goes out.
+    # No AI run without the ledger and audit log; the safety push still goes out.
     assert outcome.result == "store_unavailable" and h.claude_calls == []
     assert h.pushes()[-1]["title"] == "Ops Agent: critical"
     assert not d.request_cycle("manual") and d.request_cycle("core_recovered")

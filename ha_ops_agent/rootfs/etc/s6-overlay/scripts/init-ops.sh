@@ -8,7 +8,7 @@ umask 077
 mkdir -p /data/secrets /data/ssh /data/runs /data/snapshots /run/ops
 
 # Everything the daemon keeps is root-only; `ops` may only traverse /data to
-# reach its own Claude config directory.
+# reach its own AI client config directory.
 chmod 0711 /data
 find /data -mindepth 1 -maxdepth 1 ! -name claude-ops -exec chmod go-rwx {} +
 mkdir -p /data/claude-ops/home
@@ -25,7 +25,7 @@ if [[ -d /run/s6/container_environment ]]; then
   chmod 0700 /run/s6/container_environment
 fi
 
-# Claude's read-only export (root-owned) and the opsctl socket (root:ops).
+# The AI's read-only export (root-owned) and the opsctl socket (root:ops).
 install -d -o root -g root -m 0755 /run/ops-claude
 install -d -o root -g ops -m 0750 /run/ops-sock
 # Proposal drafts: the daemon recreates this per chat/investigation run, owned by ops.

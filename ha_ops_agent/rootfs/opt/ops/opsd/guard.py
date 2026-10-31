@@ -1,7 +1,7 @@
-"""PreToolUse hook: a positive allowlist over every tool call Claude makes.
+"""PreToolUse hook: a positive allowlist over every tool call the AI makes.
 
 This is defence in depth. The real boundary is the OS (see `privsep.py`):
-Claude runs as the unprivileged `ops` user inside a read-only export of the
+The AI runs as the unprivileged `ops` user inside a read-only export of the
 tracked config and cannot reach the HA config, /data or any token.
 
 On top of that, the hook denies everything except `opsctl <verb> ...` (a
@@ -13,7 +13,7 @@ NUL bytes or an internal error deny with exit code 2. A *timed-out* hook
 does not block in Claude Code (the call falls through to the permission
 rules), so the hook does no I/O beyond `realpath` and one appended line and
 finishes in milliseconds; the managed deny rules and the OS boundary cover
-the rest. That line (`DECISIONS_FILE` in Claude's state directory: the tool
+the rest. That line (`DECISIONS_FILE` in Claude Code's state directory: the tool
 call id, the tool and the verdict) lets the daemon notice a call the hook
 never decided (a timeout or crash) after the run.
 """
@@ -32,7 +32,7 @@ from opsd.capabilities import cli_verbs
 from opsd.changepaths import DRAFTS_DIR, MAX_FILE_BYTES, ProposalRules, allowed_path
 from opsd.selfguard import self_path
 
-# Claude's whole world: the read-only export of tracked, secret-free config.
+# The AI's whole world: the read-only export of tracked, secret-free config.
 HA = PurePosixPath(os.environ.get("OPS_EXPORT_DIR", "/run/ops-claude/config"))
 ALLOWED_TOOLS = frozenset({"Read", "Grep", "Glob", "Bash", "TodoWrite", "StructuredOutput", "Write"})
 DRAFTS = PurePosixPath(os.environ.get("OPS_DRAFTS_DIR", DRAFTS_DIR))
@@ -46,7 +46,7 @@ READ_FILES = frozenset({"README.md"})
 DENY_FILES = frozenset({"secrets.yaml", "secrets.yml", "ip_bans.yaml", "known_devices.yaml"})
 # Directories never read, exported or named as a house document, in any letter case.
 DENY_DIRS = frozenset({"secrets"})
-# The house profile's extra documents for this run (set by the daemon in Claude's environment).
+# The house profile's extra documents for this run (set by the daemon in the AI's environment).
 READ_ENV = "OPS_READ_EXTRA"
 _READ_ENTRY = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9_-]{0,63}/){0,3}[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _UNQUOTED_FORBIDDEN = set(";&|`$<>\\(){}*?[]!#\n\r")
@@ -110,7 +110,7 @@ def valid_read_entry(entry: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class Reads:
-    """What Claude may read: the base lists plus the house profile's valid documents."""
+    """What the AI may read: the base lists plus the house profile's valid documents."""
 
     files: frozenset[str] = READ_FILES
     dirs: frozenset[str] = frozenset(READ_DIRS)

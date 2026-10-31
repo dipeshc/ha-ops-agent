@@ -1,6 +1,6 @@
-"""Read-only git history for Claude, with fixed argv and path filtering.
+"""Read-only git history for the AI, with fixed argv and path filtering.
 
-Claude never runs git itself. These functions accept only:
+The AI never runs git itself. These functions accept only:
 - revisions matching `HEAD` or a hex sha, with an optional `~N` or `^`
   suffix, resolved to a commit (blob and tree ids are refused);
 - ranges `A..B` of such revisions;
@@ -24,7 +24,7 @@ TIMEOUT_S = 30
 
 
 class HistoryError(ValueError):
-    """Invalid input or a git failure, safe to show to Claude."""
+    """Invalid input or a git failure, safe to show to the AI."""
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -55,7 +55,7 @@ def resolve_commit(repo: Path, rev: str) -> str:
 
 
 def check_path(repo: Path, value: str, reads: Reads | None = None) -> str:
-    """A repo-relative path or directory that Claude may see."""
+    """A repo-relative path or directory that the AI may see."""
     if not PATH_RE.fullmatch(value) or ".." in value.split("/") or "//" in value:
         raise HistoryError(f"invalid path {value!r}")
     if not searchable(str(PurePosixPath(repo) / value), PurePosixPath(repo), reads):

@@ -617,7 +617,7 @@ async def test_chat_proposes_from_a_draft_and_cannot_apply(h: Any) -> None:  # n
     original = d.runner.run_claude
 
     async def writes_draft(cfg: Any, prompt: str, **kwargs: Any) -> Any:
-        # What Claude's Write tool does: the run's drafts directory exists and is empty.
+        # What the AI's Write tool does: the run's drafts directory exists and is empty.
         assert cfg.tools.endswith(",Write")
         # Empty but for the allowlisted directories (no draft ever needs a mkdir).
         assert sorted(d.name for d in h.paths.drafts_dir.iterdir()) == ["alerts", "automations", "docs", "templates"]

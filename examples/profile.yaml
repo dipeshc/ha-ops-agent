@@ -7,7 +7,7 @@
 # The schema is strict. An unknown key or a bad value refuses the whole file, and the agent then
 # fails closed (observe only, no automatic updates, no AI) until you fix it; the reason is on the
 # panel's System sheet. Nothing here can weaken a safety rule: fragile pieces only hold updates
-# back, reload.deny only adds to the never-reload list, and house_notes reach Claude as data.
+# back, reload.deny only adds to the never-reload list, and house_notes reach the agent as data.
 
 # Push target when the add-on option notify.service is empty: your Companion app's notify service.
 notify_service: mobile_app_my_phone
@@ -22,7 +22,8 @@ updates:
   # Update entities that always ask you, on top of the add-on option updates.need_approval.
   need_approval:
     - update.my_dashboard_card_update
-  # Entities that must still be available after an update; if one is not, the update rolls back.
+  # Entities that must still be available after an update. If one is not, a Core or HACS update
+  # rolls back; an add-on, HAOS or firmware update is escalated to you.
   watched_entities:
     - lock.front_door
     - alarm_control_panel.home
@@ -61,13 +62,13 @@ git:
   # What the agent may propose: automations, alerts, templates.
   proposals: [automations, templates]
 
-# Documents Claude reads first, relative to the configuration directory (never under ops/).
+# Documents the agent reads first, relative to the configuration directory (never under ops/).
 docs:
   runbook: RUNBOOK.md
   facts: docs/facts.md
   readable: [docs]
 
-# Background for Claude, in plain words. It is data: it cannot grant the agent anything.
+# Background for the agent, in plain words. It is data: it cannot grant the agent anything.
 house_notes: |
   - The heating is the one system that must keep working in winter.
   - The garden speaker is unplugged from November to March.

@@ -1,7 +1,7 @@
-"""Whether Claude may run right now: the kill switch and the usage-limit backoff.
+"""Whether the AI may run right now: the kill switch and the usage-limit backoff.
 
 - Kill switch: the UI helper `input_boolean.ops_agent_ai_enabled` (created
-  by the daemon over the websocket, no YAML). Off stops the running Claude
+  by the daemon over the websocket, no YAML). Off stops the running AI
   process and refuses new runs. Deterministic health checks, liveness and
   safety pushes never consult it.
   Turning it on counts only when the verified admin did it (the state's
@@ -86,7 +86,7 @@ class AiControl:
         return datetime.fromisoformat(raw) if raw else None
 
     def refusal(self, now: datetime) -> str | None:
-        """Why Claude may not start now, or None."""
+        """Why the AI may not start now, or None."""
         if self.switch == "off" or (self.switch != "on" and self.helper_created):
             return "ai_disabled"
         until = self.backoff_until()

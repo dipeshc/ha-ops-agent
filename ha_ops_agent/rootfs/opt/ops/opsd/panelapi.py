@@ -712,7 +712,7 @@ class PanelHandlers:
         return status, {"ok": True} if status == 200 else {"error": result}
 
     async def remember(self, thread: str, body: dict[str, Any], user: str) -> Result:
-        """A house fact, proposed as a git change to the house facts document (applied only after both factors).
+        """A house fact, proposed as a git change to the house facts document (applied once the admin approves it).
 
         Without git or a facts document (house profile) the fact is kept in the store and the proposal is refused.
         """

@@ -252,7 +252,7 @@ async def test_assist_exposure_is_critical_until_the_admin_accepts(
     assert baseline.accepted_exposures == []
     [item] = [i for i in diff(snap, baseline, NOW) if i.kind == "assist_exposure"]
     assert item.key == "assist:lock.front" and item.severity == "critical"
-    # Claude cannot accept it; the admin can.
+    # The AI cannot accept it; the admin can.
     claude = apply_ack(baseline, item, reason="fine", days=30, accept=True, now=NOW)
     assert claude.accepted_exposures == [] and claude.acks[item.key]["accepted"] is False
     user = apply_ack(seed(snap, NOW), item, reason="intended", days=30, accept=True, now=NOW, by="user")

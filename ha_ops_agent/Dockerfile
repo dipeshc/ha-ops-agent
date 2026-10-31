@@ -42,13 +42,13 @@ RUN apk add --no-cache \
     && apk add --no-cache "claude-code=${CLAUDE_CODE_VERSION}" \
     && claude --version
 
-# Claude Code runs as this unprivileged account (no sudo, no shell).
+# The AI runs as this unprivileged account (no sudo, no shell).
 RUN addgroup -S -g 1001 ops \
     && adduser -S -D -H -u 1001 -G ops -s /sbin/nologin -h /data/claude-ops/home ops
 
 COPY rootfs /
 
-# No setuid/setgid binaries: nothing Claude starts can regain privileges.
+# No setuid/setgid binaries: nothing the AI starts can regain privileges.
 RUN find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 
 RUN chmod 0755 /opt/ops/bin/* /etc/s6-overlay/scripts/*.sh \

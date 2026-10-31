@@ -1,4 +1,4 @@
-"""Unix-socket RPC between Claude's `opsctl` (unprivileged) and the daemon.
+"""Unix-socket RPC between the AI's `opsctl` (unprivileged) and the daemon.
 
 The socket is owned root:ops, mode 0660, in a root:ops 0750 directory. Each
 connection carries one newline-terminated JSON request `{"verb": ..., "args":
@@ -10,7 +10,7 @@ in the store whatever its outcome (rejections are rate-limited so a flood
 cannot fill the disk):
 
 1. Peer: the uid must be `ops` (SO_PEERCRED); root is refused.
-2. Binding: an `ops` caller must be a descendant of the active Claude run's
+2. Binding: an `ops` caller must be a descendant of the active AI run's
    process; it is then bound to that run's `RunContext` (principal,
    profile, hand-off). With no active run an `ops` caller is refused.
 3. Schema: the capability registry validates verb and arguments strictly.
@@ -198,7 +198,7 @@ class RpcServer:
         self._active = None
 
     def _peer_allowed(self, peer: Peer) -> bool:
-        """Only the configured uids, never root: nothing but a Claude run uses the socket."""
+        """Only the configured uids, never root: nothing but an AI run uses the socket."""
         if self._allowed_uids is None:
             # Developer machine or in-process call: no uid separation to enforce.
             return True

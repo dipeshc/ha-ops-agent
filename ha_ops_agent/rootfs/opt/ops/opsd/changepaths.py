@@ -21,7 +21,7 @@ SUPPRESS_PATH = "docs/known-false-positives.yaml"
 MAX_FILES = 3
 MAX_FILE_BYTES = 64 * 1024
 DRAFTS_DIR = "/run/ops-drafts"
-# The run's proposal rules for the guard hook (set by the daemon in Claude's environment).
+# The run's proposal rules for the guard hook (set by the daemon in the AI's environment).
 KINDS_ENV = "OPS_PROPOSAL_KINDS"
 FACTS_ENV = "OPS_FACTS_PATH"
 

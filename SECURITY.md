@@ -19,14 +19,15 @@ In scope: anything in this repository, in particular a way to
   should ask (an update, a config change, a reboot);
 - make it operate, or reload the integration of, a lock, an alarm panel, a
   garage door or anything else that opens the house;
-- let the Claude process escape its unprivileged account, read the
+- let the AI process escape its unprivileged account, read the
   Supervisor token, `/data`, the live config or backups, or call the
   Supervisor or Core directly;
 - make the agent change itself, the Supervisor or the host outside the
   approved operating-system update flow;
 - turn untrusted text (device names, logs, release notes, chat messages)
   into instructions the agent follows;
-- reach the panel's actions as someone other than a Home Assistant admin,
+- reach the panel's actions as someone other than the admin (the owner of
+  the push device),
   or forge an approval;
 - leak a secret into a log, a push, a chat reply, git or the diagnostics
   export.

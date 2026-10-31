@@ -1,4 +1,4 @@
-"""Usage observability and the kill switch for Claude runs.
+"""Usage observability and the kill switch for AI runs.
 
 - Sensors (REST-set like `sensor.ops_agent`, re-published with it):
   `sensor.ops_agent_ai` (state: enabled or why AI is blocked; attributes:
@@ -6,12 +6,12 @@
   runs and tokens today per profile, the last run) and
   `sensor.ops_agent_runs_today` (`state_class: total` with a daily
   `last_reset`, so HA long-term statistics work).
-- Deterministic notices (never written by Claude), at most once per reason
+- Deterministic notices (never written by the AI), at most once per reason
   per day, only when the kill switch was refused or recreated (a run held by
   the budget is shown in the panel and the chat card, never pushed).
 - Kill switch: `input_boolean.ops_agent_ai_enabled`, created through the
   websocket if missing (no YAML), watched on the daemon's one Core
-  websocket. Off stops the running Claude process at once.
+  websocket. Off stops the running AI process at once.
 """
 
 import asyncio
@@ -39,7 +39,7 @@ NOTICE_TAG = "ha-ops-usage"
 _SWITCH_ID = SWITCH_ENTITY.split(".", 1)[1]
 _REASONS = {
     "ai_disabled": "the AI kill switch is off",
-    "usage_limited": "Claude reported a usage limit; waiting before trying again",
+    "usage_limited": "The AI provider reported a usage limit; waiting before trying again",
     "run_cap_reached": "today's run limit for this kind of run is reached",
     "share_cap": "the agent's share of the subscription window is used up",
     "share_reserve": "chat has used half of the agent's share; the rest is kept for monitoring",
@@ -126,7 +126,7 @@ class UsageGuard:
             ("sensor.ops_agent_ai", view["ai_state"], {**view, "friendly_name": "Ops Agent AI", "icon": "mdi:robot"}),
             ("sensor.ops_agent_runs_today", view["today"]["runs"],
              {"unit_of_measurement": "runs", "state_class": "total", "last_reset": reset,
-              "friendly_name": "Ops Agent Claude runs today"}),
+              "friendly_name": "Ops Agent AI runs today"}),
         ]  # fmt: skip
         for entity, state, attrs in sensors:
             try:

@@ -1,7 +1,7 @@
 """`approval.request`: a chat asks the admin to approve one update.
 
 A proposal is a highlight in the panel, never an approval. It names one
-APPROVE-tier update of the *stored* plan: Claude passes only the entity id,
+APPROVE-tier update of the *stored* plan: the AI passes only the entity id,
 and the versions, title and tier are looked up here from the latest plan
 run, so a model (or text injected into what it read) cannot choose them. It
 lives in its own table, so nothing in the approval state machine can read it

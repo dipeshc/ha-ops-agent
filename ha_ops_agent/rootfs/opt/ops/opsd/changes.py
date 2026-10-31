@@ -12,7 +12,7 @@ commit with git plumbing only (`hash-object`, `mktree`, `commit-tree`,
 working tree and the index are never touched, and the ref is never pushed.
 Five proposals a day, five open, seven days to live.
 
-Applying or reverting is never a capability Claude can call. The admin
+Applying or reverting is never a capability the AI can call. The admin
 approves it in the panel in one step (`approvals.py`, kind `change`),
 bound to the proposal's commit, base, file hashes and creation time. The
 daemon then, holding the git lock: re-checks the binding; refuses unless

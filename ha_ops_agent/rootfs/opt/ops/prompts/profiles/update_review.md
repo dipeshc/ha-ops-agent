@@ -1,8 +1,8 @@
 ## Mode: review tonight's automatic updates
 
-Tonight the daemon will install the updates in `<candidates>`. Before each
-one it makes a full backup. After each one it checks health and rolls back
-automatically if necessary. The update rule allows all of them: patches and
+Tonight the daemon will install the updates in `<candidates>`. Before the
+first one it makes one full backup for the run. After each one it checks
+health and rolls back automatically if necessary. The update rule allows all of them: patches and
 minors that have soaked, with no repair, Core breaking change or held
 version touching this house. Your task is a second opinion from their
 release notes: hold back the updates that the admin must approve instead.

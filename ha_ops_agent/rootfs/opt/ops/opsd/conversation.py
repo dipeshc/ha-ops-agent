@@ -1,4 +1,4 @@
-"""Chat and follow-up prompts, and validation of what Claude answers.
+"""Chat and follow-up prompts, and validation of what the AI answers.
 
 Everything the admin typed, earlier turns, task notes and model output is
 untrusted text. It is length-capped, stripped of control characters, and
@@ -263,7 +263,7 @@ _NO_REPLY: frozenset[str] = frozenset({"null", "none"})
 
 
 def validate_reply(raw: dict[str, Any] | None) -> tuple[str | None, str]:
-    """`(reply or None, summary)` from Claude's structured output; never trusted as-is."""
+    """`(reply or None, summary)` from the AI's structured output; never trusted as-is."""
     if not isinstance(raw, dict):
         return None, "no structured result"
     reply = raw.get("reply")

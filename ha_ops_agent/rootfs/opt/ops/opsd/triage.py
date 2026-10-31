@@ -1,4 +1,4 @@
-"""Hand-off prompt for Claude and validation of what it returns."""
+"""Hand-off prompt for the AI and validation of what it returns."""
 
 import json
 from dataclasses import dataclass, field

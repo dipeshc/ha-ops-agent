@@ -1,6 +1,6 @@
 """Read capabilities behind `opsctl`, executed inside the privileged daemon.
 
-Claude's `opsctl` is a thin client that sends a validated request over a
+The AI's `opsctl` is a thin client that sends a validated request over a
 unix socket (see `rpc.py`); these executors run in a worker thread with the
 daemon's privileges and its shared Supervisor client, receive typed `Args`
 from the capability registry, and return data that `rpc` redacts and

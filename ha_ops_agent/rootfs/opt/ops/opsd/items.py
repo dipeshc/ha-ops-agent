@@ -1098,7 +1098,7 @@ class ItemBook:
         return True
 
     def view(self, record: Mapping[str, Any], *, events: bool = False) -> dict[str, Any]:
-        """The contract's Item (`docs/panel-api.md`)."""
+        """The contract's Item (`docs/spec/panel.md`)."""
         out: dict[str, Any] = {k: record.get(k) for k in (
             "id", "key", "kind", "title", "state", "gist", "at", "quiet", "revision", "as_of", "needs_since",
             "resolved_at", "created_at", "updated_at", "need", "about", "actions", "phase", "facts", "agent",

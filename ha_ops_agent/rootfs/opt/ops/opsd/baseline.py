@@ -1,4 +1,4 @@
-"""Baseline of accepted state, and the diff that decides whether Claude runs."""
+"""Baseline of accepted state, and the diff that decides whether the AI runs."""
 
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -156,7 +156,7 @@ def diff(
     `remote_entity` are the house profile's optional state watches.
     `options_problems` (refused add-on option values) raise one item every
     check until they are fixed; `guard_anomalies` (tool calls the guard hook
-    never decided, or denials of calls it allowed, in a recent Claude run)
+    never decided, or denials of calls it allowed, in a recent AI run)
     raise one item while they are recent.
     """
     items: list[Item] = []
@@ -298,7 +298,7 @@ def diff(
                           + "; ".join(options_problems)[:400], {"problems": list(options_problems)}))  # fmt: skip
     if guard_anomalies:
         items.append(Item("guard:anomaly", "agent", "warning",
-                          "the guard hook check failed in a recent Claude run (did a Claude Code update change"
+                          "the guard hook check failed in a recent AI run (did a Claude Code update change"
                           f" behaviour?): {'; '.join(guard_anomalies)}"[:400],
                           {"anomalies": list(guard_anomalies)}))  # fmt: skip
     if backup_failure is not None:
@@ -539,7 +539,7 @@ def apply_ack(
 ) -> Baseline:
     """Ack an item for `days`; `accept` folds permanent conditions into the baseline.
 
-    Claude may only snooze a critical item for a few days and may never
+    The AI may only snooze a critical item for a few days and may never
     accept one; that takes the user (via the admin panel).
     """
     days = max(1, min(30, days))

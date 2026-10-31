@@ -1,4 +1,4 @@
-"""Single-run lock so health checks and Claude runs never overlap."""
+"""Single-run lock so health checks and AI runs never overlap."""
 
 import fcntl
 import os

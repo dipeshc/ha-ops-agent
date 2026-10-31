@@ -1,10 +1,10 @@
-"""Privilege separation: Claude runs as `ops` and sees only a filtered export.
+"""Privilege separation: the AI runs as `ops` and sees only a filtered export.
 
 The OS enforces the boundary, not the hook:
 - the HA config is mounted below `/mnt/ha` (root, 0700), so `ops` cannot
   traverse to it;
 - `/data` is 0711 and everything in it except `claude-ops/` is root-only;
-- Claude's cwd is `/run/ops-claude/config`, a root-owned, read-only copy of
+- the AI's cwd is `/run/ops-claude/config`, a root-owned, read-only copy of
   the files that pass the guard's readability rules (with the house profile's
   documents), rebuilt before every run: the tracked ones when git is on; when
   it is off, only a strict allowlist of config files on disk, each redacted
@@ -12,7 +12,7 @@ The OS enforces the boundary, not the hook:
 - the Supervisor token only exists in root processes' environments, which a
   different uid cannot read.
 `isolation_problems` re-checks the sensitive paths with the real permission
-bits before every Claude run; any exposure blocks the run.
+bits before every AI run; any exposure blocks the run.
 """
 
 import grp

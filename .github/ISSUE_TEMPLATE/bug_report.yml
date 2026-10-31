@@ -12,7 +12,7 @@ body:
     attributes:
       label: Add-on version
       description: Settings > Add-ons > HA Ops Agent, or the diagnostics export.
-      placeholder: "0.17.0"
+      placeholder: "0.18.0"
     validations:
       required: true
   - type: input

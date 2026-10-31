@@ -14,7 +14,16 @@ import pytest
 from opsd import dashboards, selfguard
 from opsd.approvals import Approvals
 from opsd.capabilities import CAPABILITIES, CapabilityError, RequestError, parse_request
-from opsd.dashboards import DashboardWriter, Edit, apply_edit, binding, card_types, digest, parse_edit
+from opsd.dashboards import (
+    DashboardWriter,
+    Edit,
+    apply_edit,
+    binding,
+    card_types,
+    digest,
+    parse_edit,
+    touches_protected,
+)
 from opsd.policy import PolicyTier
 from opsd.profile import parse_text
 from opsd.store import Store
@@ -126,9 +135,62 @@ def test_apply_edit_never_overwrites_a_key_that_already_has_the_new_name() -> No
     {"card_type": "custom:acme-gauge", "new_type": "custom:acme-gauge"},
     {"card_type": "custom:acme-gauge", "new_type": 3},
     "custom:acme-gauge",
+    # Never a card that embeds a page, renders text or runs custom code.
+    {"card_type": "picture", "new_type": "iframe"},
+    {"card_type": "entities", "new_type": "markdown"},
+    {"card_type": "entities", "new_type": "webpage"},
+    {"card_type": "entities", "new_type": "custom:acme-anything"},
+    # Never an action, navigation, service, URL or content option, from or to.
+    {"card_type": "picture", "renames": [{"old": "image", "new": "url"}]},
+    {"card_type": "button", "renames": [{"old": "hold_action", "new": "tap_action"}]},
+    {"card_type": "button", "renames": [{"old": "extra", "new": "data"}]},
+    {"card_type": "button", "renames": [{"old": "service", "new": "label"}]},
 ])  # fmt: skip
 def test_parse_edit_refuses_anything_off_the_narrow_shape(raw: Any) -> None:
     assert parse_edit(raw) is None
+
+
+def test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover() -> None:
+    for entity in ("lock.example_door", "alarm_control_panel.example_alarm", "cover.example_garage"):
+        board = {
+            "views": [
+                {
+                    "cards": [
+                        {"type": "custom:acme-gauge", "max_value": 1},
+                        {
+                            "type": "vertical-stack",
+                            "cards": [{"type": "custom:acme-gauge", "max_value": 2, "entities": [entity]}],
+                        },
+                    ]
+                }
+            ]
+        }
+        assert touches_protected(board, EDIT)
+        assert binding("0123456789abcdef", BOARD, board, EDIT) is None
+    # A lock elsewhere on the dashboard, on a card the edit does not target, does not block it.
+    board = {
+        "views": [
+            {
+                "cards": [
+                    {"type": "custom:acme-gauge", "max_value": 1},
+                    {"type": "entities", "entities": ["lock.example_door"]},
+                ]
+            }
+        ]
+    }
+    assert not touches_protected(board, EDIT) and binding("0123456789abcdef", BOARD, board, EDIT) is not None
+    # Not a prefix match inside another entity id.
+    assert not touches_protected({"cards": [{"type": "custom:acme-gauge", "entity": "sensor.unlock.x"}]}, EDIT)
+
+
+async def test_a_card_that_names_a_lock_after_the_approval_is_never_written(store: Store, tmp_path: Path) -> None:
+    fake = FakeLovelace()
+    dw = writer(store, tmp_path, fake)
+    approval = await approved(dw)
+    fake.boards[BOARD]["views"][0]["sections"][0]["cards"][0]["entity"] = "lock.example_door"
+    outcome = await dw.execute(approval)
+    assert outcome.state == "refused" and "lock" in outcome.detail and fake.saves == []
+    assert store.approval(approval)["state"] == "void"  # type: ignore[index]
 
 
 # ------------------------------------------------------------------ the guard

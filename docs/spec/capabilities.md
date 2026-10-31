@@ -98,8 +98,10 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   `opsd.dashboards:exec_internal`, which always refuses) is daemon-internal:
   tier APPROVE, effect `{MUTATE_HA}`, origin agent-self only, in no run
   profile's grant. The daemon saves one storage dashboard only through
-  `dashboards.DashboardWriter.execute`, after consuming the admin's
-  dashboard approval, in act mode, and refuses when `capabilities.never`
+  `dashboards.DashboardWriter.execute`, applying only the narrow edit of
+  [maintenance.md](maintenance.md) M18 (never to a card that names a lock,
+  alarm or cover entity), after consuming the admin's dashboard approval,
+  in act mode, and refuses when `capabilities.never`
   names `dashboard.save`; `capabilities.require_approval` cannot loosen
   it. The save itself passes the self-guard only inside its approved scope
   ([selfguard.md](selfguard.md) G8). See [maintenance.md](maintenance.md)

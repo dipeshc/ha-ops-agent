@@ -144,12 +144,23 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   itself names, never a YAML-mode, default or generated one. The edit is
   deterministic and narrow (`dashboards.Edit`): on every card of one type,
   rename option keys (at most 8, never `type`) and optionally change the
-  card type; a key whose new name exists is left alone. The item shows the
+  card type; a key whose new name exists is left alone. An edit is refused
+  (the plan stays text only, with no executable edit) when its new type is
+  `iframe`, `markdown`, `webpage` or any `custom:` card, when a rename's
+  source or target is `tap_action`, `hold_action`, `double_tap_action`,
+  `confirmation`, `url`, `image`, `content`, `navigation_path`, `action`,
+  `service`, `perform_action`, `data` or `target` (`DENY_OPTIONS`), or when
+  a card it targets, or a card nested in one, names a `lock.`,
+  `alarm_control_panel.` or `cover.` entity (`touches_protected`, checked
+  again at execution: such a card voids the approval and nothing is
+  written). The item shows the
   changed paths as its diff and waits for approval in act mode; in observe
   mode it shows the plan without the action. Tests
   `test_a_dashboard_plan_waits_for_approval_and_never_targets_another_dashboard`,
   `test_a_dashboard_not_named_by_the_finding_is_never_planned`,
-  `test_parse_edit_refuses_anything_off_the_narrow_shape`.
+  `test_parse_edit_refuses_anything_off_the_narrow_shape`,
+  `test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover`,
+  `test_a_card_that_names_a_lock_after_the_approval_is_never_written`.
 - M19. **Integration replacement** is always a plan the admin carries out;
   the daemon never removes or adds an integration.
 
@@ -217,8 +228,9 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 ## Invariants
 
 - M27. Locks, the alarm and garage doors are never operated; the plan
-  prompt forbids edits that touch them, and the proposal and dashboard
-  paths cannot reach them.
+  prompt forbids edits that touch them, the proposal path cannot reach
+  them, and a dashboard edit never touches a card that names a lock, alarm
+  or cover entity (M18).
 - M28. The daemon executes, the AI proposes; no maintenance path changes
   the agent itself, the Supervisor or the host; the hard gates (update
   rule, self-guard, approvals) are unchanged except for the additions above.

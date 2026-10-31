@@ -7,7 +7,10 @@ files the agent never writes.
 Writing is a migration plan the admin approves (`opsd.maintenance` makes it from the plan run's
 suggestion; `approvals.request_dashboard` binds it). The edit is deterministic and narrow: on every card
 of one type, rename option keys and optionally change the card type (`Edit`). Nothing else in the JSON
-moves. `DashboardWriter.execute`, in this order:
+moves. An edit never retypes a card to `iframe`, `markdown`, `webpage` or a `custom:` card, never renames
+from or to an action, navigation, service, URL or content option (`DENY_OPTIONS`), and never touches a card
+that names a lock, alarm or cover entity (`touches_protected`); such a plan stays text only.
+`DashboardWriter.execute`, in this order:
 
 1. the approval is a dashboard approval, approved and unexpired; `dashboard.save` is not tightened to
    `never` by the options; act mode; the dashboard is not the default one, not malformed and not in
@@ -52,6 +55,16 @@ CARD_KEYS = frozenset({"cards", "card"})
 CARD_TYPE_RE = re.compile(r"(?:custom:)?[a-z0-9][a-z0-9_-]{0,79}")
 OPTION_RE = re.compile(r"[a-z_][a-z0-9_]{0,40}")
 MAX_RENAMES = 8
+# A plan may never turn a card into one that embeds a page, renders text or runs custom code: the answer it
+# comes from is model text steered by untrusted notes.
+DENY_NEW_TYPES = frozenset({"iframe", "markdown", "webpage"})
+# Options that act, navigate, call a service or carry a URL or content: never renamed from or to.
+DENY_OPTIONS = frozenset({
+    "tap_action", "hold_action", "double_tap_action", "confirmation", "url", "image", "content",
+    "navigation_path", "action", "service", "perform_action", "data", "target",
+})  # fmt: skip
+# Cards naming one of these are never edited (locks, the alarm, doors and covers).
+PROTECTED_ENTITY_RE = re.compile(r"(?<![a-z0-9_])(?:lock|alarm_control_panel|cover)\.[a-z0-9_]+")
 MAX_DASHBOARDS = 20
 MAX_BACKUPS = 10
 MAX_PATHS = 40
@@ -113,6 +126,8 @@ def parse_edit(raw: Any) -> Edit | None:
         return None
     if new is not None and (not isinstance(new, str) or not CARD_TYPE_RE.fullmatch(new) or new == card):
         return None
+    if isinstance(new, str) and (new in DENY_NEW_TYPES or new.startswith("custom:")):
+        return None
     if not isinstance(renames_raw, list) or len(renames_raw) > MAX_RENAMES:
         return None
     renames: list[tuple[str, str]] = []
@@ -125,6 +140,8 @@ def parse_edit(raw: Any) -> Edit | None:
             return None
         # The card's type is not an option: changing it is `new_type`.
         if "type" in (old_key, new_key) or old_key in dict(renames):
+            return None
+        if old_key in DENY_OPTIONS or new_key in DENY_OPTIONS:
             return None
         renames.append((old_key, new_key))
     if not renames and new is None:
@@ -161,9 +178,27 @@ def apply_edit(config: Any, edit: Edit) -> tuple[Any, list[str]]:
     return walk(config, "", None), changed
 
 
+def _names_protected(node: Any) -> bool:
+    if isinstance(node, str):
+        return PROTECTED_ENTITY_RE.search(node) is not None
+    if isinstance(node, Mapping):
+        return any(_names_protected(k) or _names_protected(v) for k, v in node.items())
+    if isinstance(node, list):
+        return any(_names_protected(child) for child in node)
+    return False
+
+
+def touches_protected(config: Any, edit: Edit) -> bool:
+    """Whether a card the edit targets (or a card nested in it) names a lock, alarm or cover entity."""
+    return any(container in CARD_KEYS and node.get("type") == edit.card_type and _names_protected(node)
+               for container, node in _walk(config))  # fmt: skip
+
+
 def binding(finding: str, url_path: str, config: Any, edit: Edit) -> dict[str, Any] | None:
     """What a dashboard plan's approval binds to, computed from the dashboard as it is; None when the edit changes
-    nothing in it."""
+    nothing in it or targets a card that names a lock, alarm or cover entity."""
+    if touches_protected(config, edit):
+        return None
     new, changed = apply_edit(config, edit)
     if not changed:
         return None
@@ -318,12 +353,17 @@ class DashboardWriter:
             self._audit("refused", bound, problem)
             return Outcome("refused", problem)
         now_bound, current = await self.binding_now(bound)
+        edit = edit_of(bound)
+        if now_bound is None and edit is not None and current is not None and touches_protected(current, edit):
+            self.approvals.consume_dashboard(approval_id, None)
+            problem = "a card the plan changes names a lock, alarm or cover entity; it is never edited"
+            self._audit("refused", bound, problem)
+            return Outcome("refused", problem + ": nothing was written")
         if now_bound is None or not self.approvals.dashboard_bound(found, now_bound):
             # Voided (single use) so a stale plan is never retried; the next scan makes a new one.
             self.approvals.consume_dashboard(approval_id, now_bound)
             self._audit("stale", bound, "the dashboard changed since the plan was made")
             return Outcome("stale", "the dashboard changed since the plan was made; nothing was written")
-        edit = edit_of(bound)
         if edit is None:
             return Outcome("refused", "the plan's edit is not valid")
         new, changed = apply_edit(current, edit)

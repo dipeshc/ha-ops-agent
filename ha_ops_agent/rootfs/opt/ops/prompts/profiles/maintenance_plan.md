@@ -46,7 +46,11 @@ Only when the finding lists `dashboard`: `dashboard`, `{url_path,
 card_type, new_type, renames}` for one dashboard the finding names. On
 every card of `card_type` it renames the option keys in `renames` (each
 `{old, new}`) and, if `new_type` is set, changes the card's type. Nothing
-else can be edited this way; leave it out when the change needs more.
+else can be edited this way; leave it out when the change needs more. The
+daemon refuses a `new_type` of `iframe`, `markdown`, `webpage` or any
+`custom:` card, any rename from or to an action, navigation, service, URL
+or content option (such as `tap_action`, `url`, `image`, `data`), and any
+edit to a card that names a lock, alarm or cover entity.
 
 The admin approves every proposal and dashboard change. Nothing is applied
 before that.

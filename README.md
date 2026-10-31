@@ -6,6 +6,8 @@ soaked with a backup, a health diff and rollback, and answers questions in
 one admin chat. It uses an AI model for the parts that need judgement and
 plain, tested code for everything that acts.
 
+![The panel's Home page, with a Core update that needs approval selected](docs/images/panel-home.png)
+
 ## What it does
 
 - **Daily health check.** Repairs, Supervisor issues, error log patterns,
@@ -38,6 +40,10 @@ plain, tested code for everything that acts.
 Everything it does is an *item* on the panel's Home page, with its history.
 It pushes only when an item needs you, when Home Assistant is down, or when
 you asked for it.
+
+<img src="docs/images/panel-phone-dark.png" width="300" alt="The same Home page on a phone, in the dark theme.">
+
+The screenshots show sample data.
 
 ## Who it is for
 

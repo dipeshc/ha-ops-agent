@@ -285,7 +285,9 @@ class DashboardWriter:
     def _backup(self, url_path: str, config: Any, before: str) -> Path:
         folder = self.backup_dir / url_path
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.backup_dir, 0o700)
+        # mkdir's mode is subject to the umask and skipped for an existing folder.
+        for directory in (self.backup_dir, folder):
+            os.chmod(directory, 0o700)
         stamp = self._clock().strftime("%Y%m%dT%H%M%SZ")
         path = folder / f"{stamp}-{before[:12]}.json"
         data = json.dumps(config, ensure_ascii=False, indent=1).encode()

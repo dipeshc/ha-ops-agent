@@ -136,9 +136,10 @@ def read_yaml(root: Path, names: Iterable[str]) -> dict[str, str]:
         if not name.endswith((".yaml", ".yml")):
             continue
         text = read_text(root, name, MAX_FILE_BYTES)
-        if text is None or len(text) > budget:
+        size = len(text.encode()) if text is not None else 0
+        if text is None or size > budget:
             continue
-        budget -= len(text)
+        budget -= size
         texts[name] = text
     return texts
 

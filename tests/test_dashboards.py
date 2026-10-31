@@ -204,6 +204,8 @@ async def test_an_approved_plan_is_backed_up_saved_and_read_back(store: Store, t
     assert fake.boards[BOARD]["views"][0]["sections"][0]["cards"][0]["max"] == 5000
     backups = list((tmp_path / "data" / "maintenance" / "dashboards" / BOARD).glob("*.json"))
     assert len(backups) == 1 and stat.S_IMODE(os.stat(backups[0]).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(backups[0].parent).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(backups[0].parent.parent).st_mode) == 0o700
     assert digest(__import__("json").loads(backups[0].read_text())) == digest(config())
     # Single use: the same approval never saves again.
     assert (await dw.execute(approval)).state == "refused" and len(fake.saves) == 1

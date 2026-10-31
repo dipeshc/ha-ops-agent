@@ -765,7 +765,7 @@ function startLive() {
   src.addEventListener("hello", () => { opened = true; alive(); });
   src.addEventListener("ping", alive);
   src.addEventListener("reset", () => { opened = true; alive(); resync(); });
-  for (const k of ["turn", "status", "thread", "thread_deleted", "facts", "tasks", "state", "updates", "changes", "activity", "item"]) {
+  for (const k of ["turn", "status", "thread", "facts", "tasks", "state", "updates", "changes", "activity", "item"]) {
     src.addEventListener(k, (m) => { opened = true; alive(); try { onEvent(k, JSON.parse(m.data)); } catch (e) { /* ignore */ } });
   }
   src.onerror = () => { if (!opened) fallback(); else { S.offline = true; render(); } };

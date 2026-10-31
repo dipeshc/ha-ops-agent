@@ -1,9 +1,11 @@
 """Baseline of accepted state, and the diff that decides whether the AI runs."""
 
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from opsd.access import access_kind, named_like_access
 from opsd.health import Snapshot, hours_since, parse_time
 
 FLAP_HOURS = 6.0
@@ -69,6 +71,27 @@ class Baseline:
         return active
 
 
+def opens_the_house(entity_id: str, info: Mapping[str, Any] | None = None) -> bool:
+    """A lock, an alarm panel, an access cover or anything named like access hardware (`opsd.access`)."""
+    attributes = {"device_class": (info or {}).get("device_class")}
+    return access_kind(entity_id, attributes) is not None or named_like_access(entity_id)
+
+
+def honoured_expected(listed: Iterable[str], snapshot: Snapshot) -> tuple[frozenset[str], list[str]]:
+    """`health.expected_unavailable` as the checks use it, and the entries they ignore.
+
+    What opens the house is never silenced: listed or not, a lock, an alarm panel or an access cover that is
+    down is reported as if it were not listed.
+    """
+    kept, refused = set(), []
+    for entity_id in listed:
+        if opens_the_house(entity_id, snapshot.unavailable.get(entity_id)):
+            refused.append(entity_id)
+        else:
+            kept.add(entity_id)
+    return frozenset(kept), sorted(refused)
+
+
 def _custom_ok(info: dict[str, Any]) -> bool:
     """A custom integration is healthy if its entries load and not all entities are down."""
     if info.get("entries_failed"):
@@ -86,22 +109,23 @@ def _custom_counted(
 ) -> dict[str, Any]:
     """`info` with `unavailable` counting only the entities that are news.
 
-    An entity in `expected_unavailable` never counts as down. With `now`, an
-    entity that is merely `unknown` and still inside the flap window (e.g. right
-    after a restart) does not count either. The entity total is unchanged.
+    An entity in `expected_unavailable` counts neither as down nor in the total, so the integration is still
+    broken when every other entity is down. With `now`, an entity that is merely `unknown` and still inside the
+    flap window (e.g. right after a restart) does not count as down either.
     """
-    ignored = 0
+    expected = ignored = 0
     for entity_id, v in snapshot.unavailable.items():
         if v["platform"] != domain:
             continue
         if entity_id in expected_unavailable:
-            ignored += 1
+            expected += 1
             continue
         if now is None or v.get("state") == "unavailable":
             continue
         if (age := hours_since(v.get("last_changed"), now)) is not None and age < FLAP_HOURS:
             ignored += 1
-    return {**info, "unavailable": int(info.get("unavailable", 0)) - ignored}
+    return {**info, "entities": max(0, int(info.get("entities", 0)) - expected),
+            "unavailable": max(0, int(info.get("unavailable", 0)) - expected - ignored)}  # fmt: skip
 
 
 CRITICAL_ACK_MAX_DAYS = 3

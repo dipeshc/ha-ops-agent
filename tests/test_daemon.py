@@ -263,6 +263,27 @@ async def test_seed_accepts_expected_unavailable_custom_entities(h: Harness) -> 
     assert set(entities) <= set(read_json(h.paths.baseline_file, {})["unavailable"])
 
 
+async def test_a_listed_lock_is_still_reported_and_warned_about_once(
+    h: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    h.fake.states.append({"entity_id": "lock.side_door", "state": "locked", "last_changed": "2026-01-01T00:00:00+00:00",
+                          "attributes": {}})  # fmt: skip
+    h.fake.registry.append({"entity_id": "lock.side_door", "platform": "acme_solar", "config_entry_id": "lut1"})
+    listed = ["lock.side_door", "light.porch"]
+    await h.daemon(health__expected_unavailable=listed).health_cycle("catch_up")  # the start does not fail
+    h.fake.set_unavailable("lock.side_door", hours_ago=8)
+    h.fake.set_unavailable("light.porch", hours_ago=8)
+    caplog.clear()
+    d = h.daemon(health__expected_unavailable=listed)
+    outcome = await d.health_cycle("daily")
+    await d.health_cycle("daily")
+    [item] = [i for i in d.open_items() if i.key == "entities:acme_solar"]
+    assert item.severity == "critical" and item.detail["entities"] == ["lock.side_door"]
+    assert "entities:acme_solar" in outcome.record["item_keys"]
+    warned = [r for r in caplog.records if "expected_unavailable lists access hardware" in r.getMessage()]
+    assert len(warned) == 1  # once per start, not every check
+
+
 async def test_user_ack_from_panel_can_accept(h: Harness) -> None:
     d = h.daemon(claude__token="")
     await d.health_cycle("catch_up")

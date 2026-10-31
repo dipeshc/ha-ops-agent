@@ -77,11 +77,15 @@ async def test_expected_unavailable_entities_do_not_break_a_custom_integration(
         fake_ha.set_unavailable(entity, hours_ago=8)
     s = await snap(fake_ha, paths, meminfo)
     assert diff(s, baseline, NOW, expected_unavailable=frozenset(ACME_SOLAR)) == []
-    # Naming only some: the rest no longer reach all entities, but each stays a critical entities item.
+    # Naming only some: they leave the count and the total, so every other entity down still breaks it.
     items = {i.key: i for i in diff(s, baseline, NOW, expected_unavailable=frozenset(ACME_SOLAR[:2]))}
-    assert "custom:acme_solar" not in items
+    assert items["custom:acme_solar"].severity == "critical"
     assert items["entities:acme_solar"].severity == "critical"
     assert items["entities:acme_solar"].detail["entities"] == ["fan.bedroom"]
+    # With the other entity up, the two named ones break nothing.
+    fake_ha.states = [st | {"state": "on"} if st["entity_id"] == "fan.bedroom" else st for st in fake_ha.states]
+    up = await snap(fake_ha, paths, meminfo)
+    assert diff(up, baseline, NOW, expected_unavailable=frozenset(ACME_SOLAR[:2])) == []
     # An expected entity of another integration does not change the count.
     items = {i.key: i for i in diff(s, baseline, NOW, expected_unavailable=frozenset({"sensor.old_thing"}))}
     assert items["custom:acme_solar"].severity == "critical"
@@ -97,14 +101,41 @@ async def test_the_seed_accepts_expected_unavailable_custom_entities(
     s = await snap(fake_ha, paths, meminfo)
     assert seed_exclusions(s)["custom_broken"] == ["acme_solar"]
     expected = frozenset(ACME_SOLAR[:2])
+    # Its only other entity is down too: still broken, the seed does not accept it.
     excluded = seed_exclusions(s, expected)
-    assert excluded["custom_broken"] == [] and excluded["custom_unavailable"] == ["fan.bedroom"]
+    assert excluded["custom_broken"] == ["acme_solar"] and excluded["custom_unavailable"] == ["fan.bedroom"]
     baseline = seed(s, NOW, expected_unavailable=expected)
     assert {"light.kitchen", "light.porch"} <= set(baseline.unavailable)
     assert "fan.bedroom" not in baseline.unavailable
-    assert [i.key for i in diff(s, baseline, NOW, expected_unavailable=expected)] == ["entities:acme_solar"]
+    assert {i.key for i in diff(s, baseline, NOW, expected_unavailable=expected)} == {"entities:acme_solar",
+                                                                                       "custom:acme_solar"}  # fmt: skip
     everything = frozenset(ACME_SOLAR)
     assert diff(s, seed(s, NOW, expected_unavailable=everything), NOW, expected_unavailable=everything) == []
+
+
+async def test_access_hardware_is_never_expected_unavailable(fake_ha: FakeHA, paths: Paths, meminfo: Path) -> None:
+    from opsd.baseline import honoured_expected, opens_the_house
+
+    fake_ha.states.append({"entity_id": "cover.big", "state": "unavailable", "last_changed": iso_hours(8),
+                           "attributes": {"device_class": "garage"}})  # fmt: skip
+    fake_ha.registry.append({"entity_id": "cover.big", "platform": "acme_solar", "config_entry_id": "lut1"})
+    s = await snap(fake_ha, paths, meminfo)
+    listed = ("lock.front_door", "alarm_control_panel.home", "cover.big", "cover.side_gate", "switch.garage_opener",
+              "light.porch", "switch.vacuum_child_lock")  # fmt: skip
+    kept, refused = honoured_expected(listed, s)
+    assert refused == ["alarm_control_panel.home", "cover.big", "cover.side_gate", "lock.front_door",
+                       "switch.garage_opener"]  # fmt: skip
+    assert kept == {"light.porch", "switch.vacuum_child_lock"}
+    assert opens_the_house("cover.big", s.unavailable["cover.big"]) and not opens_the_house("cover.living_blind")
+    # Listed or not, the garage door that is down is reported, critical on its custom integration.
+    baseline = seed(await snap(FakeHA(), paths, meminfo), NOW)
+    items = {i.key: i for i in diff(s, baseline, NOW, expected_unavailable=kept)}
+    assert items["entities:acme_solar"].severity == "critical"
+    assert items["entities:acme_solar"].detail["entities"] == ["cover.big"]
+
+
+def iso_hours(hours: float) -> str:
+    return (NOW - timedelta(hours=hours)).isoformat()
 
 
 def add_zha_entity(fake: FakeHA) -> None:

@@ -67,7 +67,7 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 | --- | --- | --- |
 | `core:down` | critical | Core state not running, or the API down. |
 | `entities:<platform>` | critical for a custom integration, else warning | Newly down entities not in the baseline or `health.expected_unavailable`; flips younger than 6 hours are skipped unless the platform is custom and the state is hard `unavailable`. |
-| `custom:<domain>` | critical | A custom integration that was ok in the baseline now has a failed entry or all entities down. An entity in `health.expected_unavailable` MUST NOT count as down here (the entity total is unchanged; the snapshot still lists it as unavailable). Test `test_expected_unavailable_entities_do_not_break_a_custom_integration`. |
+| `custom:<domain>` | critical | A custom integration that was ok in the baseline now has a failed entry or all entities down. An entity in `health.expected_unavailable` MUST NOT count here, neither as down nor in the entity total, so the integration is still broken when every other entity is down (the snapshot still lists it as unavailable). Test `test_expected_unavailable_entities_do_not_break_a_custom_integration`. |
 | `entry:<id>` | critical for a custom domain, else warning | New failed config entry. |
 | `repair:<key>` | critical iff Home Assistant says critical, else warning | New repair. |
 | `supervisor:<issue>` | warning | New Supervisor issue; `no_current_backup` is dropped when a complete encrypted backup finished within 26 hours and is critical otherwise; unhealthy/unsupported reasons are warnings every run. |
@@ -101,12 +101,21 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   integration entities, custom-domain failed entries or critical repairs;
   those are reported again until accepted in the panel. A custom
   integration entity in `health.expected_unavailable` is accepted and does
-  not count toward a broken custom integration. `custom_ok` starts
+  not count toward a broken custom integration (as in `custom:<domain>`). `custom_ok` starts
   true for every custom domain; accepted exposures start empty. The run
   sends one push ("the agent is watching") that is urgent and safety-class
   iff something was not accepted. Tests `test_health_baseline.py:36-55`,
   `test_the_seed_accepts_expected_unavailable_custom_entities`,
   `test_daemon.py` baseline tests.
+- H11a. **Access hardware is never expected.** A lock, an alarm panel, an
+  access cover (device class `garage` or `gate`, or `garage` in its id) or
+  anything whose id matches the access-word list (`opsd.access`, the
+  same list as [reload.md](reload.md) L3) listed in `health.expected_unavailable` is ignored for
+  the `entities:` and `custom:` checks and the seed: it is reported as if
+  it were not listed, with the same severity. The daemon logs one warning
+  per such entry per start and starts normally. Tests
+  `test_access_hardware_is_never_expected_unavailable`,
+  `test_a_listed_lock_is_still_reported_and_warned_about_once`.
 - H12. After every processed run the baseline advances: recovered entries
   drop out (a recurrence is new again), fingerprints keep their maximum
   count and expire after 30 days, `custom_ok` becomes true when healthy and

@@ -49,7 +49,11 @@ The AI credential:
 Fixes and the add-on:
 
 - An entity in `health.expected_unavailable` no longer makes its custom
-  integration critical, and the first-run baseline accepts it.
+  integration critical, and the first-run baseline accepts it. It leaves
+  the integration's entity total too, so the integration is still critical
+  when every other entity is down. Locks, alarm panels and garage or gate
+  covers are never silenced: listed, they are still reported (with one
+  warning in the log).
 - Store icon and logo.
 
 For house overlays (`opsd.house`):

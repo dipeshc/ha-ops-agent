@@ -38,6 +38,7 @@ from opsd.baseline import (
     advance,
     apply_ack,
     diff,
+    honoured_expected,
     seed,
     seed_exclusions,
     vacuum_rooms_seen,
@@ -435,6 +436,8 @@ class Daemon:
         # The loop the item pushes are sent on (an item can be written from an executor thread).
         self._loop: asyncio.AbstractEventLoop | None = None
         self._item_pushes: set[asyncio.Task[Any]] = set()
+        # Entries of health.expected_unavailable that open the house, already warned about (never silenced).
+        self._expected_refused: set[str] = set()
         # What `sensor.ops_agent` last showed of Needs you (count, top title); see `_needs_changed`.
         self._needs_published: tuple[int, str | None] | None = None
         self._items_redactor: tuple[float, Redactor] | None = None
@@ -892,9 +895,9 @@ class Daemon:
         if snapshot.core.get("api_up"):
             await asyncio.to_thread(self.notifier.cache_registration, self.paths.core_config_entries)
 
+        expected = self._expected_unavailable(snapshot)
         raw_baseline = read_json(self.paths.baseline_file, None)
         if raw_baseline is None:
-            expected = frozenset(self.options.health.expected_unavailable)
             baseline = seed(snapshot, now, expected_unavailable=expected)
             write_json_atomic(self.paths.baseline_file, baseline.to_json())
             summary, critical = baseline_summary(snapshot, expected)
@@ -912,7 +915,7 @@ class Daemon:
             return self._finish(now, trigger, "seeded", [], summary, notify=outcome, snapshot=snapshot)
 
         baseline = Baseline.from_json(raw_baseline)
-        items = diff(snapshot, baseline, now, expected_unavailable=frozenset(self.options.health.expected_unavailable),
+        items = diff(snapshot, baseline, now, expected_unavailable=expected,
                      options_problems=self.options.all_problems, guard_anomalies=self.guard_anomalies(now),
                      backup_failure=self.backups.recent_failure() if self.backups is not None else None,
                      power_entity=self.options.profile.health.power_entity,
@@ -1011,6 +1014,15 @@ class Daemon:
             if fallback is not None:
                 outcomes.append(await self.send(fallback, core_up=core_up, now=now))
         return "+".join(outcomes) or None
+
+    def _expected_unavailable(self, snapshot: Snapshot) -> frozenset[str]:
+        """`health.expected_unavailable`, without anything that opens the house (one warning per entity)."""
+        expected, refused = honoured_expected(self.options.health.expected_unavailable, snapshot)
+        for entity_id in sorted(set(refused) - self._expected_refused):
+            _LOGGER.warning("health.expected_unavailable lists access hardware; it is still reported",
+                            extra={"entity_id": entity_id})  # fmt: skip
+        self._expected_refused |= set(refused)
+        return expected
 
     def _save_open_items(self, items: list[Item], now: datetime) -> None:
         write_json_atomic(

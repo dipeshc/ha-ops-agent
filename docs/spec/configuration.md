@@ -52,7 +52,7 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 | `notify.max_pushes_per_day` | 3 | 0..20 | Daily cap for the normal push bucket only (see [items-and-pushes.md](items-and-pushes.md)). |
 | `notify.quiet_start`, `notify.quiet_end` | `22:30`, `07:00` | `HH:MM` or empty | Quiet hours; see C6. |
 | `health.check_time` | `05:30` | `HH:MM` | Daily health check time (house time zone). |
-| `health.expected_unavailable` | `[]` | entity ids | Entities that are normally unavailable and are not news. |
+| `health.expected_unavailable` | `[]` | entity ids | Entities that are normally unavailable and are not news. Locks, alarm panels and access covers are never silenced ([health.md](health.md) H11a). |
 | `updates.window` | `04:00` | `HH:MM` | Nightly update window. |
 | `updates.auto_install` | `off` | `off` / `on` | Install AUTO-tier updates in the window; needs `agent.mode: act`. |
 | `updates.min_age_days` | 7 | 7..90 | Patch soak; minors soak twice as long. Code floors it at 7 again. |

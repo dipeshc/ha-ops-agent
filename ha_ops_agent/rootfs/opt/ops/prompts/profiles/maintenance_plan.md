@@ -47,10 +47,13 @@ card_type, new_type, renames}` for one dashboard the finding names. On
 every card of `card_type` it renames the option keys in `renames` (each
 `{old, new}`) and, if `new_type` is set, changes the card's type. Nothing
 else can be edited this way; leave it out when the change needs more. The
-daemon refuses a `new_type` of `iframe`, `markdown`, `webpage` or any
-`custom:` card, any rename from or to an action, navigation, service, URL
-or content option (such as `tap_action`, `url`, `image`, `data`), and any
-edit to a card that names a lock, alarm or cover entity.
+daemon accepts a `new_type` only from `history-graph`,
+`statistics-graph`, `logbook`, `calendar`, `map` and `clock`. It refuses
+any rename from or to an action, navigation, service, URL, content,
+entity, nested-card, visibility or condition option (such as
+`tap_action`, `icon_tap_action`, `url`, `data`, `service_data`, `entity`,
+`cards`, `conditions`), and any edit to a card that names a lock, alarm,
+cover or other access entity. A refused edit leaves the plan as text.
 
 The admin approves every proposal and dashboard change. Nothing is applied
 before that.

@@ -7,9 +7,12 @@ files the agent never writes.
 Writing is a migration plan the admin approves (`opsd.maintenance` makes it from the plan run's
 suggestion; `approvals.request_dashboard` binds it). The edit is deterministic and narrow: on every card
 of one type, rename option keys and optionally change the card type (`Edit`). Nothing else in the JSON
-moves. An edit never retypes a card to `iframe`, `markdown`, `webpage` or a `custom:` card, never renames
-from or to an action, navigation, service, URL or content option (`DENY_OPTIONS`), and never touches a card
-that names a lock, alarm or cover entity (`touches_protected`); such a plan stays text only.
+moves. A new type must be one of `DISPLAY_CARD_TYPES`, built-in cards without a default tap action (so
+never `button`, `tile`, `picture-elements`, `entity-button`, `iframe`, `markdown` or a `custom:` card); a
+rename never goes from or to an option in `DENY_OPTIONS` (actions, navigation, services and their
+targets, URLs and content, the card's entities, nested cards, visibility and conditions); and an edit
+never touches a card that names a lock, alarm or cover entity (`touches_protected`). Anything else is
+refused, and the plan stays text only.
 `DashboardWriter.execute`, in this order:
 
 1. the approval is a dashboard approval, approved and unexpired; `dashboard.save` is not tightened to
@@ -56,13 +59,17 @@ CARD_KEYS = frozenset({"cards", "card"})
 CARD_TYPE_RE = re.compile(r"(?:custom:)?[a-z0-9][a-z0-9_-]{0,79}")
 OPTION_RE = re.compile(r"[a-z_][a-z0-9_]{0,40}")
 MAX_RENAMES = 8
-# A plan may never turn a card into one that embeds a page, renders text or runs custom code: the answer it
-# comes from is model text steered by untrusted notes.
-DENY_NEW_TYPES = frozenset({"iframe", "markdown", "webpage"})
-# Options that act, navigate, call a service or carry a URL or content: never renamed from or to.
+# The only types a plan may give a card: built-in, display-only cards without a default tap action. The answer a
+# plan comes from is model text steered by untrusted notes, so anything that acts, embeds a page, renders text
+# or runs custom code (button, tile, picture-elements, entity-button, iframe, markdown, custom:*) is refused.
+DISPLAY_CARD_TYPES = frozenset({"history-graph", "statistics-graph", "logbook", "calendar", "map", "clock"})
+# Options that act, navigate, call a service, carry a URL or content, or say which entities and cards a card
+# holds or when it shows: never renamed from or to.
 DENY_OPTIONS = frozenset({
-    "tap_action", "hold_action", "double_tap_action", "confirmation", "url", "image", "content",
-    "navigation_path", "action", "service", "perform_action", "data", "target",
+    "tap_action", "hold_action", "double_tap_action", "icon_tap_action", "icon_hold_action",
+    "icon_double_tap_action", "confirmation", "url", "image", "content", "navigation_path", "action", "service",
+    "service_data", "perform_action", "data", "target", "entity", "entities", "card", "cards", "visibility",
+    "conditions",
 })  # fmt: skip
 # Cards naming one of these are never edited (locks, the alarm, doors and covers).
 PROTECTED_ENTITY_RE = re.compile(r"(?<![a-z0-9_])(?:lock|alarm_control_panel|cover)\.[a-z0-9_]+")
@@ -127,7 +134,7 @@ def parse_edit(raw: Any) -> Edit | None:
         return None
     if new is not None and (not isinstance(new, str) or not CARD_TYPE_RE.fullmatch(new) or new == card):
         return None
-    if isinstance(new, str) and (new in DENY_NEW_TYPES or new.startswith("custom:")):
+    if isinstance(new, str) and new not in DISPLAY_CARD_TYPES:
         return None
     if not isinstance(renames_raw, list) or len(renames_raw) > MAX_RENAMES:
         return None

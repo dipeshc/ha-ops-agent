@@ -157,10 +157,17 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   rename option keys (at most 8, never `type`) and optionally change the
   card type; a key whose new name exists is left alone. An edit is refused
   (the plan stays text only, with no executable edit) when its new type is
-  `iframe`, `markdown`, `webpage` or any `custom:` card, when a rename's
-  source or target is `tap_action`, `hold_action`, `double_tap_action`,
-  `confirmation`, `url`, `image`, `content`, `navigation_path`, `action`,
-  `service`, `perform_action`, `data` or `target` (`DENY_OPTIONS`), or when
+  not in the allowlist `DISPLAY_CARD_TYPES` (`history-graph`,
+  `statistics-graph`, `logbook`, `calendar`, `map`, `clock`: built-in
+  cards without a default tap action, so never `button`, `tile`,
+  `picture-elements`, `entity-button`, `iframe`, `markdown`, `webpage` or a
+  `custom:` card), when a rename's source or target is `tap_action`,
+  `hold_action`, `double_tap_action`, `icon_tap_action`,
+  `icon_hold_action`, `icon_double_tap_action`, `confirmation`, `url`,
+  `image`, `content`, `navigation_path`, `action`, `service`,
+  `service_data`, `perform_action`, `data`, `target`, `entity`,
+  `entities`, `card`, `cards`, `visibility` or `conditions`
+  (`DENY_OPTIONS`), or when
   a card it targets, or a card nested in one, names a `lock.`,
   `alarm_control_panel.` or `cover.` entity (`touches_protected`, checked
   again at execution: such a card voids the approval and nothing is

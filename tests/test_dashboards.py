@@ -15,6 +15,7 @@ from opsd import dashboards, selfguard
 from opsd.approvals import Approvals
 from opsd.capabilities import CAPABILITIES, CapabilityError, RequestError, parse_request
 from opsd.dashboards import (
+    DISPLAY_CARD_TYPES,
     DashboardWriter,
     Edit,
     apply_edit,
@@ -144,14 +145,38 @@ def test_apply_edit_never_overwrites_a_key_that_already_has_the_new_name() -> No
     {"card_type": "entities", "new_type": "markdown"},
     {"card_type": "entities", "new_type": "webpage"},
     {"card_type": "entities", "new_type": "custom:acme-anything"},
+    # Only display cards without a default tap action: never one that toggles or runs an action.
+    {"card_type": "entities", "new_type": "button"},
+    {"card_type": "entities", "new_type": "tile"},
+    {"card_type": "entities", "new_type": "picture-elements"},
+    {"card_type": "entities", "new_type": "entity-button"},
+    {"card_type": "entities", "new_type": "gauge"},
+    {"card_type": "entities", "new_type": "light"},
     # Never an action, navigation, service, URL or content option, from or to.
     {"card_type": "picture", "renames": [{"old": "image", "new": "url"}]},
     {"card_type": "button", "renames": [{"old": "hold_action", "new": "tap_action"}]},
     {"card_type": "button", "renames": [{"old": "extra", "new": "data"}]},
     {"card_type": "button", "renames": [{"old": "service", "new": "label"}]},
+    {"card_type": "tile", "renames": [{"old": "extra", "new": "icon_tap_action"}]},
+    {"card_type": "button", "renames": [{"old": "icon_hold_action", "new": "extra"}]},
+    {"card_type": "button", "renames": [{"old": "x", "new": "icon_double_tap_action"}]},
+    {"card_type": "button", "renames": [{"old": "service_data", "new": "x"}]},
+    {"card_type": "custom:acme-gauge", "renames": [{"old": "sensor", "new": "entity"}]},
+    {"card_type": "custom:acme-gauge", "renames": [{"old": "sensors", "new": "entities"}]},
+    {"card_type": "conditional", "renames": [{"old": "inner", "new": "card"}]},
+    {"card_type": "vertical-stack", "renames": [{"old": "items", "new": "cards"}]},
+    {"card_type": "custom:acme-gauge", "renames": [{"old": "show", "new": "visibility"}]},
+    {"card_type": "conditional", "renames": [{"old": "when", "new": "conditions"}]},
 ])  # fmt: skip
 def test_parse_edit_refuses_anything_off_the_narrow_shape(raw: Any) -> None:
     assert parse_edit(raw) is None
+
+
+def test_a_display_card_type_is_the_only_new_type_accepted() -> None:
+    for kind in sorted(DISPLAY_CARD_TYPES):
+        edit = parse_edit({"card_type": "custom:acme-graph", "new_type": kind})
+        assert edit is not None and edit.new_type == kind
+    assert not {"button", "tile", "picture-elements", "entity-button", "iframe", "markdown"} & DISPLAY_CARD_TYPES
 
 
 def test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover() -> None:

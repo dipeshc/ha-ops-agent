@@ -34,8 +34,8 @@ CONFIGURATION = (
     "homeassistant:\n  name: Example\nacme_sprinkler:\n  zones: 4\nacme_legacy_hub:\n  host: example.local\n"
 )
 GARDEN = "- alias: Water the garden\n  actions:\n    - action: acme_sprinkler.run_zone\n      data: {zone: 1}\n"
-GARDEN_BOARD = {"views": [{"cards": [{"type": "custom:acme-gauge", "entity": "sensor.acme_weather_rain",
-                                      "max_value": 30}]}]}  # fmt: skip
+GARDEN_BOARD = {"views": [{"cards": [{"type": "history-graph", "entity": "sensor.acme_weather_rain",
+                                      "hours_to_show": 30}]}]}  # fmt: skip
 
 
 def inv(**changes: Any) -> inventory.Inventory:
@@ -49,8 +49,8 @@ def inv(**changes: Any) -> inventory.Inventory:
                   {"entity_id": "weather.acme_home", "platform": "acme_weather"},
                   {"entity_id": "light.porch", "platform": "zha"}],
         resources=[{"url": "/hacsfiles/acme-gauge/acme-gauge.js", "type": "module"}],
-        dashboards={"example-garden": {"mode": "storage", "title": "Garden", "cards": {"custom:acme-gauge": 1}},
-                    "example-generated": {"mode": "storage", "title": "Wall", "cards": {"custom:acme-gauge": 1}}},
+        dashboards={"example-garden": {"mode": "storage", "title": "Garden", "cards": {"history-graph": 1}},
+                    "example-generated": {"mode": "storage", "title": "Wall", "cards": {"history-graph": 1}}},
         addons={"addons": [{"slug": "core_mosquitto"}]},
     )  # fmt: skip
     for key, value in changes.items():
@@ -178,7 +178,7 @@ def test_the_inventory_reads_what_the_install_uses() -> None:
     assert found.plugins == ["acme-gauge"] and found.addons == ["core_mosquitto"]
     assert found.uses("acme_legacy_hub") and not found.uses("acme_lights")
     assert found.references("acme_sprinkler.run_zone") == ["automations/garden.yaml:3"]
-    assert found.references("custom:acme-gauge") == ["dashboard example-garden", "dashboard example-generated"]
+    assert found.references("history-graph") == ["dashboard example-garden", "dashboard example-generated"]
     assert "texts" not in found.to_json() and "CONFIGURATION" not in json.dumps(found.to_json())
 
 
@@ -449,15 +449,15 @@ async def test_a_dashboard_plan_waits_for_approval_and_never_targets_another_das
     rig = Rig(tmp_path)
     await rig.scan()
     card = next(f for f in by_signal(rig, "notes") if "dashboard example-garden" in f.affected)
-    edit = {"card_type": "custom:acme-gauge", "renames": [{"old": "max_value", "new": "max"}]}
-    rig.answer = {"plans": [{"key": card.key, "plan": "Rename max_value to max.",
+    edit = {"card_type": "history-graph", "renames": [{"old": "hours_to_show", "new": "hours"}]}
+    rig.answer = {"plans": [{"key": card.key, "plan": "Rename hours_to_show to hours.",
                              "dashboard": {"url_path": "example-garden", **edit}}], "summary": "s"}  # fmt: skip
     rig.now += timedelta(hours=1)
     await rig.scan()
     item = rig.items()[card.title()]
     assert item["state"] == "waiting" and item["need"]["kind"] == "approval"
     assert item["need"]["primary"]["id"] == "apply_dashboard" and "example-garden" in item["change"]["diff"]
-    assert "max_value → max" in item["change"]["diff"]
+    assert "hours_to_show → hours" in item["change"]["diff"]
     # The generated dashboard is never planned, even when the answer names it.
     other = Rig(tmp_path / "generated")
     await other.scan()
@@ -479,8 +479,8 @@ async def test_a_dashboard_not_named_by_the_finding_is_never_planned(tmp_path: P
     await rig.scan()
     repair = by_signal(rig, "repair")[0]
     rig.answer = {"plans": [{"key": repair.key, "plan": "p", "dashboard": {
-        "url_path": "example-garden", "card_type": "custom:acme-gauge", "renames": [{"old": "max_value",
-                                                                                     "new": "max"}]}}],
+        "url_path": "example-garden", "card_type": "history-graph", "renames": [{"old": "hours_to_show",
+                                                                                     "new": "hours"}]}}],
                   "summary": "s"}  # fmt: skip
     rig.now += timedelta(hours=1)
     await rig.scan()
@@ -583,8 +583,8 @@ async def test_the_panel_applies_an_approved_dashboard_plan_end_to_end(
         card = next(f for f in d.maintenance.findings() if "dashboard example-garden" in f.affected)
         assert "dashboard" in card.fixable and h.claude_calls and "<evidence>" in h.claude_calls[-1]
         h.claude_reply = {"plans": [{"key": card.key, "plan": "Rename the option.", "dashboard": {
-            "url_path": "example-garden", "card_type": "custom:acme-gauge",
-            "renames": [{"old": "max_value", "new": "max"}]}}], "summary": "s"}  # fmt: skip
+            "url_path": "example-garden", "card_type": "history-graph",
+            "renames": [{"old": "hours_to_show", "new": "hours"}]}}], "summary": "s"}  # fmt: skip
         await d.maintenance.scan("daily")
         await d.items_flush()
         item = d.store.item_by_key(f"maint:{card.key}")
@@ -602,7 +602,7 @@ async def test_the_panel_applies_an_approved_dashboard_plan_end_to_end(
         assert event.type == "maintenance.dashboard"
         await d._on_dashboard_approved(event)
         saved = h.fake.lovelace["example-garden"]["views"][0]["cards"][0]
-        assert saved["max"] == 30 and "max_value" not in saved
+        assert saved["hours"] == 30 and "hours_to_show" not in saved
         assert list((h.paths.data / "maintenance" / "dashboards" / "example-garden").glob("*.json"))
         await d.items_flush()
         after = d.store.item_by_key(f"maint:{card.key}")

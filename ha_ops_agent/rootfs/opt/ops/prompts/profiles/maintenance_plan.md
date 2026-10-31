@@ -46,14 +46,17 @@ Only when the finding lists `dashboard`: `dashboard`, `{url_path,
 card_type, new_type, renames}` for one dashboard the finding names. On
 every card of `card_type` it renames the option keys in `renames` (each
 `{old, new}`) and, if `new_type` is set, changes the card's type. Nothing
-else can be edited this way; leave it out when the change needs more. The
-daemon accepts a `new_type` only from `history-graph`,
-`statistics-graph`, `logbook`, `calendar`, `map` and `clock`. It refuses
-any rename from or to an action, navigation, service, URL, content,
-entity, nested-card, visibility or condition option (such as
-`tap_action`, `icon_tap_action`, `url`, `data`, `service_data`, `entity`,
-`cards`, `conditions`), and any edit to a card that names a lock, alarm,
-cover or other access entity. A refused edit leaves the plan as text.
+else can be edited this way; leave it out when the change needs more.
+
+The daemon only ever edits core display-only cards with no tap actions:
+`card_type` and `new_type` must each be one of `history-graph`,
+`statistics-graph`, `logbook`, `calendar`, `map` or `clock`, and the cards
+must hold no other cards and no actions. It refuses any card that names,
+matches or could select a lock, alarm, cover, door, gate or other access
+hardware, and any rename from or to an action, navigation, service, URL,
+content, entity, nested-card, visibility or condition option. For every
+other card (custom cards included) give the steps in `plan` and leave
+`dashboard` out: the admin makes that change by hand.
 
 The admin approves every proposal and dashboard change. Nothing is applied
 before that.

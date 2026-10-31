@@ -13,7 +13,8 @@ Proactive maintenance:
 - A YAML migration becomes a one-tap git proposal (git on only).
 - Dashboard migrations: a plan you approve, executed by the new
   approval-only `dashboard.save` capability with a backup, a read-back and
-  an automatic restore. New profile key `dashboards.generated` for
+  an automatic restore. Only core display-only cards with no tap actions
+  are ever edited; every other card gets a text-only plan. New profile key `dashboards.generated` for
   dashboards something else writes.
 - A Core update that removes something still in use always asks.
 

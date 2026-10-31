@@ -7,13 +7,13 @@ files the agent never writes.
 Writing is a migration plan the admin approves (`opsd.maintenance` makes it from the plan run's
 suggestion; `approvals.request_dashboard` binds it). The edit is deterministic and narrow: on every card
 of one type, rename option keys and optionally change the card type (`Edit`). Nothing else in the JSON
-moves. A new type must be one of `DISPLAY_CARD_TYPES`, built-in cards without a default tap action (so
-never `button`, `tile`, `picture-elements`, `entity-button`, `iframe`, `markdown` or a `custom:` card); a
-rename never goes from or to an option in `DENY_OPTIONS` (actions, navigation, services and their
-targets, URLs and content, the card's entities, nested cards, visibility and conditions); and an edit
-never touches a card that, anywhere inside it, names a lock, alarm or cover entity or any entity named
-like access hardware (`opsd.access`), filters for one of those domains, or targets a device, area,
-floor or label (`touches_protected`). Anything else is refused, and the plan stays text only.
+moves. Only core display-only cards with no tap actions are ever edited: the card's type before and
+after is in `DISPLAY_CARD_TYPES` (exactly, so never a `custom:` card), and it holds no other cards (`card`,
+`cards`, `elements`, or any nested mapping with a `type`) and no action key (`editable`). As defence in
+depth such a card is still never edited when any key or value in it references a lock, alarm or cover
+(also `states.<domain>.<object>`), is named like access hardware (`opsd.access`), holds a wildcard or a
+`/regex/`, says `entity_id: all`, or uses a filter or target key (`touches_protected`); and a rename never
+goes from or to an option in `DENY_OPTIONS`. Every other card gets a text-only plan.
 `DashboardWriter.execute`, in this order:
 
 1. the approval is a dashboard approval, approved and unexpired; `dashboard.save` is not tightened to
@@ -61,9 +61,9 @@ CARD_KEYS = frozenset({"cards", "card"})
 CARD_TYPE_RE = re.compile(r"(?:custom:)?[a-z0-9][a-z0-9_-]{0,79}")
 OPTION_RE = re.compile(r"[a-z_][a-z0-9_]{0,40}")
 MAX_RENAMES = 8
-# The only types a plan may give a card: built-in, display-only cards without a default tap action. The answer a
-# plan comes from is model text steered by untrusted notes, so anything that acts, embeds a page, renders text
-# or runs custom code (button, tile, picture-elements, entity-button, iframe, markdown, custom:*) is refused.
+# The only cards an executable edit ever touches, as their type before and after: built-in, display-only cards
+# with no tap actions. The answer a plan comes from is model text steered by untrusted notes, so every other card
+# (anything that acts, embeds a page, renders text, holds other cards or runs custom code) gets a text-only plan.
 DISPLAY_CARD_TYPES = frozenset({"history-graph", "statistics-graph", "logbook", "calendar", "map", "clock"})
 # Options that act, navigate, call a service, carry a URL or content, or say which entities and cards a card
 # holds or when it shows: never renamed from or to.
@@ -73,11 +73,15 @@ DENY_OPTIONS = frozenset({
     "service_data", "perform_action", "data", "target", "entity", "entities", "card", "cards", "visibility",
     "conditions",
 })  # fmt: skip
-# A card is never edited when anything in it names, filters for or could target access hardware.
-PROTECTED_DOMAINS = frozenset({"lock", "alarm_control_panel", "cover"})
-# Service targets the agent cannot resolve to entities: a card that uses one fails closed.
-UNRESOLVED_TARGET_KEYS = frozenset({"device_id", "area_id", "floor_id", "label_id"})
-ENTITY_ID_RE = re.compile(r"(?<![a-z0-9_.])([a-z_][a-z0-9_]{0,40})\.([a-z0-9_]{1,128})(?![a-z0-9_])")
+# Keys that make a card a container of other cards or elements: never edited.
+CONTAINER_KEYS = frozenset({"card", "cards", "elements"})
+# Defence in depth on the display cards themselves. A reference to a lock, alarm or cover, also in the Jinja form
+# `states.<domain>.<object>` (a dot before the domain is allowed on purpose).
+PROTECTED_REF_RE = re.compile(r"(?<![a-z0-9_])(?:lock|alarm_control_panel|cover)\.[a-z0-9_]")
+# Filter and target keys: what they select cannot be resolved here, so a card that uses one fails closed.
+FILTER_KEYS = frozenset({
+    "integration", "device", "area", "label", "attributes", "domain", "device_id", "area_id", "floor_id", "label_id",
+})  # fmt: skip
 MAX_DASHBOARDS = 20
 MAX_BACKUPS = 10
 MAX_PATHS = 40
@@ -135,7 +139,7 @@ def parse_edit(raw: Any) -> Edit | None:
         return None
     card, new = raw.get("card_type"), raw.get("new_type")
     renames_raw = raw.get("renames") or []
-    if not isinstance(card, str) or not CARD_TYPE_RE.fullmatch(card):
+    if not isinstance(card, str) or not CARD_TYPE_RE.fullmatch(card) or card not in DISPLAY_CARD_TYPES:
         return None
     if new is not None and (not isinstance(new, str) or not CARD_TYPE_RE.fullmatch(new) or new == card):
         return None
@@ -191,26 +195,24 @@ def apply_edit(config: Any, edit: Edit) -> tuple[Any, list[str]]:
     return walk(config, "", None), changed
 
 
-def _access_entity(text: str) -> bool:
-    """Whether a text holds an entity id of an access domain, or one named like access hardware (any domain:
-    a `script.open_garage`, `switch.gate_opener` or `button.front_door_unlock` counts)."""
-    for match in ENTITY_ID_RE.finditer(text):
-        if match.group(1) in PROTECTED_DOMAINS or named_like_access(match.group(0)):
-            return True
-    return False
+def _text_protected(text: str) -> bool:
+    """A string (a key or a value) that names, matches or could select access hardware."""
+    if PROTECTED_REF_RE.search(text.lower()) or named_like_access(text):
+        return True
+    # A wildcard or a `/regex/` selects entities nothing here can check.
+    return "*" in text or (len(text) >= 2 and text.startswith("/") and text.endswith("/"))
 
 
 def _names_protected(node: Any) -> bool:
     if isinstance(node, str):
-        return _access_entity(node)
+        return _text_protected(node)
     if isinstance(node, Mapping):
         for key, child in node.items():
             name = str(key)
-            if name in UNRESOLVED_TARGET_KEYS or _access_entity(name) or _names_protected(child):
+            if name in FILTER_KEYS or _text_protected(name) or _names_protected(child):
                 return True
-            # An auto-entities style filter (`domain: lock`, or a list of domains).
-            domains = child if isinstance(child, list) else [child]
-            if name == "domain" and any(isinstance(d, str) and d.strip().lower() in PROTECTED_DOMAINS for d in domains):
+            values = child if isinstance(child, list) else [child]
+            if name == "entity_id" and any(isinstance(v, str) and v.strip().lower() == "all" for v in values):
                 return True
         return False
     if isinstance(node, list):
@@ -218,18 +220,45 @@ def _names_protected(node: Any) -> bool:
     return False
 
 
+def _has_typed_child(node: Any) -> bool:
+    children = node.values() if isinstance(node, Mapping) else node if isinstance(node, list) else ()
+    return any((isinstance(c, Mapping) and "type" in c) or _has_typed_child(c) for c in children)
+
+
+def _has_action(node: Any) -> bool:
+    """Whether any key in it is an action (`action`, `tap_action`, `icon_hold_action`, ...)."""
+    if isinstance(node, Mapping):
+        return any(str(k) == "action" or str(k).endswith("_action") or _has_action(v) for k, v in node.items())
+    return isinstance(node, list) and any(_has_action(c) for c in node)
+
+
+def _targets(config: Any, edit: Edit) -> Iterator[Mapping[str, Any]]:
+    for container, node in _walk(config):
+        if container in CARD_KEYS and node.get("type") == edit.card_type:
+            yield node
+
+
+def editable(config: Any, edit: Edit) -> bool:
+    """Whether every card the edit targets is a plain display card: its type in `DISPLAY_CARD_TYPES` (exactly), no
+    `card`, `cards` or `elements`, no nested mapping that carries a `type`, and no action key."""
+    return all(
+        node.get("type") in DISPLAY_CARD_TYPES and not CONTAINER_KEYS & {str(k) for k in node}
+        and not _has_typed_child(node) and not _has_action(node)
+        for node in _targets(config, edit)
+    )  # fmt: skip
+
+
 def touches_protected(config: Any, edit: Edit) -> bool:
-    """Whether a card the edit targets (or a card nested in it) names an access entity (`opsd.access`: locks,
-    alarms, covers, or an id named like access hardware in any domain), filters for an access domain, or uses a
-    service target the agent cannot resolve (`device_id`, `area_id`, `floor_id`, `label_id`)."""
-    return any(container in CARD_KEYS and node.get("type") == edit.card_type and _names_protected(node)
-               for container, node in _walk(config))  # fmt: skip
+    """Whether a card the edit targets has, in any key or value: a lock, alarm or cover reference (also
+    `states.<domain>.<object>`), a name like access hardware (`opsd.access`), a wildcard or a `/regex/`,
+    `entity_id: all`, or a filter or target key (`FILTER_KEYS`)."""
+    return any(_names_protected(node) for node in _targets(config, edit))
 
 
 def binding(finding: str, url_path: str, config: Any, edit: Edit) -> dict[str, Any] | None:
     """What a dashboard plan's approval binds to, computed from the dashboard as it is; None when the edit changes
-    nothing in it or targets a card that names a lock, alarm or cover entity."""
-    if touches_protected(config, edit):
+    nothing in it, targets a card that is not a plain display card, or touches a protected one."""
+    if not editable(config, edit) or touches_protected(config, edit):
         return None
     new, changed = apply_edit(config, edit)
     if not changed:
@@ -407,9 +436,11 @@ class DashboardWriter:
             return Outcome("refused", problem)
         now_bound, current = await self.binding_now(bound)
         edit = edit_of(bound)
-        if now_bound is None and edit is not None and current is not None and touches_protected(current, edit):
+        if now_bound is None and edit is not None and current is not None and (
+                not editable(current, edit) or touches_protected(current, edit)):  # fmt: skip
             self.approvals.consume_dashboard(approval_id, None)
-            problem = "a card the plan changes names a lock, alarm or cover entity; it is never edited"
+            problem = ("a card the plan changes is not a plain display card, or names, filters for or could select "
+                       "access hardware; it is never edited")  # fmt: skip
             self._audit("refused", bound, problem)
             return Outcome("refused", problem + ": nothing was written")
         if now_bound is None or not self.approvals.dashboard_bound(found, now_bound):

@@ -165,37 +165,46 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   inside the block of the finding's integration. Otherwise the plan is text
   only. Test `test_yaml_edits_become_a_proposal_only_with_git_and_a_yaml_finding`.
 - M18. **Dashboard migrations** are a plan only for a dashboard the finding
-  itself names, never a YAML-mode, default or generated one. The edit is
-  deterministic and narrow (`dashboards.Edit`): on every card of one type,
-  rename option keys (at most 8, never `type`) and optionally change the
-  card type; a key whose new name exists is left alone. An edit is refused
-  (the plan stays text only, with no executable edit) when its new type is
-  not in the allowlist `DISPLAY_CARD_TYPES` (`history-graph`,
-  `statistics-graph`, `logbook`, `calendar`, `map`, `clock`: built-in
-  cards without a default tap action, so never `button`, `tile`,
-  `picture-elements`, `entity-button`, `iframe`, `markdown`, `webpage` or a
-  `custom:` card), when a rename's source or target is `tap_action`,
-  `hold_action`, `double_tap_action`, `icon_tap_action`,
-  `icon_hold_action`, `icon_double_tap_action`, `confirmation`, `url`,
-  `image`, `content`, `navigation_path`, `action`, `service`,
-  `service_data`, `perform_action`, `data`, `target`, `entity`,
-  `entities`, `card`, `cards`, `visibility` or `conditions`
-  (`DENY_OPTIONS`), or when a card it targets, or a card nested in one, is
-  protected (`touches_protected`, checked again at execution: such a card
-  voids the approval and nothing is written). A card is protected when,
-  anywhere in it (keys and values, templates included): an entity id has
-  the domain `lock`, `alarm_control_panel` or `cover`, or is named like
-  access hardware in any domain (`script.`, `switch.`, `button.` and the
-  rest) by the shared classification `opsd/access.py` `named_like_access`
-  that the reload never-list uses ([reload.md](reload.md)); a `domain:`
-  filter names one of those three domains (as text or in a list); or any
-  service target uses `device_id`, `area_id`, `floor_id` or `label_id`,
-  which the agent cannot resolve to entities, so it fails closed. The item shows the
-  changed paths as its diff and waits for approval in act mode; in observe
-  mode it shows the plan without the action. Tests
+  itself names, never a YAML-mode, default or generated one. **Only core
+  display-only cards with no tap actions are ever edited; every other card
+  gets a text-only plan.** The edit is deterministic and narrow
+  (`dashboards.Edit`): on every card of one type, rename option keys (at
+  most 8, never `type`) and optionally change the card type; a key whose
+  new name exists is left alone. It is executable only when:
+  - its source type and any new type are in `DISPLAY_CARD_TYPES`
+    (`history-graph`, `statistics-graph`, `logbook`, `calendar`, `map`,
+    `clock`), compared exactly and case-sensitively, so never a `custom:`
+    card;
+  - every card of that type is plain (`editable`): no `card`, `cards` or
+    `elements` key, no nested mapping that carries a `type`, and no action
+    key (`action` or any `*_action`);
+  - no such card is protected (`touches_protected`), the defence in depth
+    over every key and value in the card: a `lock.`,
+    `alarm_control_panel.` or `cover.` reference, also in the Jinja form
+    `states.<domain>.<object>`; any text that the shared classification
+    `opsd/access.py` `named_like_access` (the reload never-list's,
+    [reload.md](reload.md)) calls access hardware, names and titles
+    included; a `*`, a `/regex/` value or `entity_id: all`; or any of the
+    filter and target keys `integration`, `device`, `area`, `label`,
+    `attributes`, `domain`, `device_id`, `area_id`, `floor_id`,
+    `label_id`. All of these fail closed;
+  - no rename goes from or to `tap_action`, `hold_action`,
+    `double_tap_action`, `icon_tap_action`, `icon_hold_action`,
+    `icon_double_tap_action`, `confirmation`, `url`, `image`, `content`,
+    `navigation_path`, `action`, `service`, `service_data`,
+    `perform_action`, `data`, `target`, `entity`, `entities`, `card`,
+    `cards`, `visibility` or `conditions` (`DENY_OPTIONS`).
+  These are checked when the plan is made, at the approval request and
+  again at execution, where a card that no longer qualifies voids the
+  approval and nothing is written. The item shows the changed paths as its
+  diff and waits for approval in act mode; in observe mode it shows the
+  plan without the action. Tests
   `test_a_dashboard_plan_waits_for_approval_and_never_targets_another_dashboard`,
   `test_a_dashboard_not_named_by_the_finding_is_never_planned`,
   `test_parse_edit_refuses_anything_off_the_narrow_shape`,
+  `test_only_a_display_card_type_is_ever_the_source_of_an_edit`,
+  `test_a_display_card_that_holds_cards_or_actions_is_never_edited`,
+  `test_every_string_of_a_display_card_is_checked_for_access_hardware`,
   `test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover`,
   `test_a_card_that_names_filters_or_targets_access_hardware_is_protected`,
   `test_the_health_check_reloads_and_dashboard_edits_share_one_access_classification`,
@@ -273,11 +282,11 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 ## Invariants
 
 - M27. Locks, the alarm, garage doors, gates and anything else that opens
-  the house are never operated; the plan prompt forbids edits that touch
-  them, the proposal path cannot reach them, and a dashboard edit never
-  touches a protected card (M18): one that names a lock, alarm or cover
-  entity or any entity named like access hardware, filters for those
-  domains, or targets a device, area, floor or label.
+  the house are never operated. The plan prompt forbids edits that touch
+  them and the proposal path cannot reach them. Dashboards: only core
+  display-only cards with no tap actions are ever edited, and anything
+  else is text-only (M18); such a card is still refused when anything in
+  it names, matches or could select access hardware.
 - M28. The daemon executes, the AI proposes; no maintenance path changes
   the agent itself, the Supervisor or the host; the hard gates (update
   rule, self-guard, approvals) are unchanged except for the additions above.

@@ -22,6 +22,7 @@ from opsd.dashboards import (
     binding,
     card_types,
     digest,
+    editable,
     parse_edit,
     read_all,
     touches_protected,
@@ -38,15 +39,15 @@ GENERATED = "example-generated"
 
 def config() -> dict[str, Any]:
     return {"views": [{"title": "Home", "sections": [{"type": "grid", "cards": [
-        {"type": "custom:acme-gauge", "entity": "sensor.acme_power", "max_value": 5000},
+        {"type": "history-graph", "entity": "sensor.acme_power", "hours_to_show": 5000},
         {"type": "vertical-stack", "cards": [
-            {"type": "custom:acme-gauge", "entity": "sensor.acme_solar", "max_value": 3000, "needle": True},
-            {"type": "entities", "entities": ["sensor.acme_power"], "max_value": 1},
+            {"type": "history-graph", "entity": "sensor.acme_solar", "hours_to_show": 3000, "needle": True},
+            {"type": "entities", "entities": ["sensor.acme_power"], "hours_to_show": 1},
         ]},
     ]}]}]}  # fmt: skip
 
 
-EDIT = Edit("custom:acme-gauge", None, (("max_value", "max"),))
+EDIT = Edit("history-graph", None, (("hours_to_show", "hours"),))
 
 
 class FakeLovelace:
@@ -107,39 +108,39 @@ async def approved(dw: DashboardWriter, url_path: str = BOARD, edit: Edit = EDIT
 
 
 def test_card_types_count_nested_cards_but_not_views_or_sections() -> None:
-    assert card_types(config()) == {"custom:acme-gauge": 2, "vertical-stack": 1, "entities": 1}
+    assert card_types(config()) == {"history-graph": 2, "vertical-stack": 1, "entities": 1}
 
 
 def test_apply_edit_renames_only_on_cards_of_the_type_and_keeps_everything_else() -> None:
     new, changed = apply_edit(config(), EDIT)
     cards = new["views"][0]["sections"][0]["cards"]
-    assert cards[0] == {"type": "custom:acme-gauge", "entity": "sensor.acme_power", "max": 5000}
-    assert cards[1]["cards"][0]["max"] == 3000 and cards[1]["cards"][0]["needle"] is True
+    assert cards[0] == {"type": "history-graph", "entity": "sensor.acme_power", "hours": 5000}
+    assert cards[1]["cards"][0]["hours"] == 3000 and cards[1]["cards"][0]["needle"] is True
     # Another card type keeps its own key of the same name.
-    assert cards[1]["cards"][1]["max_value"] == 1
-    assert len(changed) == 2 and all("max_value → max" in c for c in changed)
-    retyped, changed = apply_edit(config(), Edit("custom:acme-gauge", "gauge", ()))
-    assert retyped["views"][0]["sections"][0]["cards"][0]["type"] == "gauge" and len(changed) == 2
+    assert cards[1]["cards"][1]["hours_to_show"] == 1
+    assert len(changed) == 2 and all("hours_to_show → hours" in c for c in changed)
+    retyped, changed = apply_edit(config(), Edit("history-graph", "statistics-graph", ()))
+    assert retyped["views"][0]["sections"][0]["cards"][0]["type"] == "statistics-graph" and len(changed) == 2
 
 
 def test_apply_edit_never_overwrites_a_key_that_already_has_the_new_name() -> None:
-    board = {"views": [{"cards": [{"type": "custom:acme-gauge", "max_value": 1, "max": 2}]}]}
+    board = {"views": [{"cards": [{"type": "history-graph", "hours_to_show": 1, "hours": 2}]}]}
     new, changed = apply_edit(board, EDIT)
     assert new == board and changed == []
     assert binding("0123456789abcdef", BOARD, board, EDIT) is None
 
 
 @pytest.mark.parametrize("raw", [
-    {"card_type": "custom:acme-gauge"},  # nothing to do
-    {"card_type": "custom:acme-gauge", "renames": [{"old": "type", "new": "kind"}]},
-    {"card_type": "custom:acme-gauge", "renames": [{"old": "max", "new": "max"}]},
-    {"card_type": "custom:acme-gauge", "renames": [{"old": "a b", "new": "c"}]},
-    {"card_type": "custom:acme-gauge", "renames": [{"old": "a", "new": "b"}, {"old": "a", "new": "c"}]},
-    {"card_type": "custom:acme-gauge", "renames": [{"old": f"k{i}", "new": f"n{i}"} for i in range(9)]},
+    {"card_type": "history-graph"},  # nothing to do
+    {"card_type": "history-graph", "renames": [{"old": "type", "new": "kind"}]},
+    {"card_type": "history-graph", "renames": [{"old": "hours", "new": "hours"}]},
+    {"card_type": "history-graph", "renames": [{"old": "a b", "new": "c"}]},
+    {"card_type": "history-graph", "renames": [{"old": "a", "new": "b"}, {"old": "a", "new": "c"}]},
+    {"card_type": "history-graph", "renames": [{"old": f"k{i}", "new": f"n{i}"} for i in range(9)]},
     {"card_type": "<script>", "renames": [{"old": "a", "new": "b"}]},
-    {"card_type": "custom:acme-gauge", "new_type": "custom:acme-gauge"},
-    {"card_type": "custom:acme-gauge", "new_type": 3},
-    "custom:acme-gauge",
+    {"card_type": "history-graph", "new_type": "history-graph"},
+    {"card_type": "history-graph", "new_type": 3},
+    "history-graph",
     # Never a card that embeds a page, renders text or runs custom code.
     {"card_type": "picture", "new_type": "iframe"},
     {"card_type": "entities", "new_type": "markdown"},
@@ -161,11 +162,11 @@ def test_apply_edit_never_overwrites_a_key_that_already_has_the_new_name() -> No
     {"card_type": "button", "renames": [{"old": "icon_hold_action", "new": "extra"}]},
     {"card_type": "button", "renames": [{"old": "x", "new": "icon_double_tap_action"}]},
     {"card_type": "button", "renames": [{"old": "service_data", "new": "x"}]},
-    {"card_type": "custom:acme-gauge", "renames": [{"old": "sensor", "new": "entity"}]},
-    {"card_type": "custom:acme-gauge", "renames": [{"old": "sensors", "new": "entities"}]},
+    {"card_type": "history-graph", "renames": [{"old": "sensor", "new": "entity"}]},
+    {"card_type": "history-graph", "renames": [{"old": "sensors", "new": "entities"}]},
     {"card_type": "conditional", "renames": [{"old": "inner", "new": "card"}]},
     {"card_type": "vertical-stack", "renames": [{"old": "items", "new": "cards"}]},
-    {"card_type": "custom:acme-gauge", "renames": [{"old": "show", "new": "visibility"}]},
+    {"card_type": "history-graph", "renames": [{"old": "show", "new": "visibility"}]},
     {"card_type": "conditional", "renames": [{"old": "when", "new": "conditions"}]},
 ])  # fmt: skip
 def test_parse_edit_refuses_anything_off_the_narrow_shape(raw: Any) -> None:
@@ -173,10 +174,57 @@ def test_parse_edit_refuses_anything_off_the_narrow_shape(raw: Any) -> None:
 
 
 def test_a_display_card_type_is_the_only_new_type_accepted() -> None:
-    for kind in sorted(DISPLAY_CARD_TYPES):
-        edit = parse_edit({"card_type": "custom:acme-graph", "new_type": kind})
+    for kind in sorted(DISPLAY_CARD_TYPES - {"history-graph"}):
+        edit = parse_edit({"card_type": "history-graph", "new_type": kind})
         assert edit is not None and edit.new_type == kind
     assert not {"button", "tile", "picture-elements", "entity-button", "iframe", "markdown"} & DISPLAY_CARD_TYPES
+
+
+@pytest.mark.parametrize("source", ["custom:acme-gauge", "History-Graph", "history-graph ", "gauge", "entities",
+                                    "vertical-stack", "conditional", "picture-elements", "button", "tile"])  # fmt: skip
+def test_only_a_display_card_type_is_ever_the_source_of_an_edit(source: str) -> None:
+    assert parse_edit({"card_type": source, "renames": [{"old": "hours_to_show", "new": "hours"}]}) is None
+    assert parse_edit({"card_type": "history-graph", "renames": [{"old": "hours_to_show", "new": "hours"}]})
+
+
+@pytest.mark.parametrize("extra", [
+    {"card": {"type": "entities"}},
+    {"cards": []},
+    {"elements": []},
+    {"header": {"type": "picture", "image": "/local/x.png"}},
+    {"footer": [{"options": {"type": "buttons"}}]},
+    {"tap_action": {"action": "more-info"}},
+    {"options": {"icon_hold_action": {"action": "none"}}},
+])  # fmt: skip
+def test_a_display_card_that_holds_cards_or_actions_is_never_edited(extra: dict[str, Any]) -> None:
+    board = {"views": [{"cards": [{"type": "history-graph", "hours_to_show": 24} | extra]}]}
+    assert not editable(board, EDIT) and binding("0123456789abcdef", BOARD, board, EDIT) is None
+    plain = {"views": [{"cards": [{"type": "history-graph", "hours_to_show": 24, "entities": ["sensor.acme_power"]}]}]}
+    assert editable(plain, EDIT) and binding("0123456789abcdef", BOARD, plain, EDIT) is not None
+
+
+@pytest.mark.parametrize("value", [
+    {"entities": ["sensor.acme_power"], "title": "{{ states.lock.example_door.state }}"},
+    {"entities": [{"entity": "sensor.x", "name": "{{ states('cover.example_shutter') }}"}]},
+    # The Jinja `states.<domain>.<object>` form (a dot before the domain still counts).
+    {"title": "{{ states.cover.example_shutter.state }}"},
+    {"title": "{{ states.alarm_control_panel.example_home.state }}"},
+    {"title": "Front door"},
+    {"title": "Garage door opener"},
+    {"entities": ["sensor.acme_*"]},
+    {"entities": ["/^sensor\\.acme/"]},
+    {"entity_id": "all"},
+    {"entity_id": ["sensor.x", "ALL"]},
+    {"integration": "acme_weather"},
+    {"device": "Example Hub"},
+    {"area": "kitchen"},
+    {"label": "garden"},
+    {"attributes": {"device_class": "door"}},
+    {"domain": "sensor"},
+])  # fmt: skip
+def test_every_string_of_a_display_card_is_checked_for_access_hardware(value: dict[str, Any]) -> None:
+    board = {"views": [{"cards": [{"type": "history-graph", "hours_to_show": 24} | value]}]}
+    assert touches_protected(board, EDIT) and binding("0123456789abcdef", BOARD, board, EDIT) is None
 
 
 def test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover() -> None:
@@ -185,10 +233,10 @@ def test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover() -> None
             "views": [
                 {
                     "cards": [
-                        {"type": "custom:acme-gauge", "max_value": 1},
+                        {"type": "history-graph", "hours_to_show": 1},
                         {
                             "type": "vertical-stack",
-                            "cards": [{"type": "custom:acme-gauge", "max_value": 2, "entities": [entity]}],
+                            "cards": [{"type": "history-graph", "hours_to_show": 2, "entities": [entity]}],
                         },
                     ]
                 }
@@ -201,7 +249,7 @@ def test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover() -> None
         "views": [
             {
                 "cards": [
-                    {"type": "custom:acme-gauge", "max_value": 1},
+                    {"type": "history-graph", "hours_to_show": 1},
                     {"type": "entities", "entities": ["lock.example_door"]},
                 ]
             }
@@ -210,7 +258,7 @@ def test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover() -> None
     assert not touches_protected(board, EDIT) and binding("0123456789abcdef", BOARD, board, EDIT) is not None
     # Not a prefix match inside another word, and a gadget's child lock opens nothing.
     for harmless in ("sensor.clock_offset", "switch.example_purifier_child_lock", "sensor.blocked_requests"):
-        assert not touches_protected({"cards": [{"type": "custom:acme-gauge", "entity": harmless}]}, EDIT), harmless
+        assert not touches_protected({"cards": [{"type": "history-graph", "entity": harmless}]}, EDIT), harmless
 
 
 @pytest.mark.parametrize("card", [
@@ -232,7 +280,7 @@ def test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover() -> None
     {"tap_action": {"action": "perform-action", "target": {"floor_id": "ground"}}},
 ])  # fmt: skip
 def test_a_card_that_names_filters_or_targets_access_hardware_is_protected(card: dict[str, Any]) -> None:
-    nested = {"views": [{"cards": [{"type": "vertical-stack", "cards": [{"type": "custom:acme-gauge"} | card]}]}]}
+    nested = {"views": [{"cards": [{"type": "vertical-stack", "cards": [{"type": "history-graph"} | card]}]}]}
     assert touches_protected(nested, EDIT)
     assert binding("0123456789abcdef", BOARD, nested, EDIT) is None
 
@@ -243,7 +291,7 @@ async def test_a_card_that_names_a_lock_after_the_approval_is_never_written(stor
     approval = await approved(dw)
     fake.boards[BOARD]["views"][0]["sections"][0]["cards"][0]["entity"] = "lock.example_door"
     outcome = await dw.execute(approval)
-    assert outcome.state == "refused" and "lock" in outcome.detail and fake.saves == []
+    assert outcome.state == "refused" and "access hardware" in outcome.detail and fake.saves == []
     assert store.approval(approval)["state"] == "void"  # type: ignore[index]
 
 
@@ -342,7 +390,7 @@ async def test_an_approved_plan_is_backed_up_saved_and_read_back(store: Store, t
     outcome = await dw.execute(approval)
     assert outcome.state == "applied", outcome.detail
     assert fake.saves and fake.saves[0][0] == BOARD
-    assert fake.boards[BOARD]["views"][0]["sections"][0]["cards"][0]["max"] == 5000
+    assert fake.boards[BOARD]["views"][0]["sections"][0]["cards"][0]["hours"] == 5000
     backups = list((tmp_path / "data" / "maintenance" / "dashboards" / BOARD).glob("*.json"))
     assert len(backups) == 1 and stat.S_IMODE(os.stat(backups[0]).st_mode) == 0o600
     assert stat.S_IMODE(os.stat(backups[0].parent).st_mode) == 0o700
@@ -418,8 +466,8 @@ async def test_confirmation_needs_the_admin_who_asked_and_an_unchanged_dashboard
     assert bound is not None
     found = dw.approvals.request_dashboard(bound, title="t", user=ADMIN)
     assert dw.approvals.confirm_dashboard(found["id"], user="someone-else", binding_now=bound) == "refused"
-    moved = binding("0123456789abcdef", BOARD, {"views": [{"cards": [{"type": "custom:acme-gauge",
-                                                                      "max_value": 9}]}]}, EDIT)  # fmt: skip
+    moved = binding("0123456789abcdef", BOARD, {"views": [{"cards": [{"type": "history-graph",
+                                                                      "hours_to_show": 9}]}]}, EDIT)  # fmt: skip
     assert dw.approvals.confirm_dashboard(found["id"], user=ADMIN, binding_now=moved) == "void"
     # An update approval path never accepts a dashboard approval.
     assert dw.approvals.confirm(found["id"], user=ADMIN, current=None) in ("refused", "unknown")

@@ -83,8 +83,12 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
 - S11. **The upgrade from 18.** One transaction: the five tables whose shape
   changes (`tasks`, `approvals`, `turns`, `runs`, `items`) are renamed
   aside and created anew; every row is copied; 18's other tables are
-  dropped; the indexes are created. It copies: every task (the never-used
-  `condition` and `expires_at` columns go); every approval, approval
+  dropped; the indexes are created. It copies: every task of a kind this
+  version runs (the never-used `condition` and `expires_at` columns go; the
+  never-run state `waiting_approval` becomes `pending`; a task of a kind no
+  version ran, `watch`, `window` or `intent`, is dropped and an item shown
+  for it is resolved `cancelled` "not run by this version (an unused task
+  kind)" with an event); every approval, approval
   proposal, change proposal and fact proposal into `approvals` (approvals
   with their plan, hash, state, decider and the job that used them,
   unchanged); the main chat's turns (a store without a recorded main chat
@@ -95,7 +99,10 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   standalone items, into `activity.seq`. A change row whose files or
   summary is not valid JSON is copied with an empty list. The activity
   log and the unused `spend` table are dropped: every activity entry
-  already was an item or an item event. `kv` keeps every key except the
+  already was an item or an item event, and an entry an older version never
+  made an item for becomes a resolved standalone item (`done`, or `failed`
+  when its title says so; never in Needs you) with one event, as migration
+  17 did. `kv` keeps every key except the
   item backfill marker and panel confirmations (`confirm:*`), which nothing
   reads. 0.18's `/data/reloads.json` is copied verbatim into `reload.last`
   in the same transaction and deleted after it commits. Tests in
@@ -103,7 +110,10 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   once; a pending request, change and fact stay actionable; a running job
   and its night carry on; held pushes, push actions, reminders, retries,
   the chat, the ledger, counters, kv, items, events, the audit log and the
-  reload times survive).
+  reload times survive), and `tests/test_store_history.py`, which replays
+  a store from schema 1 through every frozen migration with rows written in
+  each version's shape and upgrades it (nothing open is lost, no legacy row
+  fails the upgrade).
 - S12. **The copy before the upgrade.** Before the upgrade from 18 starts,
   the store is copied with SQLite's backup API (a consistent snapshot of
   the live WAL database, never a raw file copy) to `/data/ops.db.v18.bak`:

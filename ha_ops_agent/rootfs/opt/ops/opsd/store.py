@@ -312,6 +312,43 @@ UPGRADE_18 = """
             change, footnote, quiet, revision, as_of, at, needs_since, resolved_at, created_at, updated_at, source,
             push
         FROM old_items;
+    UPDATE items SET state = 'cancelled', gist = 'not run by this version (an unused task kind)', need = NULL,
+            actions = '[]', needs_since = NULL, revision = revision + 1,
+            resolved_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now'), at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now'),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
+        WHERE key IN (SELECT 'task:' || id FROM old_tasks
+            WHERE kind NOT IN ('reminder', 'followup', 'recurring', 'retry'))
+        AND state NOT IN ('done', 'failed', 'cancelled', 'expired');
+    INSERT INTO item_events (item_id, at, actor, text, revision)
+        SELECT id, updated_at, 'daemon', 'Cancelled: not run by this version (an unused task kind)', revision FROM items
+        WHERE key IN (SELECT 'task:' || id FROM old_tasks
+            WHERE kind NOT IN ('reminder', 'followup', 'recurring', 'retry'))
+        AND gist = 'not run by this version (an unused task kind)';
+    INSERT INTO item_events (item_id, at, actor, text, revision)
+        SELECT 'a-' || id, at, 'daemon',
+            CASE WHEN kind IN ('notice', 'followup', 'investigation') THEN 'The agent sent you a message'
+                ELSE substr(title, 1, 160) END, 1
+        FROM activity a WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.id = 'a-' || a.id OR i.key = 'activity:' || a.id
+            OR i.id = a.item);
+    INSERT INTO items (id, key, kind, kicker, title, state, gist, agent, quiet, revision, as_of, at, resolved_at,
+            created_at, updated_at, source)
+        SELECT 'a-' || id, 'activity:' || id,
+            CASE kind WHEN 'backup' THEN 'backup' WHEN 'reload' THEN 'reload' WHEN 'updates' THEN 'window'
+                WHEN 'approval' THEN 'update' WHEN 'change' THEN 'proposal' WHEN 'investigation' THEN 'investigation'
+                WHEN 'reminder' THEN 'reminder' WHEN 'followup' THEN 'reminder' ELSE 'check' END,
+            CASE kind WHEN 'notice' THEN 'Message from the agent' WHEN 'followup' THEN 'Follow-up'
+                WHEN 'investigation' THEN 'Investigation' ELSE '' END,
+            CASE WHEN kind IN ('notice', 'followup', 'investigation') THEN 'The agent sent you a message'
+                ELSE substr(title, 1, 160) END,
+            CASE WHEN lower(title) LIKE '%failed%' OR lower(title) LIKE '%rolled back%' THEN 'failed' ELSE 'done' END,
+            CASE WHEN kind IN ('notice', 'followup', 'investigation') THEN '' ELSE substr(detail, 1, 300) END,
+            CASE WHEN kind IN ('notice', 'followup', 'investigation')
+                THEN json_object('text', substr(title || ': ' || detail, 1, 2000), 'sources', json_array(),
+                    'not_read', json_array(), 'run_id', NULL)
+                ELSE NULL END,
+            CASE WHEN needs_admin = 0 THEN 1 ELSE 0 END, 1, at, at, at, at, at, json_object('activity', id)
+        FROM activity a WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.id = 'a-' || a.id OR i.key = 'activity:' || a.id
+            OR i.id = a.item);
     INSERT OR REPLACE INTO kv (key, value, updated_at)
         SELECT 'count:' || day || ':' || name, CAST(n AS TEXT), day || 'T00:00:00+00:00' FROM counters;
     INSERT OR REPLACE INTO kv (key, value, updated_at)

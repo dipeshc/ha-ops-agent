@@ -125,6 +125,8 @@ class FakeHA:
         self.ws_fields: list[tuple[str, dict[str, Any]]] = []
         # Storage dashboards by url_path (lovelace/...): none unless a test adds one.
         self.lovelace: dict[str, Any] = {}
+        # Dashboards listed in another mode than storage (url_path -> mode).
+        self.lovelace_modes: dict[str, str] = {}
         self.components: list[str] = ["zha", "acme_solar", "sensor.acme_solar"]
 
     async def ws(self, msg_type: str, **fields: Any) -> Any:
@@ -154,7 +156,7 @@ class FakeHA:
         # The dashboard commands go through the real self-guard, as on a live websocket.
         selfguard.check_ws(msg_type, fields)
         if msg_type == "lovelace/dashboards/list":
-            return [{"url_path": k, "title": k, "mode": "storage"} for k in self.lovelace]
+            return [{"url_path": k, "title": k, "mode": self.lovelace_modes.get(k, "storage")} for k in self.lovelace]
         if msg_type == "lovelace/resources":
             return []
         if msg_type == "lovelace/config":

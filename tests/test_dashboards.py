@@ -22,6 +22,7 @@ from opsd.dashboards import (
     card_types,
     digest,
     parse_edit,
+    read_all,
     touches_protected,
 )
 from opsd.policy import PolicyTier
@@ -52,12 +53,15 @@ class FakeLovelace:
 
     def __init__(self) -> None:
         self.boards: dict[str, Any] = {BOARD: config(), GENERATED: config()}
+        self.modes: dict[str, str] = {BOARD: "storage", GENERATED: "storage"}
         self.saves: list[tuple[str, Any]] = []
         self.fail_save = 0
         self.corrupt_save = False
 
     async def ws(self, msg_type: str, **fields: Any) -> Any:
         selfguard.check_ws(msg_type, fields)
+        if msg_type == "lovelace/dashboards/list":
+            return [{"url_path": k, "title": k, "mode": mode} for k, mode in self.modes.items()]
         if msg_type == "lovelace/config":
             return copy.deepcopy(self.boards[fields["url_path"]])
         if msg_type == "lovelace/config/save":
@@ -191,6 +195,31 @@ async def test_a_card_that_names_a_lock_after_the_approval_is_never_written(stor
     outcome = await dw.execute(approval)
     assert outcome.state == "refused" and "lock" in outcome.detail and fake.saves == []
     assert store.approval(approval)["state"] == "void"  # type: ignore[index]
+
+
+async def test_a_dashboard_not_in_storage_mode_is_never_written(store: Store, tmp_path: Path) -> None:
+    fake = FakeLovelace()
+    dw = writer(store, tmp_path, fake)
+    assert await dw.mode_problem(BOARD) is None
+    approval = await approved(dw)
+    # Switched to YAML mode (or removed) after the approval: refused with the reason, nothing written.
+    fake.modes[BOARD] = "yaml"
+    outcome = await dw.execute(approval)
+    assert outcome.state == "refused" and "YAML-mode" in outcome.detail and fake.saves == []
+    del fake.modes[BOARD]
+    assert "not a dashboard" in str(await dw.mode_problem(BOARD))
+    # A mode Home Assistant does not call storage is not storage.
+    fake.modes[BOARD] = "auto"
+    assert "YAML-mode" in str(await dw.mode_problem(BOARD))
+
+
+async def test_the_inventory_counts_only_listed_storage_dashboards_as_writable() -> None:
+    fake = FakeLovelace()
+    fake.modes = {BOARD: "storage", GENERATED: "yaml"}
+    fake.boards[""] = config()
+    found, configs, problems = await read_all(fake.ws)
+    assert problems == [] and found[BOARD]["mode"] == "storage" and found[GENERATED]["mode"] == "yaml"
+    assert BOARD in configs and GENERATED not in configs
 
 
 # ------------------------------------------------------------------ the guard

@@ -1470,6 +1470,9 @@ class Daemon:
         bound = (maintenance.dashboard_plan(store, finding) or {}).get("binding")
         if not isinstance(bound, dict) or [str(bound.get("after"))] != shown:
             raise ApprovalError("The plan changed; open it again.")
+        problem = await writer.mode_problem(str(bound.get("url_path") or ""))
+        if problem is not None:
+            raise ApprovalError(problem)
         now_bound, _ = await writer.binding_now(bound)
         if now_bound != bound:
             raise ApprovalError("The dashboard changed since the plan was made; the next scan makes a new plan.")

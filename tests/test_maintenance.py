@@ -583,6 +583,12 @@ async def test_the_panel_applies_an_approved_dashboard_plan_end_to_end(
         item = d.store.item_by_key(f"maint:{card.key}")
         assert item["state"] == "waiting" and item["need"]["primary"]["id"] == "apply_dashboard"
         act = {"action": "apply_dashboard", "revision": item["revision"]}
+        # Listed in YAML mode when the admin taps: the request is refused with the reason, nothing queued.
+        h.fake.lovelace_modes["example-garden"] = "yaml"
+        status, _, body = await panel.request("POST", f"/api/items/{item['id']}/act", body=act)
+        assert status == 409 and "YAML-mode" in json.dumps(body)
+        assert d.store.approvals(states=("pending", "approved"), limit=10) == []
+        del h.fake.lovelace_modes["example-garden"]
         status, _, body = await panel.request("POST", f"/api/items/{item['id']}/act", body=act)
         assert status == 200, body
         event = await d.queue.get()

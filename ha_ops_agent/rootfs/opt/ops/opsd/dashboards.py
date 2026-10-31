@@ -14,7 +14,8 @@ that names a lock, alarm or cover entity (`touches_protected`); such a plan stay
 
 1. the approval is a dashboard approval, approved and unexpired; `dashboard.save` is not tightened to
    `never` by the options; act mode; the dashboard is not the default one, not malformed and not in
-   the profile's `dashboards.generated` (`selfguard.dashboard_unwritable`);
+   the profile's `dashboards.generated` (`selfguard.dashboard_unwritable`); Home Assistant lists it
+   now in `storage` mode (`mode_problem`, checked at the approval request too);
 2. it reads the dashboard again: the binding recomputed from it (its SHA-256 before, the edit applied,
    the SHA-256 after) must still be the approved one, else nothing is written (the plan is stale);
 3. it writes the current JSON to `<data>/maintenance/dashboards/<url_path>/` (0600, root only) and
@@ -220,6 +221,11 @@ def exec_internal(_ctx: ExecContext, _args: Args) -> str:
     raise CapabilityError("only the daemon saves a dashboard, after the admin approved its plan")
 
 
+def board_mode(board: Mapping[str, Any]) -> str:
+    """`storage` only when Home Assistant lists the dashboard as one; anything else is never written."""
+    return "storage" if board.get("mode") == "storage" else "yaml"
+
+
 async def read_all(ws: Ws) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[str]]:
     """(dashboards by url_path with their mode, title and card types; storage configs by url_path; problems),
     read-only. The default dashboard is "" here; one Home Assistant generates (no stored config) is left out."""
@@ -236,7 +242,7 @@ async def read_all(ws: Ws) -> tuple[dict[str, dict[str, Any]], dict[str, Any], l
         url_path = board.get("url_path")
         if not isinstance(url_path, str) or (url_path and not selfguard.DASHBOARD_PATH_RE.fullmatch(url_path)):
             continue
-        mode = "yaml" if board.get("mode") == "yaml" else "storage"
+        mode = board_mode(board)
         try:
             config = await ws("lovelace/config", url_path=url_path) if url_path else await ws("lovelace/config")
         except Exception as err:  # noqa: BLE001 - "no config" is normal for a generated default dashboard
@@ -300,6 +306,20 @@ class DashboardWriter:
             return "observe mode: dashboards change only in agent.mode: act"
         return None
 
+    async def mode_problem(self, url_path: str) -> str | None:
+        """Why this dashboard is not a storage dashboard Home Assistant lists now, or None."""
+        try:
+            listed = await self._ws("lovelace/dashboards/list")
+        except Exception as err:  # noqa: BLE001 - unknown is never writable
+            return f"the dashboard list could not be read ({clean_text(str(err), 120)})"
+        board = next((b for b in listed if isinstance(b, Mapping) and b.get("url_path") == url_path), None) if (
+            isinstance(listed, list)) else None  # fmt: skip
+        if board is None:
+            return f"{url_path} is not a dashboard Home Assistant lists"
+        if board_mode(board) != "storage":
+            return f"{url_path} is a YAML-mode dashboard: its file is changed by hand, never by the agent"
+        return None
+
     async def read(self, url_path: str) -> Any:
         return await self._ws("lovelace/config", url_path=url_path)
 
@@ -349,6 +369,8 @@ class DashboardWriter:
         if found is None or found.get("state") != "approved" or (found.get("plan") or {}).get("kind") != "dashboard":
             return Outcome("refused", "no approved dashboard plan")
         problem = self.allowed() or selfguard.dashboard_unwritable(url_path, self.generated)
+        if problem is None:
+            problem = await self.mode_problem(url_path)
         if problem is not None:
             self._audit("refused", bound, problem)
             return Outcome("refused", problem)

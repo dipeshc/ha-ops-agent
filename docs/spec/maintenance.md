@@ -84,7 +84,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   file its integration keys (`configuration.yaml` and `packages/` only) and
   its `platform:` names, the custom integrations (manifest name, version,
   GitHub repository, entity platforms and entity count here), the frontend
-  plugins (dashboard resources), every dashboard's mode and card types, and
+  plugins (dashboard resources), every dashboard's mode (`storage` only when
+  Home Assistant lists it so, else `yaml`) and card types, and
   the installed add-ons. Test `test_the_inventory_reads_what_the_install_uses`,
   `test_yaml_features_name_integration_keys_and_platforms`.
 - M9. **Readable files only.** The YAML read is the run copy's own list: the
@@ -190,7 +191,10 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   `test_confirmation_needs_the_admin_who_asked_and_an_unchanged_dashboard`.
 - M22. **Execution** (`DashboardWriter.execute`): refused unless approved,
   in act mode, not tightened to `never` by `capabilities.never`, and the
-  dashboard is writable; a dashboard that changed since the approval voids
+  dashboard is writable and listed by Home Assistant right now with mode
+  `storage` (`mode_problem`, also checked when the admin requests the
+  approval; any other mode, an unlisted dashboard or an unreadable list is
+  refused with the reason); a dashboard that changed since the approval voids
   it and nothing is written; the current JSON is backed up to
   `<data>/maintenance/dashboards/<url_path>/` (directory 0700, file 0600,
   read back, the last 10 kept) before the approval is consumed; the save is
@@ -201,6 +205,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   `test_a_failed_read_back_restores_the_backup`,
   `test_a_failed_save_and_a_failed_restore_escalate`,
   `test_observe_mode_and_a_never_option_refuse_even_an_approved_plan`,
+  `test_a_dashboard_not_in_storage_mode_is_never_written`,
+  `test_the_inventory_counts_only_listed_storage_dashboards_as_writable`,
   `test_the_panel_applies_an_approved_dashboard_plan_end_to_end`.
 - M23. **Self-guard.** `lovelace/config/save` is refused unless it runs
   inside `selfguard.approved_dashboard_write(url_path, generated=...)` with

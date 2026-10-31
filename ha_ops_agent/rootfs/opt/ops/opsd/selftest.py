@@ -151,6 +151,7 @@ def secret_targets(paths: Paths, daemon_pid: int) -> list[str]:
         str(paths.push_cache_file),
         str(paths.state_file),
         str(paths.store_file),
+        str(paths.store_copy),
         "/mnt/ha",
         str(paths.ha_config),
         str(paths.ha_config / "secrets.yaml"),
@@ -373,6 +374,10 @@ def run_selftest(
         version.stdout.strip()[:80] or version.stderr.strip()[:200],
     )
     result.checks["store_private"] = check_store(paths.store_file, expected_owner=expected_store_owner)
+    if paths.store_copy.exists():
+        # The copy taken before the upgrade holds the same records: private the same way.
+        copy = check_store(paths.store_copy, expected_owner=expected_store_owner)
+        result.checks["store_copy_private"] = copy
     result.checks["socket_boundary"] = check_socket(
         run, run_outsider or runner_for(OUTSIDER, Path("/")), paths.socket_path
     )

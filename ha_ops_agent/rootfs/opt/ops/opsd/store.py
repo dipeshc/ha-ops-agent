@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -349,6 +350,9 @@ JOB_FINAL = frozenset({"succeeded", "rolled_back", "rollback_failed", "failed", 
 UPDATE_KEEP = timedelta(days=180)
 
 MAX_FACT_CHARS = 500
+# The copy taken before the upgrade from 18 (`<store>.v18.bak`), kept for a manual rollback.
+UPGRADE_COPY_SUFFIX = ".v18.bak"
+UPGRADE_COPY_KEEP = timedelta(days=14)
 _FILE_MODE = 0o600
 # The reload rate state (`opsd.reload`): `{domain: last reload}`, the same JSON 0.18's reloads.json held.
 RELOAD_KEY = "reload.last"
@@ -591,6 +595,11 @@ def _task(row: sqlite3.Row) -> Task:
     )
 
 
+def upgrade_copy(store_path: Path) -> Path:
+    """Where the copy taken before the upgrade from 18 lives."""
+    return store_path.with_name(store_path.name + UPGRADE_COPY_SUFFIX)
+
+
 def _statements(script: str) -> Iterator[str]:
     return (s for s in script.split(";") if s.strip())
 
@@ -688,6 +697,7 @@ class Store:
             raise
         self._conn = conn
         self._fix_modes()
+        self.expire_upgrade_copy(datetime.now(UTC))
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         """Create the schema on an empty file, or upgrade 0.18's schema; refuse every other version."""
@@ -711,6 +721,7 @@ class Store:
             raise StoreError(f"store schema {version} is older than this agent upgrades ({UPGRADE_FROM}, add-on "
                              "0.18): install 0.18 first and start it once, or restore the add-on's /data from a "
                              "backup")  # fmt: skip
+        self._copy_aside(conn)
         reloads = self._read_reloads()
         renames = "".join(f"ALTER TABLE {name} RENAME TO old_{name};" for name in _REBUILT)
         drops = "".join(f"DROP TABLE {name};" for name in _FOLDED)
@@ -718,6 +729,51 @@ class Store:
                   extra=(lambda c: self._import_reloads(c, reloads)) if reloads is not None else None)  # fmt: skip
         with contextlib.suppress(OSError):
             (self.path.parent / _RELOADS_FILE).unlink()
+
+    def _copy_aside(self, conn: sqlite3.Connection) -> None:
+        """Before the upgrade from 18: a consistent copy of the store (SQLite's backup API), private like it.
+
+        For the admin's manual rollback (storage.md S12). Without it the upgrade does not start.
+        """
+        target = upgrade_copy(self.path)
+        temp = target.with_name(f"{target.name}.tmp")
+        try:
+            temp.unlink(missing_ok=True)
+            # Created private first: the copy is never readable by anyone the store is not.
+            os.close(os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, _FILE_MODE))
+            copy = sqlite3.connect(temp)
+            try:
+                conn.backup(copy)
+            finally:
+                copy.close()
+            os.chmod(temp, _FILE_MODE)
+            made, store = temp.stat(), self.path.stat()
+            if stat.S_IMODE(made.st_mode) != _FILE_MODE or made.st_uid != store.st_uid:
+                raise OSError(f"mode {oct(stat.S_IMODE(made.st_mode))} owner {made.st_uid}, not the store's")
+            with temp.open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temp, target)
+        except (OSError, sqlite3.Error) as err:
+            with contextlib.suppress(OSError):
+                temp.unlink()
+            _LOGGER.critical("store not copied aside; not upgrading", extra={"error": str(err)[:200]})
+            raise StoreError(f"could not copy the store aside before the upgrade ({type(err).__name__}: {err}); "
+                             "the store is unchanged") from err  # fmt: skip
+        _LOGGER.info("store copied aside before the upgrade", extra={"copy": str(target)})
+
+    def expire_upgrade_copy(self, now: datetime) -> bool:
+        """Delete the pre-upgrade copy once it is `UPGRADE_COPY_KEEP` old (at a start and the daily prune)."""
+        target = upgrade_copy(self.path)
+        try:
+            made = datetime.fromtimestamp(target.stat().st_mtime, UTC)
+        except FileNotFoundError:
+            return False
+        if now - made < UPGRADE_COPY_KEEP:
+            return False
+        with contextlib.suppress(FileNotFoundError):
+            target.unlink()
+        _LOGGER.info("pre-upgrade store copy deleted", extra={"copy": str(target)})
+        return True
 
     @staticmethod
     def _run(conn: sqlite3.Connection, script: str, *, version: int,
@@ -2074,6 +2130,7 @@ class Store:
         Runs and counters are kept at least 8 days, so the rolling 7-day
         window and today's counters are never pruned away.
         """
+        self.expire_upgrade_copy(now)
         cutoff = _iso(now - max(keep, MIN_KEEP))
         week, quarter = _iso(now - timedelta(days=7)), _iso(now - timedelta(days=90))
         with self._tx() as conn:

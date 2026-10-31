@@ -389,3 +389,69 @@ def test_old_entries_and_odd_rows_never_break_the_upgrade(tmp_path: Path) -> Non
         assert change is not None and change["files"] == [] and change["summary"] == []
     finally:
         store.close()
+
+
+def test_the_store_is_copied_aside_before_the_upgrade(tmp_path: Path) -> None:
+    import os
+    import stat
+
+    from opsd.store import upgrade_copy
+
+    path = tmp_path / "ops.db"
+    v18_store(path)
+    before = counts(path)
+    store = Store.open(path)
+    store.close()
+    copy = upgrade_copy(path)
+    assert copy.name == "ops.db.v18.bak" and stat.S_IMODE(copy.stat().st_mode) == 0o600
+    assert copy.stat().st_uid == os.stat(path).st_uid and not list(tmp_path.glob("*.tmp"))
+    # A consistent 0.18 store: what the admin puts back to roll back by hand.
+    conn = sqlite3.connect(copy)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    finally:
+        conn.close()
+    assert counts(copy) == before
+
+
+def test_a_copy_that_cannot_be_made_refuses_the_upgrade(tmp_path: Path) -> None:
+    from opsd.store import upgrade_copy
+
+    path = tmp_path / "ops.db"
+    v18_store(path)
+    before = counts(path)
+    # Something in the way of the copy (here a directory where its temporary file goes).
+    blocker = upgrade_copy(path).with_name("ops.db.v18.bak.tmp")
+    blocker.mkdir()
+    (blocker / "x").write_text("x")
+    with pytest.raises(StoreUnavailable, match="could not copy the store aside"):
+        Store.open_or_recover(path, retry_delays=())
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+    finally:
+        conn.close()
+    assert counts(path) == before and not upgrade_copy(path).exists()
+
+
+def test_the_copy_is_deleted_after_14_days(tmp_path: Path) -> None:
+    import os
+
+    from opsd.store import upgrade_copy
+
+    path = tmp_path / "ops.db"
+    v18_store(path)
+    store = Store.open(path)
+    copy = upgrade_copy(path)
+    made = copy.stat().st_mtime
+    assert not store.expire_upgrade_copy(NOW + timedelta(days=13)) and copy.exists()
+    store.prune(now=datetime.fromtimestamp(made, UTC) + timedelta(days=14, minutes=1))
+    assert not copy.exists()
+    store.close()
+    # At a start too.
+    copy.write_bytes(b"")
+    old = (NOW - timedelta(days=15)).timestamp()
+    os.utime(copy, (old, old))
+    Store.open(path).close()
+    assert not copy.exists()

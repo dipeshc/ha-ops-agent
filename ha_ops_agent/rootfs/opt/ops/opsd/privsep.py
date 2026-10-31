@@ -94,6 +94,7 @@ def sensitive_paths(paths: Paths) -> list[Path]:
         paths.ssh_key,
         paths.state_file,
         paths.store_file,
+        paths.store_copy,
         paths.ha_config,
         paths.ha_config / "secrets.yaml",
         paths.ha_config / ".storage",

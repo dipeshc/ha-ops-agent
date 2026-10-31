@@ -17,9 +17,11 @@ changes beyond the points below.
   update night, held pushes, reminders, the chat, the usage ledger and
   every item keep working. If the migration fails, the store stays as 0.18
   left it and the agent runs degraded until it succeeds. A store older
-  than 0.18 is refused: install 0.18 first and start it once. Going back
-  to 0.18 after the upgrade is refused as before; restore the add-on's
-  backup taken before the update.
+  than 0.18 is refused: install 0.18 first and start it once. Before the
+  migration the store is copied to `/data/ops.db.v18.bak` (kept 14 days);
+  without the copy the migration does not start. To go back to 0.18: stop
+  the add-on, put `ops.db.v18.bak` back as `ops.db`, install 0.18.x (or
+  restore the add-on's backup taken before the update).
 - Items are written in the same transaction as the record they show (an
   update job, an approval, a change, a reminder, the health check's open
   items, a maintenance scan) instead of being re-derived every minute.

@@ -104,6 +104,24 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   and its night carry on; held pushes, push actions, reminders, retries,
   the chat, the ledger, counters, kv, items, events, the audit log and the
   reload times survive).
+- S12. **The copy before the upgrade.** Before the upgrade from 18 starts,
+  the store is copied with SQLite's backup API (a consistent snapshot of
+  the live WAL database, never a raw file copy) to `/data/ops.db.v18.bak`:
+  created 0600 before anything is written to it, written as a temporary
+  file and renamed into place, and checked to have the store's mode and
+  owner. One `store copied aside before the upgrade` line is logged. If the
+  copy cannot be made, the upgrade MUST NOT start: `StoreUnavailable`, the
+  store untouched, the daemon degraded. The copy is deleted 14 days after
+  it was made, at a start or the daily prune. The self-test checks it like
+  the store (root, 0600) and the AI's account can never reach it
+  ([privsep.md](privsep.md) V4, V7). **Manual rollback** (for the admin;
+  nothing downgrades by itself): stop the add-on, move
+  `/data/ops.db.v18.bak` over `/data/ops.db` (and delete `ops.db-wal` and
+  `ops.db-shm`), install 0.18.x, start it. What happened after the
+  upgrade is not in the copy. Tests
+  `test_the_store_is_copied_aside_before_the_upgrade`,
+  `test_a_copy_that_cannot_be_made_refuses_the_upgrade`,
+  `test_the_copy_is_deleted_after_14_days`.
 - S11a. Maintenance state lives in `kv` under `maintenance:` (`findings`,
   `meta`, and per finding `plan:`, `dashboard:`, `result:`, `migrated:`,
   `hidden:`); each scan blanks the plan, dashboard-plan and result records
@@ -144,7 +162,8 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   need without the store (S5): `/data/state.json` (`AgentState`, unknown
   keys ignored), `baseline.json`, `history.jsonl` (the last 100 lines are
   read), `notify.json` (the push budgets, N4), `open-items.json`; and
-  `selftest.json` (the self-test's result, written only), `secrets/push.json`
+  `selftest.json` (the self-test's result, written only), `ops.db.v18.bak`
+  (S12, for 14 days after the upgrade), `secrets/push.json`
   (the cached relay URL), `secrets/claude_oauth_token`. Up to 30 snapshots
   live under `/data/snapshots`. Dashboard backups taken before a dashboard
   save live under `/data/maintenance/dashboards/<url_path>/` (directories

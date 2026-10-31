@@ -33,6 +33,7 @@ Implementation: `rootfs/etc/s6-overlay/scripts/init-ops.sh`,
   the execute bits of every ancestor and the read (file) or execute
   (directory) bit of each sensitive path against the `ops` uid and gids:
   `options.json`, `/data/secrets`, the deploy key, `state.json`, `ops.db`,
+  its pre-upgrade copy `ops.db.v18.bak` ([storage.md](storage.md) S12),
   `/mnt/ha/config`, its `secrets.yaml` and `.storage`,
   `/run/s6/container_environment`, `/run/ops`. Any reachable path, a missing
   `ops` account or a failed self-test refuses the run (`isolation_failed`).
@@ -57,7 +58,8 @@ Implementation: `rootfs/etc/s6-overlay/scripts/init-ops.sh`,
 - V7. Checks: the `ops` uid is 1001; a deliberately exposed probe file is
   flagged (the check itself trips); nothing else is flagged; a probe run as
   `ops` under `no_new_privs` cannot read `options.json`, `/data/secrets`,
-  the deploy key, the relay cache, `state.json`, `ops.db`, `/mnt/ha`, the
+  the deploy key, the relay cache, `state.json`, `ops.db` and its
+  pre-upgrade copy, `/mnt/ha`, the
   config, `secrets.yaml`, `.storage/auth`, `.storage/core.config_entries`,
   the backup mount, the daemon's and PID 1's `/proc/*/environ`, `/run/ops`
   or the s6 environment, while it can read the probe; the probe runs with
@@ -67,7 +69,7 @@ Implementation: `rootfs/etc/s6-overlay/scripts/init-ops.sh`,
   `/homeassistant`, `/share`, `/ssl`, `/media`, `/addons`,
   `/addon_configs`, `/backup`); `/data` modes are as in V2; the guard hook
   denies `cat /etc/passwd` as `ops`; the provider binary runs as `ops`;
-  `ops.db` is root 0600; uid 65534 cannot connect to the socket and `ops`
+  `ops.db` (and its pre-upgrade copy while it exists) is root 0600; uid 65534 cannot connect to the socket and `ops`
   outside a run gets `ok: false` for a mutating verb; every registry
   reference resolves and the parser's verbs equal the registry's. Tests
   `tests/test_selftest.py`.

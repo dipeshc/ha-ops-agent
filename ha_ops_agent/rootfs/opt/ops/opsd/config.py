@@ -150,6 +150,11 @@ class Paths:
         return self.data / "ops.db"
 
     @property
+    def store_copy(self) -> Path:
+        """The store as it was before the upgrade from schema 18, kept 14 days (root only, like the store)."""
+        return self.data / "ops.db.v18.bak"
+
+    @property
     def prompts_dir(self) -> Path:
         return self.opt / "prompts"
 

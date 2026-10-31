@@ -36,7 +36,10 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   `test_tables_without_a_schema_version_refuse_to_open`,
   `test_a_failure_midway_leaves_the_store_at_18_untouched`.
 - S3. **Tables** (ten; the upgrade makes exactly the schema a fresh install
-  makes, test `test_the_upgrade_makes_the_same_schema_as_a_fresh_install`):
+  makes: every statement with its CHECKs, defaults and generated column,
+  the columns, foreign keys and index columns; tests
+  `test_the_upgrade_makes_the_same_schema_as_a_fresh_install`,
+  `test_a_store_from_schema_1_ends_with_exactly_a_fresh_installs_schema`):
   - `audit`: every capability request and decision.
   - `tasks`: the scheduler. Kinds `reminder`, `followup` (investigations
     are follow-ups), `recurring` (system tasks) and `retry` (chat retries);
@@ -118,8 +121,8 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   the store is copied with SQLite's backup API (a consistent snapshot of
   the live WAL database, never a raw file copy) to `/data/ops.db.v18.bak`:
   created 0600 before anything is written to it, written as a temporary
-  file and renamed into place, and checked to have the store's mode and
-  owner. One `store copied aside before the upgrade` line is logged. If the
+  file, checked to have the store's mode and owner, fsynced, renamed into
+  place and its directory fsynced. One `store copied aside before the upgrade` line is logged. If the
   copy cannot be made, the upgrade MUST NOT start: `StoreUnavailable`, the
   store untouched, the daemon degraded. The copy is deleted 14 days after
   it was made, at a start or the daily prune. The self-test checks it like

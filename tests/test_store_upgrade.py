@@ -8,6 +8,7 @@ reload rate file. After the upgrade every one of them is still there, and every 
 """
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -152,14 +153,37 @@ def counts(path: Path) -> dict[str, int]:
         conn.close()
 
 
-def shape(store: Store) -> tuple[dict[str, list[tuple[Any, ...]]], set[tuple[str, str, str]]]:
+def _sql(text: str) -> str:
+    """A schema statement without what only its formatting decides (spacing, quotes, `IF NOT EXISTS`)."""
+    text = " ".join(text.split()).replace("IF NOT EXISTS ", "").replace('"', "")
+    return re.sub(r" \)", ")", re.sub(r"\( ", "(", text))
+
+
+def shape(store: Store) -> dict[str, Any]:
+    """Everything the schema says: each statement (CHECKs, defaults, generated columns), columns, foreign keys
+    and index columns, per table and index."""
     conn = store._db()
-    tables = {str(r[0]): [tuple(c) for c in conn.execute(f"PRAGMA table_xinfo({r[0]})")]
-              for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}  # fmt: skip
-    indexes = {(str(r[0]), str(r[1]), " ".join(str(r[2]).split()))
-               for r in conn.execute("SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index'"
-                                     " AND sql IS NOT NULL")}  # fmt: skip
-    return tables, indexes
+    names = [str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
+    return {
+        "sql": {
+            (str(r[0]), str(r[1])): _sql(str(r[2]))
+            for r in conn.execute("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL")
+        },
+        "columns": {n: [tuple(c) for c in conn.execute(f"PRAGMA table_xinfo({n})")] for n in names},
+        "foreign_keys": {n: [tuple(k) for k in conn.execute(f"PRAGMA foreign_key_list({n})")] for n in names},
+        "indexes": {
+            n: sorted(
+                (
+                    str(i[1]),
+                    int(i[2]),
+                    int(i[4]),
+                    tuple(str(c[2]) for c in conn.execute(f"PRAGMA index_xinfo({i[1]})") if c[5]),
+                )
+                for i in conn.execute(f"PRAGMA index_list({n})")
+            )
+            for n in names
+        },
+    }
 
 
 @pytest.fixture
@@ -176,7 +200,7 @@ def test_the_upgrade_makes_the_same_schema_as_a_fresh_install(upgraded: Store, t
     try:
         assert upgraded.schema_version() == fresh.schema_version() == SCHEMA_VERSION
         assert shape(upgraded) == shape(fresh)
-        assert sorted(shape(fresh)[0]) == ["approvals", "audit", "item_events", "items", "kv", "runs", "tasks",
+        assert sorted(shape(fresh)["columns"]) == ["approvals", "audit", "item_events", "items", "kv", "runs", "tasks",
                                            "turns", "update_jobs", "update_runs"]  # fmt: skip
     finally:
         fresh.close()
@@ -497,3 +521,21 @@ def test_the_documented_rollback_gives_a_healthy_0_18_store(tmp_path: Path) -> N
     finally:
         conn.close()
     assert counts(path) == before and upgrade_copy(path).exists()
+
+
+def test_the_copy_and_its_rename_reach_the_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import stat
+
+    path = tmp_path / "ops.db"
+    v18_store(path)
+    synced: list[bool] = []
+    real = os.fsync
+
+    def fsync(fd: int) -> None:
+        synced.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    Store.open(path).close()
+    assert False in synced and True in synced  # the copy's data, then the directory that holds its new name

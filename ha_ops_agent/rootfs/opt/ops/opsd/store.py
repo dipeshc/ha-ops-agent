@@ -790,6 +790,12 @@ class Store:
             with temp.open("rb") as handle:
                 os.fsync(handle.fileno())
             os.replace(temp, target)
+            # The rename itself survives a power loss only once its directory is on disk.
+            folder = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(folder)
+            finally:
+                os.close(folder)
         except (OSError, sqlite3.Error) as err:
             with contextlib.suppress(OSError):
                 temp.unlink()

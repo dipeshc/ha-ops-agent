@@ -217,3 +217,16 @@ def test_legacy_values_are_kept_or_dropped_on_purpose(replayed: tuple[Store, dic
     assert open_change is not None and open_change["needs"] and "derived" not in open_change
     assert store.item("m-find") is not None
     assert "spend" not in store.table_counts() and "activity" not in store.table_counts()
+
+
+def test_a_store_from_schema_1_ends_with_exactly_a_fresh_installs_schema(
+    replayed: tuple[Store, dict[str, int]], tmp_path: Path
+) -> None:
+    from tests.test_store_upgrade import shape
+
+    store, _ = replayed
+    fresh = Store.open(tmp_path / "fresh.db")
+    try:
+        assert shape(store) == shape(fresh)
+    finally:
+        fresh.close()

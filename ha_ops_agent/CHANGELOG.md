@@ -31,6 +31,23 @@ changes beyond the points below.
   "applied", "proposed as config change #n").
 - The chat's activity context is the items' timelines of the last week.
 
+The AI credential:
+
+- Accept an Anthropic API key in `claude.token`: a credential starting with
+  `sk-ant-api` is passed as `ANTHROPIC_API_KEY`, setup tokens keep
+  `CLAUDE_CODE_OAUTH_TOKEN`, and only one is ever set. With a key the
+  subscription share rule and `claude.plan` do not apply; the daily run
+  caps and `limits.run_max_usd` (each run's cost cap, enforced by the
+  provider) do.
+- Panel state `ai.credential` and the diagnostics `health.ai_credential`
+  report the credential kind, never the value.
+
+Fixes and the add-on:
+
+- An entity in `health.expected_unavailable` no longer makes its custom
+  integration critical, and the first-run baseline accepts it.
+- Store icon and logo.
+
 For house overlays (`opsd.house`):
 
 - `opsd.reload.reload_domain` takes the store instead of the data

@@ -26,7 +26,8 @@ In scope: anything in this repository, in particular a way to
   approved operating-system update flow;
 - turn untrusted text (device names, logs, release notes, chat messages)
   into instructions the agent follows;
-- reach the panel's actions as someone other than a Home Assistant admin,
+- reach the panel's actions as someone other than the admin (the owner of
+  the push device),
   or forge an approval;
 - leak a secret into a log, a push, a chat reply, git or the diagnostics
   export.

@@ -28,7 +28,7 @@ At the update window (default 04:00 local) the daemon:
    (`updiff.compare`). A regression rolls a HACS or Core update back by
    version (Core only if the recorder schema did not change); an add-on
    regression or an unsafe Core downgrade is escalated to the admin. Every
-   rolled-back or escalated version is held until the admin clears it, and
+   rolled-back or escalated version is held until the admin approves it again, and
    an escalation, failed rollback or whole-night regression pauses
    automatic updates until the admin resumes them in the panel. At
    the end the night is compared with the health before the first update,
@@ -1703,7 +1703,7 @@ class UpdateManager:
             ctx,
             "Ops Agent: update rolled back",
             f"{job.title} {job.to_version} made things worse ({clean_text(reasons, 300)}), so I rolled it back to "
-            f"{job.from_version}. Health is back to normal. It stays held until you clear it in the panel.",
+            f"{job.from_version}. Health is back to normal. It stays held until you approve it again in the panel.",
             item=item_key(job.entity_id, job.to_version),
         )
 

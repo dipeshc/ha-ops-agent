@@ -56,9 +56,11 @@ nothing.
 - An `aarch64` or `amd64` machine with at least 2 GB of RAM (an AI run
   starts only with 1.2 GB free).
 - The Companion app on the admin's phone, for pushes.
-- AI access, for triage and chat (see [AI access](#ai-access)). Without
-  it, set `llm.provider: none` and you still get the deterministic health
-  check, pushes and updates.
+- AI access, for triage, chat and release-note reviews (see
+  [AI access](#ai-access)). Without it, set `llm.provider: none`: you still
+  get the deterministic health check, pushes and approvals, but automatic
+  updates wait for your approval because their release notes cannot be
+  reviewed (`updates.hold_if_unreviewed`).
 - Automatic backups configured in Home Assistant, with encryption (Settings
   > System > Backups). The agent backs up through them and never sees your
   backup password.
@@ -71,7 +73,8 @@ nothing.
    machine from the pinned base image and pinned packages, including the AI
    client (see [AI access](#ai-access)). No prebuilt image is published.
 3. Configure it (below), start it, and open **Ops Agent** in the sidebar.
-   The panel is visible to Home Assistant administrators only.
+   Only the admin can use the panel: the Home Assistant administrator who
+   owns the push device in `notify.service`.
 
 The first health check accepts today's state as the baseline and sends one
 summary push. Broken custom integrations are never accepted silently; they
@@ -84,19 +87,22 @@ The agent reaches its AI model through a provider, chosen with
 headless, which the image installs at build time, at a pinned version, from
 Anthropic's signed package repository.
 
-- **Sign-in.** Paste either a Claude Code setup token (run
-  `claude setup-token` on your own computer; needs a Claude Pro or Max
-  subscription) or an Anthropic API key into `claude.token`. The token
-  stays on your Home Assistant machine and is only passed to Claude Code.
+- **Sign-in.** Paste a Claude Code setup token into `claude.token`: run
+  `claude setup-token` on your own computer (it needs a Claude Pro or Max
+  subscription). A setup token is the only sign-in supported today. The
+  token stays on your Home Assistant machine and is only passed to Claude
+  Code.
 - **Models.** `claude.model_standard` (default `claude-sonnet-5-5`) is used
   for triage and chat; the optional `claude.model_fast` for chat
   summaries.
-- **Spend.** With a subscription, `usage.max_share_percent` (default 5)
-  caps how much of each usage window the agent may use. With an API key,
-  `limits.run_max_usd` caps each run.
+- **Spend.** `usage.max_share_percent` (default 5) caps how much of each
+  subscription usage window the agent may use, and `limits.run_max_usd`
+  caps each run's estimated cost.
 
-`llm.provider: none` turns the AI off. Everything deterministic keeps
-working: the health check, safety pushes, approvals and the update rules.
+`llm.provider: none` turns the AI off. The health check, pushes, approvals
+and the update rules keep working, but automatic updates wait for your
+approval, since their release notes cannot be reviewed (unless you turn
+`updates.hold_if_unreviewed` off).
 
 ## Configuration
 
@@ -141,7 +147,7 @@ pieces, no watched entities, no reloadable integrations, git off.
 | `self_slug` | The add-on's slug, for links in pushes. Detected automatically; set it only if push links open the wrong page. |
 | `health.power_entity`, `health.remote_entity` | Optional binary sensors the daily check reports on (power supply, remote access). |
 | `updates.need_approval` | Update entities that always ask, added to the option of the same name. |
-| `updates.watched_entities` | Entities that must still be available after an update, or it rolls back. |
+| `updates.watched_entities` | Entities that must still be available after an update. If one is not, a Core or HACS update rolls back; an add-on, HAOS or firmware update is escalated to you. |
 | `updates.fragile[]` | Integrations that have broken before: `name`, `tier` (`approve`, `pinned` or `never`), `reason`, and `entities`, `repos` or `domains` to match. Optional `bumps` limits it to `patch`, `minor`, `major` or `unknown` versions. |
 | `updates.version_gates[]` | Hold Core from `core_from` on for an `integration`, with a `reason`, until you change the profile. |
 | `reload.domains`, `reload.deny` | Integrations it may reload, and extra ones it never reloads. |
@@ -176,8 +182,10 @@ much harm.
 
 - **The daemon acts; the AI only proposes.** The AI runs as an
   unprivileged user in the add-on, in a read-only copy of the config files
-  that are safe to read, with read tools only and no shell. It can ask the
-  daemon for a small set of named actions (`opsctl`) over a local socket. The
+  that are safe to read. Its tools are read-only, plus a shell that can
+  run only the `opsctl` command and, in chat and investigations, a write
+  tool confined to proposal drafts. Through `opsctl` it can ask the daemon
+  for a small set of named actions over a local socket. The
   daemon checks each request against the run's allowed capabilities, quotas
   and your options, records it, and carries it out itself.
 - **The AI never sees secrets.** The Supervisor token, your live config,
@@ -193,7 +201,7 @@ much harm.
 - **Updates are reversible or they ask.** Every automatic update has a
   backup, a health comparison and a rollback path. An update without a
   precise rollback asks you first. A version that was rolled back is held
-  until you clear it.
+  until you approve it again in the panel.
 - **The agent never changes itself**, the Supervisor or the host, except an
   operating-system update you approved.
 - **Untrusted text is data.** Device names, logs, release notes and chat
@@ -203,15 +211,16 @@ much harm.
 - **Git is plumbing only.** Proposals are commits on a separate ref. Only
   you apply them, after a config check; pushes are fast-forward only.
 
-Trust assumptions: anyone who is a Home Assistant administrator is the
-agent's admin, and code running in your Home Assistant frontend (another
-add-on's panel, a custom card) could act as you in the panel. See
+Trust assumptions: the agent's admin is the Home Assistant user who owns
+the push device in `notify.service`, and must be an active administrator.
+Code running in your Home Assistant frontend (another add-on's panel, a
+custom card) could act as you in the panel. See
 [SECURITY.md](SECURITY.md).
 
 ## Limitations
 
-- One admin. Every Home Assistant administrator can use the panel and its
-  approvals.
+- One admin: the owner of the push device. Other users, administrators
+  included, cannot use the panel or its approvals.
 - English only: prompts, panel and the word lists that recognise doors and
   garages by name.
 - The image pins exact Alpine and AI client versions. When upstream

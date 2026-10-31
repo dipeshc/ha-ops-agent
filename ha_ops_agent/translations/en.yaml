@@ -19,7 +19,7 @@ configuration:
     fields:
       token:
         name: Token
-        description: "From claude setup-token (subscription), or an sk-ant-api key. Empty: AI is off."
+        description: "From claude setup-token (subscription). Empty: AI is off."
       plan:
         name: Plan
         description: "Subscription tier, for estimating a run's share when Claude Code reports too coarsely. auto detects it, else pro."
@@ -45,7 +45,7 @@ configuration:
         description: "The admin's mobile_app notify service. Empty: the house profile's notify_service (ops/profile.yaml)."
       max_pushes_per_day:
         name: Pushes per day
-        description: Non-urgent pushes. Urgent pushes have their own cap of 6.
+        description: Non-urgent pushes. Urgent pushes have their own cap of 8.
       quiet_start:
         name: Quiet hours start
         description: "Local HH:MM. Non-urgent pushes wait until the end. Empty turns quiet hours off."

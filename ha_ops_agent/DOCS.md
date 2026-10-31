@@ -12,8 +12,8 @@ https://github.com/dipeshc/ha-ops-agent#readme
 1. Make sure automatic backups are set up with encryption (Settings > System
    > Backups).
 2. Set up AI access in `claude.token` (today a Claude Code setup token from
-   `claude setup-token`, or an Anthropic API key) and `notify.service` (your
-   Companion app, e.g. `mobile_app_my_phone`).
+   `claude setup-token`) and `notify.service` (your Companion app, e.g.
+   `mobile_app_my_phone`; its owner is the agent's admin).
 3. Optionally add a house profile, `ops/profile.yaml` in your configuration
    directory (see the example in the repository).
 4. Start the add-on and open **Ops Agent** in the sidebar.

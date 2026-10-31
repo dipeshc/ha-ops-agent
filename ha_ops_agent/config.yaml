@@ -52,7 +52,7 @@ options:
     # claude | none (deterministic alerts only)
     provider: claude
   claude:
-    # Subscription token (claude setup-token) or an sk-ant-api key.
+    # Subscription token from claude setup-token.
     token: ""
     # Subscription tier for the run-time share estimate (auto: detect, else pro).
     plan: auto

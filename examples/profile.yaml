@@ -22,7 +22,8 @@ updates:
   # Update entities that always ask you, on top of the add-on option updates.need_approval.
   need_approval:
     - update.my_dashboard_card_update
-  # Entities that must still be available after an update; if one is not, the update rolls back.
+  # Entities that must still be available after an update. If one is not, a Core or HACS update
+  # rolls back; an add-on, HAOS or firmware update is escalated to you.
   watched_entities:
     - lock.front_door
     - alarm_control_panel.home

@@ -399,7 +399,7 @@ REGISTRY: tuple[Capability, ...] = (
         validator="opsd.proposals:validate_request",
     ),
     # Config changes as git proposals. Proposing grants nothing; applying and reverting
-    # are daemon-internal and run only after the admin's two-factor approval (opsd.changes).
+    # are daemon-internal and run only after the admin approves them in the panel (opsd.changes).
     Capability(
         "change.propose",
         "propose-change",

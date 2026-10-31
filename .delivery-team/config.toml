@@ -1,0 +1,78 @@
+# Delivery-team orchestrator configuration for ha-ops-agent.
+# Read by `sdt`, never by a role. Prose a role reads directly lives in profile.md.
+
+[repo]
+default_branch = "main"
+install = "uv sync --locked"
+lockfile = "uv.lock"
+
+[backlog]
+dir = "docs/backlog"
+
+[gate]
+# The scoped and full gates are the same four commands as CI (.github/workflows/ci.yml):
+# the whole suite runs in well under a minute, so there is nothing to scope down.
+scoped = [
+  "uv run ruff format --check .",
+  "uv run ruff check .",
+  "uv run mypy",
+  "uv run pytest",
+]
+full = [
+  "uv run ruff format --check .",
+  "uv run ruff check .",
+  "uv run mypy",
+  "uv run pytest",
+]
+# Repo-wide invariant guards. They all run in the full gate; triage names the ones a change
+# triggers so a developer runs them first and a reviewer re-runs them. profile.md says what
+# each one protects.
+guards = [
+  { cmd = "uv run pytest tests/test_selfguard.py", when = "a change touches any Supervisor, Core REST or websocket call, update jobs, reloads or proposal paths (opsd/selfguard.py, supervisor.py, ws.py, updexec.py, reload.py, proposals.py, changepaths.py)" },
+  { cmd = "uv run pytest tests/test_privsep.py tests/test_guard.py", when = "a change touches the run copy, the guard hook, readable documents, the ops account or anything under rootfs/etc or rootfs/opt/ops/bin" },
+  { cmd = "uv run pytest tests/test_capabilities.py tests/test_rpc_effects.py tests/test_opsctl.py", when = "a change adds, renames or re-tiers a capability, an opsctl verb, an effect or the socket protocol" },
+  { cmd = "uv run pytest tests/test_reload.py", when = "a change touches integration reloads, the never-reload list or the reload allowlist resolution" },
+  { cmd = "uv run pytest tests/test_approvals.py tests/test_items.py tests/test_panel.py", when = "a change touches approvals, item actions, the panel API or the admin/CSRF checks" },
+  { cmd = "uv run pytest tests/test_hardening.py tests/test_infra.py", when = "a change touches the Dockerfile, build.yaml, known_hosts, the fetch allowlist, the triage fencing or the guard decision log" },
+  { cmd = "uv run pytest tests/test_profile.py tests/test_options.py", when = "a change touches the house profile schema, options parsing or the fail-closed rules" },
+]
+
+[engine]
+default = "claude"
+[engine.roles]
+[engine.tiers]
+
+[limits]
+max_parallel_developers = 2
+reviewers = 1
+review_rounds = 3
+[limits.timeouts]
+manager = 900
+developer = 3600
+reviewer = 1800
+merge-clerk = 900
+qa = 1800
+researcher = 1800
+consistency-check = 1800
+exploration = 7200
+ui-inspector = 3600
+qa_gate = 1800
+[limits.liveness]
+poll_seconds = 5
+stall_seconds = 900
+adopt_attempts = 2
+
+[qa]
+known_failures = ""
+consistency_every = 5
+
+[ports]
+exclusive = false
+
+[worktrees]
+dir = ".delivery-team/worktrees"
+branch_prefix = "item/"
+
+[board]
+enabled = true
+dir = ".delivery-team/progress"

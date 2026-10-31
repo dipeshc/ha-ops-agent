@@ -7,6 +7,4 @@ The add-on image is built on the user's own machine. At build time it installs
 Claude Code from Anthropic's signed package repository; Claude Code is not part
 of this repository and is used under Anthropic's own terms.
 
-ha-ops-agent is an independent project. It is not affiliated with, endorsed by
-or sponsored by Home Assistant, the Open Home Foundation or Anthropic. "Home
-Assistant" and "Claude" are trademarks of their respective owners.
+"Home Assistant" and "Claude" are trademarks of their respective owners.

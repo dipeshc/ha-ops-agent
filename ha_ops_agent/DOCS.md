@@ -21,5 +21,4 @@ https://github.com/dipeshc/ha-ops-agent#readme
 It starts in `agent.mode: observe` and changes nothing. Switch to `act`, and
 `updates.auto_install: on`, when you have read what it would do.
 
-This add-on is not affiliated with Home Assistant, the Open Home Foundation
-or Anthropic. Support: GitHub issues, best effort.
+Support: GitHub issues, best effort.

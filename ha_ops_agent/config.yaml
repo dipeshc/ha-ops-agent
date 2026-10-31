@@ -4,8 +4,7 @@ slug: ha_ops_agent
 description: >-
   Unattended maintenance for Home Assistant: a daily health check, AI triage
   when something changed, soaked updates with a backup, a health diff
-  and rollback, and one admin chat. Not affiliated with Home Assistant or
-  Anthropic.
+  and rollback, and one admin chat.
 url: https://github.com/dipeshc/ha-ops-agent
 arch:
   - aarch64

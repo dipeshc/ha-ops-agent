@@ -336,9 +336,12 @@ async def test_socket_denies_unknown_peer_and_overload(
     server = rpc.RpcServer(make_env(short, env), allowed_uids=frozenset({0}))
     await server.start(group_gid=None)
     try:
-        response = await asyncio.to_thread(rpc.call, Path("p/opsd.sock"), "status", {})
-        if rpc.peer_uid(None) is None and not hasattr(__import__("socket"), "SO_PEERCRED"):
-            assert response == {"ok": False, "error": "peer not allowed"}
+        # Denied either way: macOS (no SO_PEERCRED) answers with an error, Linux drops the connection.
+        try:
+            response = await asyncio.to_thread(rpc.call, Path("p/opsd.sock"), "status", {})
+        except ConnectionResetError, BrokenPipeError:
+            response = {"ok": False, "error": "peer not allowed"}
+        assert response == {"ok": False, "error": "peer not allowed"}
         server._allowed_uids = None
         server._connections = rpc.MAX_CONNECTIONS
         response = await asyncio.to_thread(rpc.call, Path("p/opsd.sock"), "status", {})

@@ -18,7 +18,7 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `waiting`, `scheduled`, `running`, `done`, `failed`, `cancelled`,
   `expired`; the last four are terminal.
 - I2. Need kinds: `approval`, `confirm`, `physical`, `answer`, `ack`. The
-  0.18.0 code only ever produces `approval` and `ack`. Actors: `you`,
+  0.19.0 code only ever produces `approval` and `ack`. Actors: `you`,
   `daemon`, `agent`. Action ids match `[a-z_]{1,32}`; item ids match
   `[a-z]-[0-9a-z]{1,40}`.
 - I3. **Needs you** is exactly `state == waiting`, or `failed` with a need.

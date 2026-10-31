@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.19.0
+
+Storage consolidation and items written at the source. Nothing you see
+changes beyond the points below.
+
+- The store has ten tables instead of nineteen: one `approvals` record for
+  every approval, approval request, config change and house fact (a kind
+  and a payload; the binding, single use and expiry checks are unchanged),
+  and the small state (daily counters, quiet-hours holds, push action ids,
+  reload times, the chat's read mark) in `kv`. `/data/reloads.json` moves
+  into the store; the activity log, the thread table and the unused cost
+  columns go.
+- **Upgrade.** The first start of 0.19.0 migrates the 0.18 store in one
+  transaction: open approvals, requests, changes and facts, a running
+  update night, held pushes, reminders, the chat, the usage ledger and
+  every item keep working. If the migration fails, the store stays as 0.18
+  left it and the agent runs degraded until it succeeds. A store older
+  than 0.18 is refused: install 0.18 first and start it once. Going back
+  to 0.18 after the upgrade is refused as before; restore the add-on's
+  backup taken before the update.
+- Items are written in the same transaction as the record they show (an
+  update job, an approval, a change, a reminder, the health check's open
+  items, a maintenance scan) instead of being re-derived every minute.
+  Pushes, Home, History, the Needs you badge and `sensor.ops_agent` behave
+  as before.
+- History no longer turns old records into "cancelled: no longer
+  pending": a reminder stays done after 14 days, a change older than the 30
+  newest keeps its state, and a house fact shows its decision ("rejected",
+  "applied", "proposed as config change #n").
+- The chat's activity context is the items' timelines of the last week.
+
+For house overlays (`opsd.house`):
+
+- `opsd.reload.reload_domain` takes the store instead of the data
+  directory: replace `reload_domain(api, d.paths.data, domain, ...)` with
+  `reload_domain(api, d.store, domain, ...)`. Without a store it refuses.
+- Unchanged: `Store.bump`, `unbump`, `count`, `audit_begin`, `audit_finish`,
+  `changes`, `ActivityLog.record` (`d.activity.record`) and
+  `opsd.changes.build_proposal`, `_day`, `_repo`.
+- Removed: `Store.activity`, `add_activity`, `link_activity` and
+  `set_activity_turn` (activity entries are items: read them with
+  `Store.items_all(prefix="activity:")` or `Store.recent_events`),
+  `Store.items_all(derived=...)`, `ItemBook.sync` (a write updates its
+  items; tests call `ItemBook.tick()` or `Daemon.items_flush()`) and
+  `Hub.listeners`.
+
 ## 0.18.0
 
 Proactive maintenance:

@@ -4,7 +4,7 @@ The AI is a bounded advisor: it reads a secret-free copy of the
 configuration, asks the daemon for named actions through `opsctl`, and
 returns a schema-checked result. The daemon decides whether to act on any
 of it. This document has two parts: the provider-independent run model, and
-the one provider the 0.18.0 code implements.
+the one provider the 0.19.0 code implements.
 
 Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 `opsd/runctx.py`, `opsd/guard.py` and `bin/guard-hook` (the tool guard),
@@ -130,7 +130,7 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 
 ## The AI provider
 
-The 0.18.0 code has one provider, selected by `llm.provider: claude`;
+The 0.19.0 code has one provider, selected by `llm.provider: claude`;
 `none` turns the AI off (deterministic checks, pushes and updates continue;
 AUTO updates are then held unless `updates.hold_if_unreviewed` is off). The
 runner calls `claude_runner.run_claude` directly; adding a provider means
@@ -139,7 +139,7 @@ dispatch on `llm.provider`.
 
 - AP1. **Credential.** `claude.token`, else the file
   `/data/secrets/claude_oauth_token`. The token is exported to the provider
-  process as `CLAUDE_CODE_OAUTH_TOKEN` and nowhere else; the 0.18.0 code
+  process as `CLAUDE_CODE_OAUTH_TOKEN` and nowhere else; the 0.19.0 code
   does not detect or handle an API key differently. Test
   `test_options_parsing_and_token`.
 - AP1a. **API key (planned, not yet implemented; backlog

@@ -2,7 +2,7 @@
 # with Alpine's python3 and py3-yaml; it installs nothing from here.
 [project]
 name = "ha-ops-agent"
-version = "0.18.0"
+version = "0.19.0"
 requires-python = ">=3.14"
 license = "Apache-2.0"
 dependencies = []

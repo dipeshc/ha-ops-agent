@@ -369,3 +369,23 @@ def test_tables_without_a_schema_version_refuse_to_open(tmp_path: Path) -> None:
     conn.close()
     with pytest.raises(StoreUnavailable, match="older than this agent upgrades"):
         Store.open_or_recover(path, retry_delays=())
+
+
+def test_old_entries_and_odd_rows_never_break_the_upgrade(tmp_path: Path) -> None:
+    path = tmp_path / "ops.db"
+    v18_store(path)
+    conn = sqlite3.connect(path, isolation_level=None)
+    # An entry still in Needs you whose activity row was pruned long ago, and a change row with broken JSON.
+    conn.execute("INSERT INTO items (id, key, kind, title, state, need, as_of, at, needs_since, created_at,"
+                 " updated_at) VALUES ('a-77', 'activity:77', 'backup', 'Backup failed', 'waiting', ?, ?, ?, ?, ?, ?)",
+                 (json.dumps({"kind": "ack", "text": "t", "primary": {"id": "ack", "label": "OK"}, "secondary": [],
+                              "expires_at": None}), at(-9000), at(-9000), at(-9000), at(-9000), at(-9000)))  # fmt: skip
+    conn.execute("UPDATE change_proposals SET files = 'not json', summary = '' WHERE id = 7")
+    conn.close()
+    store = Store.open(path)
+    try:
+        assert store.next_activity() == 78  # a-77 is never overwritten by a new entry
+        change = store.change(7)
+        assert change is not None and change["files"] == [] and change["summary"] == []
+    finally:
+        store.close()

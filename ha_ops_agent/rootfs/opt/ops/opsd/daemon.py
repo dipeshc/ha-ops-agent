@@ -1791,8 +1791,9 @@ class Daemon:
             # The options are a source too (the update gate and window, act mode): they change only at a start.
             try:
                 self.items.recompose()
-            except (StoreError, sqlite3.Error) as err:
-                _LOGGER.error("items not recomposed", extra={"error": str(err)[:200]})
+            except Exception:
+                # The items stay as stored; their sources' next writes compose them again.
+                _LOGGER.exception("items not recomposed")
         self.items_now()
         panel_server = self.panel_server()
         await panel_server.start()

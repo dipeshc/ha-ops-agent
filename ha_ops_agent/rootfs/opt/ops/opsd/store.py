@@ -281,8 +281,10 @@ UPGRADE_18 = """
     INSERT INTO approvals (kind, id, subject, state, payload, requested_by, detail, run_id, created_at,
             expires_at, decided_at, updated_at)
         SELECT 'change', CAST(id AS TEXT), subject, state,
-            json_object('variant', kind, 'why', why, 'effect', effect, 'files', json(files),
-                'summary', json(summary), 'diff', diff, 'base_sha', base_sha, 'commit_sha', commit_sha, 'ref', ref,
+            json_object('variant', kind, 'why', why, 'effect', effect,
+                'files', CASE WHEN json_valid(files) THEN json(files) ELSE json('[]') END,
+                'summary', CASE WHEN json_valid(summary) THEN json(summary) ELSE json('[]') END, 'diff', diff,
+                'base_sha', base_sha, 'commit_sha', commit_sha, 'ref', ref,
                 'fact_id', fact_id, 'applied_sha', applied_sha, 'reverted_sha', reverted_sha,
                 'thread_id', thread_id),
             requested_by, detail, run_id, created_at, expires_at, decided_at, updated_at
@@ -330,8 +332,9 @@ UPGRADE_18 = """
         SELECT 'chat.created_at', created_at, created_at FROM threads
         WHERE id = (SELECT value FROM kv WHERE key = 'chat.main_thread');
     INSERT OR REPLACE INTO kv (key, value, updated_at)
-        SELECT 'activity.seq', CAST(COALESCE(MAX(id), 0) AS TEXT), COALESCE(MAX(at), '1970-01-01T00:00:00+00:00')
-        FROM activity;
+        SELECT 'activity.seq', CAST(MAX(COALESCE((SELECT MAX(id) FROM activity), 0),
+            COALESCE((SELECT MAX(CAST(substr(key, 10) AS INTEGER)) FROM items WHERE key LIKE 'activity:%'), 0))
+            AS TEXT), '1970-01-01T00:00:00+00:00';
     DELETE FROM kv WHERE key = 'items.backfill' OR key LIKE 'confirm:%'
 """
 
@@ -2136,6 +2139,11 @@ class Store:
         """Items whose source asked to be composed again by now (`source.recheck_at`)."""
         rows = self._all("SELECT * FROM items WHERE json_extract(source, '$.recheck_at') <= ?", (_iso(now),))
         return [_item(r) for r in rows]
+
+    def clear_recheck(self, item_id: str) -> None:
+        """Forget an item's `recheck_at` once its recompose is done (never moves the revision)."""
+        with self._tx() as conn:
+            conn.execute("UPDATE items SET source = json_remove(source, '$.recheck_at') WHERE id = ?", (item_id,))
 
     def items_since(self, since: datetime) -> list[dict[str, Any]]:
         """Unresolved items, items in Needs you, and items resolved since `since` (for Home)."""

@@ -41,15 +41,19 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   backup or check before a night), the item acknowledgements
   (`item.ack:<key>`) and the maintenance state (`maintenance:`). Before that
   transaction commits, the item book composes the items those records show
-  and writes each one, with its event, in the same transaction: a job or an
-  update approval writes its update's item and its night's, a run (a new
-  plan, a night's progress) and an update flag every update item and night,
+  and writes each one, with its event, in the same transaction: a job
+  writes its update's item and its night's, an update or reboot approval its
+  update's item, a run (a new plan, a night's progress) and an update flag
+  every update item and night, a change proposed for a maintenance finding
+  also that finding's item,
   a change, a fact or a task its own item, a dashboard approval or the
   maintenance state the maintenance items. The health check's save of its
   open items writes the health items in one transaction. An item and its
   source therefore never disagree, even after a crash. A failure to compose
   or write one item is logged and blocks neither the source's write nor the
   other items. Tests `test_an_item_is_written_in_its_sources_transaction`,
+  `test_one_source_that_cannot_be_composed_leaves_the_others`,
+  `test_a_findings_config_change_moves_its_item`,
   `test_an_item_that_cannot_be_composed_never_blocks_its_source`,
   `test_review_5_one_bad_item_does_not_stop_the_others`.
 - I5a. **Nothing re-derives.** A group that lists its items resolves the ones
@@ -70,11 +74,13 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `source.recheck_at`: a health item whose `needs_after` is ahead (I10), an
   update rejected within the last 7 days (I6). The minute tick
   ([overview.md](overview.md) D2) recomposes such an item once that time
-  passes, then decides the pushes time made due (N1). The add-on options
+  passes and forgets a recheck its source did not renew (a resolved item
+  carries none), then decides the pushes time made due (N1). The add-on options
   are a source too: at each start the daemon recomposes the update items
   and nights (the gate and the window) and the maintenance items (act
   mode). Tests `test_the_items_engine_asks_only_once_remote_access_stays_down`,
-  `test_a_rejected_update_asks_again_once_the_week_is_over`.
+  `test_a_rejected_update_asks_again_once_the_week_is_over`,
+  `test_a_cleared_watch_is_not_composed_again`.
 - I6. Update items: AUTO and not held is `scheduled` (or `proposed` while a
   gate blocks the window); approved is `scheduled` with a `withdraw` action
   and a footnote naming the approval, versions and plan; an APPROVE item
@@ -127,8 +133,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 - I15. Every item written publishes, once its transaction commits (on the
   daemon's loop, whichever thread wrote it), a live `item {id, revision,
   state, needs_count}` event; a write that rolled back publishes nothing.
-  Test `test_an_item_written_from_a_worker_thread_is_pushed_on_the_loop`. `needs_count` is one SQL count and the same number on
-  `api/home`, `api/history`, `api/state` and the status sensor.
+  `needs_count` is one SQL count and the same number on `api/home`,
+  `api/history`, `api/state` and the status sensor. Test
+  `test_an_item_written_from_a_worker_thread_is_pushed_on_the_loop`.
 - I16. Activity entries are items too (there is no separate log): with an
   item key they become events of that item, otherwise standalone
   `activity:<n>` items, whose push is decided at the write like any other's. Quiet kinds

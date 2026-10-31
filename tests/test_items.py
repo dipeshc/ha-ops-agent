@@ -782,3 +782,37 @@ async def test_an_item_written_from_a_worker_thread_is_pushed_on_the_loop(h: Any
             break
         await asyncio.sleep(0.01)
     assert any(x["title"] == "Ops Agent: backup" for x in h.pushes())
+
+
+def test_a_cleared_watch_is_not_composed_again(tmp_path: Path) -> None:
+    store = Store.open(tmp_path / "ops.db")
+    after = (START + timedelta(hours=5)).isoformat()
+    watching = {"key": "remote:down", "severity": "warning", "summary": "remote access is off",
+                "detail": {"needs_after": after}}  # fmt: skip
+    ctx = {"ctx": Context(health_at=START.isoformat(), health_items=[watching])}
+    book = ItemBook(store, Hub(), tz=lambda: UTC, context=lambda: ctx["ctx"], clock=lambda: START)
+    book.write_health()
+    assert store.item_by_key("health:remote:down")["source"]["recheck_at"]  # type: ignore[index]
+    ctx["ctx"] = Context(health_at=START.isoformat(), health_items=[])
+    book.write_health()  # it came back before it asked
+    cleared = store.item_by_key("health:remote:down")
+    assert cleared is not None and cleared["state"] == "done" and "recheck_at" not in cleared["source"]
+    assert store.items_due(START + timedelta(days=1)) == []
+    store.close()
+
+
+def test_one_source_that_cannot_be_composed_leaves_the_others(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from opsd import items as items_mod
+
+    store, _, _ = task_store(tmp_path)
+
+    def broken(self: Any, row: Any, live: Any) -> Any:
+        raise RuntimeError("a bug in the change composer")
+
+    monkeypatch.setattr(items_mod.Composer, "change", broken)
+    with store.atomic():
+        store.create_change(kind="change", subject="fix(alerts): x", why="", effect="", state="open",
+                            requested_by="chat", now=START, expires_at=START + timedelta(days=3))  # fmt: skip
+        task_id = remind(store, START)
+    assert [r["key"] for r in store.items_all()] == [f"task:{task_id}"] and store.change(1) is not None
+    store.close()

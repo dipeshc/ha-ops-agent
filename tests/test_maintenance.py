@@ -351,6 +351,23 @@ async def test_an_acknowledged_deprecation_asks_again_one_release_closer(tmp_pat
     assert again["state"] == "waiting" and again["gist"] == "removed in 2030.4, 1 release left"
 
 
+async def test_a_findings_config_change_moves_its_item(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    await rig.scan()
+    near = rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]
+    assert near["state"] == "waiting"
+    who = f"{maintenance.PROPOSER}{near['source']['finding']}"
+    change = rig.store.create_change(kind="change", subject="fix(automations): migrate", why="", effect="",
+                                     state="open", requested_by=who, now=rig.now,
+                                     expires_at=rig.now + timedelta(days=7))  # fmt: skip
+    # The change answers it: out of Needs you at once, not one card twice.
+    item = rig.items()[near["title"]]
+    assert item["state"] == "proposed" and f"config change #{change['id']} waits for you" in item["gist"]
+    assert rig.store.move_change(change["id"], expect=("open",), to="rejected", now=rig.now)
+    item = rig.items()[near["title"]]
+    assert item["state"] == "waiting" and any(f["value"] == f"#{change['id']}: rejected" for f in item["facts"])
+
+
 async def test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     await rig.scan()

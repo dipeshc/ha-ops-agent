@@ -50,6 +50,7 @@ import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, tzinfo
+from functools import partial
 from typing import Any
 
 from opsd import dashboards
@@ -994,6 +995,9 @@ class ItemBook:
                     updates.add(subject.removeprefix(REBOOT_SUBJECT))
             elif kind == "change":
                 changes.add(int(ref))
+                # A finding's config change shows on the finding's item too (`maintenance.proposal_of`).
+                row = self.store.change(int(ref))
+                maintenance |= str((row or {}).get("requested_by") or "").startswith(maint.PROPOSER)
             elif kind == "fact":
                 facts.add(int(ref))
             elif kind == "task":
@@ -1020,20 +1024,31 @@ class ItemBook:
             return
         composer = self._composer()
         if updates is None or updates:
-            self._updates(composer, updates)
+            self._safely("updates", partial(self._updates, composer, updates))
         for run_id in sorted(runs):
-            self._window(composer, run_id)
+            self._safely(f"window:{run_id}", partial(self._window, composer, run_id))
         for change_id in sorted(changes):
-            self._change(composer, change_id)
+            self._safely(f"change:{change_id}", partial(self._change, composer, change_id))
         for fact_id in sorted(facts):
-            self._fact(composer, fact_id)
+            self._safely(f"fact:{fact_id}", partial(self._fact, composer, fact_id))
         for task_id in sorted(tasks):
-            task = self.store.get_task(task_id)
-            spec = composer.task(task) if task is not None else None
-            if spec is not None:
-                self._write(spec)
+            self._safely(f"task:{task_id}", partial(self._task, composer, task_id))
         if maintenance:
-            self._maintenance(composer)
+            self._safely("maint", partial(self._maintenance, composer))
+
+    @staticmethod
+    def _safely(what: str, write: Callable[[], None]) -> None:
+        """One source's items: a bug composing them is logged and never stops the others nor the source's write."""
+        try:
+            write()
+        except Exception:
+            _LOGGER.exception("items not composed", extra={"source": what[:120]})
+
+    def _task(self, composer: Composer, task_id: int) -> None:
+        task = self.store.get_task(task_id)
+        spec = composer.task(task) if task is not None else None
+        if spec is not None:
+            self._write(spec)
 
     def _composer(self) -> Composer:
         return Composer(self.store, self._context(), self._clock(), self._tz())
@@ -1087,9 +1102,11 @@ class ItemBook:
 
     @staticmethod
     def _resolved(old: Mapping[str, Any], state: str, gist: str) -> Spec:
+        # Resolved for good: nothing to compose again later.
+        source = {k: v for k, v in (old.get("source") or {}).items() if k != "recheck_at"}
         return Spec(key=str(old["key"]), kind=str(old["kind"]), title=str(old["title"]), state=state, gist=gist,
                     kicker=str(old.get("kicker") or ""), ref=str(old.get("ref") or ""), follows=old.get("follows"),
-                    source=dict(old.get("source") or {}), pushes=False)  # fmt: skip
+                    source=source, pushes=False)  # fmt: skip
 
     def _window(self, composer: Composer, run_id: int) -> None:
         run = self.store.update_run(run_id)
@@ -1157,23 +1174,27 @@ class ItemBook:
         """At start: the items that read the add-on options (the update gate and window, act mode)."""
         with self.store.atomic():
             composer = self._composer()
-            self._updates(composer, None)
+            self._safely("updates", partial(self._updates, composer, None))
             for run in self.store.recent_update_runs(limit=30):
-                self._window(composer, int(run["id"]))
-            self._maintenance(composer)
+                self._safely(f"window:{run['id']}", partial(self._window, composer, int(run["id"])))
+            self._safely("maint", partial(self._maintenance, composer))
         return self.flush() if self.on_change is None else []
 
     def tick(self) -> list[dict[str, Any]]:
         """Every minute: recompose what asked to be (`recheck_at`), then decide the pushes time makes due."""
-        due = self.store.items_due(self._clock())
+        now = self._clock()
+        due = self.store.items_due(now)
         if due:
             with self.store.atomic():
                 composer = self._composer()
                 updates = {str(r["key"]).removeprefix("updates:") for r in due if str(r["key"]).startswith("updates:")}
                 if updates:
-                    self._updates(composer, updates)
+                    self._safely("updates", partial(self._updates, composer, updates))
                 if any(str(r["key"]).startswith("health:") for r in due):
-                    self._health(composer)
+                    self._safely("health", partial(self._health, composer))
+                # Composed again: a recheck the source did not renew (a hold, a source that is gone) is done.
+                for record in self.store.items_due(now):
+                    self.store.clear_recheck(str(record["id"]))
         return self.flush()
 
     # ------------------------------------------------------------- writing

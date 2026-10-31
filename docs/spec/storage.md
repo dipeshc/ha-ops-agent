@@ -91,7 +91,9 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   has no reachable turns) with its start time and read mark; every run (the
   cost columns go); every item (the unused `confirm` and `derived` columns
   go) and every item event; counters, held pushes and issued push actions
-  into `kv`; the highest activity number into `activity.seq`. The activity
+  into `kv`; the highest activity number, of the log and of the
+  standalone items, into `activity.seq`. A change row whose files or
+  summary is not valid JSON is copied with an empty list. The activity
   log and the unused `spend` table are dropped: every activity entry
   already was an item or an item event. `kv` keeps every key except the
   item backfill marker and panel confirmations (`confirm:*`), which nothing

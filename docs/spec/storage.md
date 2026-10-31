@@ -125,10 +125,13 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   it was made, at a start or the daily prune. The self-test checks it like
   the store (root, 0600) and the AI's account can never reach it
   ([privsep.md](privsep.md) V4, V7). **Manual rollback** (for the admin;
-  nothing downgrades by itself): stop the add-on, move
-  `/data/ops.db.v18.bak` over `/data/ops.db` (and delete `ops.db-wal` and
-  `ops.db-shm`), install 0.18.x, start it. What happened after the
-  upgrade is not in the copy. Tests
+  nothing downgrades by itself), in this order: (1) stop the add-on; (2)
+  delete `/data/ops.db-wal` and `/data/ops.db-shm`, because a WAL left by
+  0.19.0 applied to the restored file makes it "database disk image is
+  malformed"; (3) copy, never move, `/data/ops.db.v18.bak` to
+  `/data/ops.db`, so the copy survives a failed attempt; (4) install
+  0.18.x and start it. What happened after the upgrade is not in the copy.
+  Tests `test_the_documented_rollback_gives_a_healthy_0_18_store`,
   `test_the_store_is_copied_aside_before_the_upgrade`,
   `test_a_copy_that_cannot_be_made_refuses_the_upgrade`,
   `test_the_copy_is_deleted_after_14_days`.

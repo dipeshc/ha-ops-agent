@@ -455,3 +455,45 @@ def test_the_copy_is_deleted_after_14_days(tmp_path: Path) -> None:
     os.utime(copy, (old, old))
     Store.open(path).close()
     assert not copy.exists()
+
+
+def test_the_documented_rollback_gives_a_healthy_0_18_store(tmp_path: Path) -> None:
+    """storage.md S12: stop, delete the WAL and SHM, copy (not move) the copy back, start 0.18."""
+    import shutil
+
+    from opsd.store import upgrade_copy
+
+    path = tmp_path / "ops.db"
+    v18_store(path)
+    before = counts(path)
+    store = Store.open(path)
+    for n in range(50):
+        store.append_turn(CHAT, role="admin", text=f"written by 0.19.0, {n}", now=NOW)
+    # The add-on stopped hard: what its WAL held then is left next to the file.
+    wal = Path(f"{path}-wal")
+    left = wal.read_bytes()
+    assert left
+    store.close()
+
+    def restore(*, delete_wal: bool) -> str:
+        wal.write_bytes(left)
+        if delete_wal:
+            # Step 2: a 0.19.0 WAL applied to the 0.18 file can leave it malformed.
+            for leftover in (wal, Path(f"{path}-shm")):
+                leftover.unlink(missing_ok=True)
+        shutil.copy2(upgrade_copy(path), path)
+        conn = sqlite3.connect(path)
+        try:
+            return str(conn.execute("PRAGMA quick_check").fetchone()[0])
+        except sqlite3.DatabaseError as err:
+            return str(err)
+        finally:
+            conn.close()
+
+    assert restore(delete_wal=True) == "ok"
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+    finally:
+        conn.close()
+    assert counts(path) == before and upgrade_copy(path).exists()

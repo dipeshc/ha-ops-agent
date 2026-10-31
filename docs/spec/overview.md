@@ -16,7 +16,7 @@ harm.
 | Health check, baseline, triage | [health.md](health.md) | `health.py`, `baseline.py`, `triage.py`, `evidence.py`, `fingerprint.py`, `queries.py`, `history.py` |
 | Updates and the OS flow | [updates.md](updates.md), [os-update.md](os-update.md) | `policy.py`, `updates.py`, `updexec.py`, `updiff.py`, `updatefix.py`, `backups.py` |
 | Approvals, items, pushes | [approvals.md](approvals.md), [items-and-pushes.md](items-and-pushes.md) | `approvals.py`, `items.py`, `activity.py`, `notify.py`, `channels.py`, `quiet.py` |
-| Panel and API | [panel.md](panel.md), [`docs/panel-api.md`](../panel-api.md) | `panel.py`, `panelapi.py`, `live.py`, `panel/` |
+| Panel and API | [panel.md](panel.md) | `panel.py`, `panelapi.py`, `live.py`, `panel/` |
 | Chat, inbound, tasks | [chat.md](chat.md) | `assistant.py`, `conversation.py`, `inbound.py`, `tasks.py`, `proposals.py`, `chatcards.py` |
 | Git proposals | [proposals.md](proposals.md) | `changes.py`, `changepaths.py`, `gitops.py`, `safegit.py`, `githistory.py`, `configcheck.py` |
 | AI runner and provider | [ai-runner.md](ai-runner.md) | `runner.py`, `runctx.py`, `claude_runner.py`, `guard.py`, `prompts/` |

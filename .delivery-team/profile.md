@@ -23,8 +23,8 @@ beside it. Every role reads this file first and treats it as authoritative.
   - `ha_ops_agent/rootfs/etc/`: s6 init and the AI provider's managed settings.
   - `tests/`: pytest suite against a fake Home Assistant (`tests/conftest.py`,
     `tests/fixtures/`). No network, no Supervisor, no AI provider.
-  - `docs/spec/`: the specification. `docs/panel-api.md`: the panel wire
-    contract, referenced by the spec. `docs/backlog/`: work items.
+  - `docs/spec/`: the specification (`panel.md` holds the panel wire
+    contract). `docs/backlog/`: work items.
   - `examples/profile.yaml`: the commented example house profile.
 
 ## Quality gate

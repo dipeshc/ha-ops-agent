@@ -37,7 +37,7 @@ implements each one and the tests that enforce it.
 | [os-update.md](os-update.md) | The operating-system update and reboot flow. |
 | [approvals.md](approvals.md) | Approval records, binding, single use, expiry. |
 | [items-and-pushes.md](items-and-pushes.md) | Items, the state vocabulary, derivation, revisions, and the push policy. |
-| [panel.md](panel.md) | The panel transport, security and routes (with [`docs/panel-api.md`](../panel-api.md)). |
+| [panel.md](panel.md) | The panel transport, security, the item record and every route. |
 | [chat.md](chat.md) | The one chat, push replies, reminders, follow-ups, investigations. |
 | [proposals.md](proposals.md) | Config changes as git proposals. |
 | [ai-runner.md](ai-runner.md) | Run profiles, preflight, the run copy, the tool guard, and the AI provider. |

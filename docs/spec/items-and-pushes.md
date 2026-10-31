@@ -2,7 +2,7 @@
 
 Everything the agent does is an item on the panel's Home page, with its
 history. The daemon derives items from its own records; the panel never
-infers state. The wire shape is in [`docs/panel-api.md`](../panel-api.md).
+infers state. The wire shape is in [panel.md](panel.md).
 
 Implementation: `opsd/items.py` (`ItemBook`), `opsd/activity.py`,
 `opsd/notify.py`, `opsd/channels.py`, `opsd/quiet.py`, `opsd/live.py`.

@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reply", "summary"],
+  "properties": {
+    "reply": { "anyOf": [{ "type": "null" }, { "type": "string", "maxLength": 1500 }] },
+    "summary": { "type": "string", "maxLength": 300 }
+  }
+}

@@ -1,0 +1,57 @@
+# Development tooling only. The add-on image runs the code under ha_ops_agent/rootfs/opt/ops
+# with Alpine's python3 and py3-yaml; it installs nothing from here.
+[project]
+name = "ha-ops-agent"
+version = "0.17.0"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "pytest-asyncio>=1.2",
+    "pytest-cov>=7.0",
+    "pyyaml>=6.0.3",
+    "ruff>=0.14",
+    "types-pyyaml>=6.0.12.20260906",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["ha_ops_agent/rootfs/opt/ops"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --cov=opsd --cov-report=term-missing:skip-covered"
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+src = ["ha_ops_agent/rootfs/opt/ops", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "BLE", "SIM", "RUF", "PL", "ASYNC"]
+ignore = [
+  "S603",     # subprocess with argv lists is intended (git, claude)
+  "S607",     # git/claude/nice resolved via PATH inside the image
+  "S310",     # urllib to fixed http://supervisor and the HA push relay
+  "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR2004",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S103", "S105", "S106", "S108", "PLC0415", "ASYNC221", "ASYNC240", "SIM115"]
+
+[tool.mypy]
+python_version = "3.14"
+mypy_path = "ha_ops_agent/rootfs/opt/ops"
+packages = ["opsd"]
+strict = true
+warn_unreachable = true
+
+# Optional overlays (opsd.house.*) are not part of this repository; the core imports them only when enabled.
+[[tool.mypy.overrides]]
+module = ["opsd.house", "opsd.house.*"]
+ignore_missing_imports = true

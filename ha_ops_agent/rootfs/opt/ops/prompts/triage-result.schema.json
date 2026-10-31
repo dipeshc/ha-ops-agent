@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["result", "summary"],
+  "properties": {
+    "result": { "enum": ["ok", "escalated", "failed"] },
+    "summary": { "type": "string", "maxLength": 600 }
+  }
+}

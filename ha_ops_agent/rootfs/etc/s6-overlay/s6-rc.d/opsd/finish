@@ -1,0 +1,6 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# s6 restarts the longrun; the Supervisor watchdog covers a wedged process.
+if [[ "${1}" -ne 0 ]] && [[ "${1}" -ne 256 ]]; then
+  bashio::log.warning "opsd exited with code ${1} (signal ${2}); s6 will restart it"
+fi

@@ -1,0 +1,8 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+bashio::log.info "Starting opsd"
+cd /opt/ops || exit 1
+# Everything the daemon writes under /data and /run is private to root.
+umask 077
+# -I: isolated mode, so neither the cwd nor PYTHON* variables affect imports.
+exec python3 -I -c 'import sys; sys.path.insert(0, "/opt/ops"); from opsd.__main__ import main; sys.exit(main())' daemon

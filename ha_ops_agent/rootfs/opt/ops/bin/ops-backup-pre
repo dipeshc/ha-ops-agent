@@ -1,0 +1,3 @@
+#!/bin/sh
+# Supervisor backup_pre hook: fold the store's WAL into ops.db so a hot backup is consistent.
+exec python3 -I -c 'import sys; sys.path.insert(0, "/opt/ops"); from opsd.__main__ import main; sys.exit(main())' checkpoint

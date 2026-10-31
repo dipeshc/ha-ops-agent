@@ -1,0 +1,135 @@
+name: HA Ops Agent
+version: "0.17.0"
+slug: ha_ops_agent
+description: >-
+  Unattended maintenance for Home Assistant: a daily health check, Claude Code
+  triage when something changed, soaked updates with a backup, a health diff
+  and rollback, and one admin chat. Not affiliated with Home Assistant or
+  Anthropic.
+url: https://github.com/dipeshc/ha-ops-agent
+arch:
+  - aarch64
+  - amd64
+# s6-overlay v3 must run as PID 1.
+init: false
+startup: application
+boot: auto
+stage: experimental
+hassio_api: true
+# Minimum role that covers backups, Core/OS/add-on updates and host logs (later
+# phases). Claude never receives the token; opsctl mediates every call.
+hassio_role: manager
+homeassistant_api: true
+# Mapped below /mnt/ha, which init-ops makes root-only (0700), so the
+# unprivileged `ops` account that runs Claude cannot reach either mount.
+map:
+  - type: homeassistant_config
+    read_only: false
+    path: /mnt/ha/config
+  - type: backup
+    read_only: true
+    path: /mnt/ha/backup
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:robot-outline
+panel_title: Ops Agent
+panel_admin: true
+watchdog: "http://[HOST]:[PORT:8099]/healthz"
+backup: hot
+# Folds the store's write-ahead log into /data/ops.db so a hot backup is consistent.
+backup_pre: /opt/ops/bin/ops-backup-pre
+backup_exclude:
+  - "runs/*"
+  - "snapshots/*"
+# Options: one level of groups, labelled in translations/en.yaml.
+# Keys ending in `?` are optional: absent from `options:`, so the form hides
+# them until "Show unused optional configuration options" is on, and the
+# daemon applies its code defaults.
+options:
+  agent:
+    mode: observe
+  llm:
+    # claude | none (deterministic alerts only)
+    provider: claude
+  claude:
+    # Subscription token (claude setup-token) or an sk-ant-api key.
+    token: ""
+    # Subscription tier for the run-time share estimate (auto: detect, else pro).
+    plan: auto
+    model_standard: claude-sonnet-5-5
+  chat:
+    activity_days: 7
+  notify:
+    max_pushes_per_day: 3
+    # Quiet hours (local HH:MM, may wrap midnight; empty turns them off): non-urgent pushes wait until the end.
+    quiet_start: "22:30"
+    quiet_end: "07:00"
+  health:
+    check_time: "05:30"
+    # Entities that are normally unavailable and are not news.
+    expected_unavailable: []
+  updates:
+    window: "04:00"
+    # Install AUTO updates in the window (needs agent.mode: act too): patches and minors that have
+    # soaked, unless a repair, a breaking change or a held version touches what the house uses.
+    auto_install: "off"
+    # Patches soak this many days (7 minimum), minors twice that.
+    min_age_days: 7
+    # The model reads AUTO candidates' release notes and may hold one back (never the reverse).
+    review: true
+    hold_if_unreviewed: true
+    need_approval: []
+    never: []
+  # Tighten capability tiers by name (e.g. integration.reload). Never loosens.
+  capabilities:
+    require_approval: []
+    never: []
+  # Most the agent may use of any subscription window, percent.
+  usage:
+    max_share_percent: 5.0
+  limits: {}
+schema:
+  agent:
+    mode: list(observe|act)
+  llm:
+    provider: list(claude|none)
+  claude:
+    token: password?
+    plan: list(auto|pro|max5|max20)
+    model_standard: match(^[a-z0-9][a-z0-9.-]{1,63}$)
+    model_fast: match(^([a-z0-9][a-z0-9.-]{1,63})?$)?
+  chat:
+    activity_days: int(1,30)
+  notify:
+    # Empty or absent: the house profile's notify_service (ops/profile.yaml).
+    service: match(^(mobile_app_[a-z0-9_]+)?$)?
+    max_pushes_per_day: int(0,20)
+    quiet_start: match(^(([01][0-9]|2[0-3]):[0-5][0-9])?$)
+    quiet_end: match(^(([01][0-9]|2[0-3]):[0-5][0-9])?$)
+  health:
+    check_time: match(^([01][0-9]|2[0-3]):[0-5][0-9]$)
+    expected_unavailable:
+      - str
+  updates:
+    window: match(^([01][0-9]|2[0-3]):[0-5][0-9]$)
+    auto_install: list(off|on)
+    min_age_days: int(7,90)
+    review: bool
+    hold_if_unreviewed: bool
+    need_approval:
+      - str
+    never:
+      - str
+  capabilities:
+    require_approval:
+      - str
+    never:
+      - str
+    reloadable_domains: match(^([a-z0-9_]{1,64}(,[a-z0-9_]{1,64}){0,39})?$)?
+  usage:
+    max_share_percent: float(0.5,25)
+  limits:
+    run_max_turns: int(5,100)?
+    run_max_usd: float(0.1,20)?
+    log_level: list(debug|info|warning|error)?
+    git_push: bool?

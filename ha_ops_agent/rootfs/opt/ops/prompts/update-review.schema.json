@@ -1,0 +1,89 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "assessments",
+    "summary"
+  ],
+  "properties": {
+    "assessments": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "entity_id",
+          "risk",
+          "hold",
+          "reason"
+        ],
+        "properties": {
+          "entity_id": {
+            "type": "string",
+            "maxLength": 140
+          },
+          "risk": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "hold": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "fix": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "why",
+              "edits"
+            ],
+            "properties": {
+              "why": {
+                "type": "string",
+                "maxLength": 600
+              },
+              "edits": {
+                "type": "array",
+                "maxItems": 6,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path",
+                    "old",
+                    "new"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "old": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "new": {
+                      "type": "string",
+                      "maxLength": 2000
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 300
+    }
+  }
+}

@@ -1,0 +1,5 @@
+# Pin the base image by digest; the Supervisor passes this as BUILD_FROM.
+# Per-platform digests of the ghcr.io/home-assistant/base:3.24 index sha256:992dc6a5... (see the Dockerfile).
+build_from:
+  aarch64: ghcr.io/home-assistant/base:3.24@sha256:05db94c3586b93426cc9699d8740e4e38be94705cd6c6994d0eccf81235f6e53
+  amd64: ghcr.io/home-assistant/base:3.24@sha256:1bfa4a633f741853641d3014ec23d00ed5f133f34c9daba9bafce2dc734a4882

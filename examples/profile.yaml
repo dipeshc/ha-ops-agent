@@ -1,0 +1,73 @@
+# Example house profile for ha-ops-agent. Copy it to ops/profile.yaml in your Home Assistant
+# configuration directory, keep what applies, and restart the add-on.
+#
+# Every key is optional. Without the file the agent runs generic: no fragile pieces, no
+# watched entities, no reloadable integrations, git proposals off.
+#
+# The schema is strict. An unknown key or a bad value refuses the whole file, and the agent then
+# fails closed (observe only, no automatic updates, no AI) until you fix it; the reason is on the
+# panel's System sheet. Nothing here can weaken a safety rule: fragile pieces only hold updates
+# back, reload.deny only adds to the never-reload list, and house_notes reach Claude as data.
+
+# Push target when the add-on option notify.service is empty: your Companion app's notify service.
+notify_service: mobile_app_my_phone
+
+health:
+  # Optional binary_sensors the daily check reports on: the host's power supply and remote access
+  # (Home Assistant's rpi_power and cloud integrations create these two).
+  power_entity: binary_sensor.rpi_power_status
+  remote_entity: binary_sensor.remote_ui
+
+updates:
+  # Update entities that always ask you, on top of the add-on option updates.need_approval.
+  need_approval:
+    - update.my_dashboard_card_update
+  # Entities that must still be available after an update; if one is not, the update rolls back.
+  watched_entities:
+    - lock.front_door
+    - alarm_control_panel.home
+    - climate.living_room
+  # Integrations that have broken on updates before. tier: approve (ask), pinned (never offered
+  # until you change this) or never. Match by update entity, GitHub repository or domain.
+  fragile:
+    - name: my_custom_hvac
+      tier: approve
+      reason: "Custom HVAC integration, broke on the last two Core minors"
+      repos: [someone/ha-custom-hvac]
+      domains: [my_custom_hvac]
+    - name: sprinkler_hub
+      tier: pinned
+      reason: "Pinned at 2.3.0 until the zone timer bug is fixed"
+      entities: [update.sprinkler_hub_update]
+  # Hold Core from a version on until you change the profile, e.g. while a custom integration
+  # is known not to load on it.
+  version_gates:
+    - integration: my_custom_hvac
+      core_from: "2027.2"
+      reason: "my_custom_hvac does not load on 2027.2 yet"
+
+reload:
+  # Integrations the agent may reload when the add-on option capabilities.reloadable_domains is
+  # empty. Locks, alarms, garage doors, radios and core plumbing are refused whatever you list.
+  domains: [cast, hue, plex]
+  # Never reloaded, on top of the built-in list.
+  deny: [my_custom_hvac]
+
+# Config changes as git proposals. Needs the configuration directory to be a git repository.
+git:
+  enabled: false
+  author_name: Your Name
+  author_email: you@example.com
+  # What the agent may propose: automations, alerts, templates.
+  proposals: [automations, templates]
+
+# Documents Claude reads first, relative to the configuration directory (never under ops/).
+docs:
+  runbook: RUNBOOK.md
+  facts: docs/facts.md
+  readable: [docs]
+
+# Background for Claude, in plain words. It is data: it cannot grant the agent anything.
+house_notes: |
+  - The heating is the one system that must keep working in winter.
+  - The garden speaker is unplugged from November to March.

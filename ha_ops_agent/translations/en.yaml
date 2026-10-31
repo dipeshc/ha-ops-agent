@@ -1,0 +1,125 @@
+configuration:
+  agent:
+    name: Agent
+    description: How much the agent may do.
+    fields:
+      mode:
+        name: Mode
+        description: "observe reports only; act also installs updates and applies approved changes."
+  llm:
+    name: Model provider
+    description: Which AI provider the agent uses.
+    fields:
+      provider:
+        name: Provider
+        description: "claude, or none for deterministic alerts only."
+  claude:
+    name: Claude
+    description: Claude Code sign-in and models.
+    fields:
+      token:
+        name: Token
+        description: "From claude setup-token (subscription), or an sk-ant-api key. Empty: AI is off."
+      plan:
+        name: Plan
+        description: "Subscription tier, for estimating a run's share when Claude Code reports too coarsely. auto detects it, else pro."
+      model_standard:
+        name: Standard model
+        description: Health-check triage, chat, follow-ups, investigations and update reviews.
+      model_fast:
+        name: Fast model
+        description: Chat summaries. Empty uses the standard model.
+  chat:
+    name: Chat
+    description: The admin chat.
+    fields:
+      activity_days:
+        name: Activity days
+        description: How many days of the activity log the chat reads.
+  notify:
+    name: Notifications
+    description: Pushes to the admin's phone.
+    fields:
+      service:
+        name: Admin device
+        description: "The admin's mobile_app notify service. Empty: the house profile's notify_service (ops/profile.yaml)."
+      max_pushes_per_day:
+        name: Pushes per day
+        description: Non-urgent pushes. Urgent pushes have their own cap of 6.
+      quiet_start:
+        name: Quiet hours start
+        description: "Local HH:MM. Non-urgent pushes wait until the end. Empty turns quiet hours off."
+      quiet_end:
+        name: Quiet hours end
+        description: Local HH:MM.
+  health:
+    name: Health check
+    description: The daily deterministic health check.
+    fields:
+      check_time:
+        name: Time
+        description: Local HH:MM.
+      expected_unavailable:
+        name: Expected unavailable
+        description: Entity ids that never raise an item (normally-off devices).
+  updates:
+    name: Updates
+    description: The nightly update plan and automatic installs.
+    fields:
+      window:
+        name: Window
+        description: Local HH:MM when the plan runs.
+      auto_install:
+        name: Install automatically
+        description: "on installs patches and minors that have soaked in the window (needs agent mode act), unless a repair, a breaking change or a held version touches what the house uses."
+      min_age_days:
+        name: Minimum age (days)
+        description: Patches soak this long before they install on their own, minors twice as long (7 to 90).
+      review:
+        name: Review release notes
+        description: The model reads AUTO candidates' release notes and can only hold them back.
+      hold_if_unreviewed:
+        name: Hold if not reviewed
+        description: When the review cannot run, AUTO candidates wait for approval.
+      need_approval:
+        name: Always need approval
+        description: Update entity ids that always need your approval (added to the house profile's list).
+      never:
+        name: Never install
+        description: Update entity ids that are reported only.
+  capabilities:
+    name: Capabilities
+    description: Tighten what the agent may ask for, by capability name. Never loosens.
+    fields:
+      require_approval:
+        name: Require approval
+        description: "Capability names (for example integration.reload) that need your approval."
+      never:
+        name: Never allow
+        description: Capability names that are always refused.
+      reloadable_domains:
+        name: Integrations the agent may reload
+        description: "Comma-separated integration domains (for example cast,hue). Empty: the house profile's reload.domains. Locks, the alarm, garage doors, Bluetooth and core plumbing are always refused."
+  usage:
+    name: Usage
+    description: How much of your subscription the agent may use.
+    fields:
+      max_share_percent:
+        name: Maximum share (%)
+        description: Most the agent may use of any subscription window (0.5 to 25).
+  limits:
+    name: Advanced limits
+    description: Optional. Empty fields use the built-in defaults.
+    fields:
+      run_max_turns:
+        name: Turns per run
+        description: Health-check triage. Default 30.
+      run_max_usd:
+        name: USD per run
+        description: Claude Code's per-run budget (an estimate on a subscription). Default 1.5.
+      log_level:
+        name: Log level
+        description: "debug, info, warning or error. Default info."
+      git_push:
+        name: Push to GitHub
+        description: Push after committing. Default on.

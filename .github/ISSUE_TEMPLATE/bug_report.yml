@@ -1,0 +1,54 @@
+name: Bug report
+description: Something the add-on did, or failed to do.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Support is best effort. A diagnostics export makes most reports answerable.
+        Never paste a token, an API key or a backup password here.
+  - type: input
+    id: version
+    attributes:
+      label: Add-on version
+      description: Settings > Add-ons > HA Ops Agent, or the diagnostics export.
+      placeholder: "0.17.0"
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant Core, Supervisor and OS versions
+      description: Settings > About.
+      placeholder: "Core 2026.10.3, Supervisor 2026.10.2, OS 17.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options: [aarch64, amd64]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics export
+      description: >-
+        In the add-on's panel: System > Download diagnostics. Secrets are removed,
+        but read it before you paste it.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Add-on log (optional)
+      description: The relevant lines from the add-on's Log tab.
+      render: text

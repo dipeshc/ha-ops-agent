@@ -1,0 +1,66 @@
+# The sample house the generic test fixtures describe (conftest.SAMPLE_PROFILE): a custom solar
+# integration whose breakage is critical, a pinned pool controller, two locks and an alarm panel,
+# git proposals on. Every name here is made up.
+
+notify_service: mobile_app_admin_phone
+self_slug: local_ha_ops_agent
+
+health:
+  power_entity: binary_sensor.host_power_ok
+  remote_entity: binary_sensor.remote_access
+
+updates:
+  need_approval:
+    - update.acme_pool_update
+    - update.acme_card_update
+  watched_entities:
+    - lock.front_door
+    - lock.back_door
+    - alarm_control_panel.house_alarm
+  fragile:
+    - name: acme_pool
+      tier: pinned
+      reason: "pinned at 3.0.4 until the pump schedule bug is fixed"
+      entities: [update.acme_pool_update, update.acme_pool_new_update]
+      repos: [example/acme_pool]
+      domains: [acme_pool]
+    - name: acme_solar
+      tier: approve
+      reason: "Acme Solar: never updated automatically (runbook)"
+      domains: [acme_solar]
+    - name: acme_weather
+      tier: approve
+      reason: "acme_weather has no rollback notes: approve each update"
+      entities: [update.acme_weather_update]
+      repos: [example/ha-acme-weather]
+      domains: [acme_weather]
+    - name: acme-card
+      tier: approve
+      reason: "acme-card majors need a matching dashboard change"
+      entities: [update.acme_card_update]
+      repos: [example/acme-card]
+      bumps: [major, unknown]
+  version_gates:
+    - integration: acme_pool
+      core_from: "2027.3"
+      reason: acme_pool does not load on 2027.3 yet
+
+reload:
+  domains: [cast, hue, acme_weather]
+  deny: [acme_solar]
+
+git:
+  enabled: true
+  author_name: Alex Example
+  author_email: alex@example.com
+  proposals: [automations, alerts, templates]
+
+docs:
+  runbook: RUNBOOK.md
+  facts: docs/facts.md
+  readable: [docs]
+
+house_notes: |
+  - `custom_components/acme_solar` reads the inverter; if it breaks, the
+    battery schedule stops, so treat it with care.
+  - The garden speaker is unplugged from November to March.

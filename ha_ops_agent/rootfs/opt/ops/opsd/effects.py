@@ -1,4 +1,4 @@
-"""Effect capabilities Claude can call during a run: ack and notify.
+"""Effect capabilities the AI can call during a run: ack and notify.
 
 These are the first socket verbs that change anything, so each one:
 - works only inside an agent run (the validator refuses otherwise);

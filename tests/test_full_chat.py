@@ -320,7 +320,7 @@ async def test_an_investigation_can_be_cancelled_before_and_during_a_step(h: Har
     card = next(t for t in turns(d, thread) if t.status == "investigation")
     assert card.meta["state"] == "cancelled" and card.meta["actions"] == []
 
-    # During a step: the running Claude process is stopped.
+    # During a step: the running AI process is stopped.
     thread = await start_investigation(d, h)
     task = next(t for t in d.store.open_investigations() if t.thread_id == thread)
     original = d.runner.run_claude
@@ -467,7 +467,7 @@ async def test_cancel_while_waiting_for_the_slot_never_starts_the_step_and_voids
     [proposal] = d.store.proposals()
     task = investigation(d)
     assert proposal["run_id"] in task.payload["runs"] and task.state == "pending"
-    # Step 2 is claimed but waits for the Claude slot (another run holds it); the admin cancels meanwhile.
+    # Step 2 is claimed but waits for the AI slot (another run holds it); the admin cancels meanwhile.
     calls = len(h.claude_calls)
     await d.runner._slot.acquire()
     for claimed in d.store.claim_due(datetime.now(UTC) + timedelta(minutes=1)):

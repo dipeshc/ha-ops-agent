@@ -1,7 +1,7 @@
 """Reminder and follow-up capabilities (`task.create`, `task.list`, `task.cancel`).
 
 Tasks are rows in the store, so they survive restarts, and the scheduler
-fires them. Limits, all enforced here rather than trusted from Claude:
+fires them. Limits, all enforced here rather than trusted from the AI:
 - a due time between one minute and one year ahead;
 - at most `MAX_OPEN_TASKS` open tasks in total (one admin, one agent);
 - a follow-up created by a follow-up run is one generation deeper, and the

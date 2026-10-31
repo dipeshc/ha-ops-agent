@@ -1,6 +1,6 @@
 """Who a capability request serves and what it may touch.
 
-`RunContext` is stamped on the RPC server for the single active Claude run,
+`RunContext` is stamped on the RPC server for the single active AI run,
 so the server knows the principal, the profile's allowed capabilities and
 the run's hand-off without trusting anything in the request. `ExecContext`
 is what an executor receives.
@@ -34,7 +34,7 @@ class Ack:
     accept: bool
 
 
-# Requests allowed per Claude run, whatever their outcome.
+# Requests allowed per AI run, whatever their outcome.
 REQUEST_BUDGET = 200
 
 
@@ -71,7 +71,7 @@ class RunContext:
     # Items handed to this run, by key: the only keys an ack may name.
     handoff: Mapping[str, Item] = field(default_factory=dict)
     run_id: str = field(default_factory=lambda: secrets.token_hex(8))
-    # The Claude process; socket callers must descend from it.
+    # The AI process; socket callers must descend from it.
     root_pid: int | None = None
     # Conversation this run answers (chat), and how deep a follow-up chain is.
     thread_id: str | None = None

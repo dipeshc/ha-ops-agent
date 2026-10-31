@@ -561,7 +561,7 @@ def test_reload_can_never_target_the_platform(domain: str) -> None:
 
 
 def test_no_capability_argument_can_carry_a_self_slug_into_a_url(tmp_path: Path) -> None:
-    """Every enabled, Claude-reachable mutating capability: its arguments are refused or never reach HTTP unguarded.
+    """Every enabled, AI-reachable mutating capability: its arguments are refused or never reach HTTP unguarded.
 
     The central guard sits under every executor (SupervisorClient.request and HAWebSocket.command), so this
     checks the inventory: any capability that may change Home Assistant is one we reviewed for self-targets.

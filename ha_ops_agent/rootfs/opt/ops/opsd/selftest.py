@@ -265,7 +265,7 @@ def _probe_socket(run: RunAsOps, socket_path: Path) -> dict[str, Any]:
 def check_socket(as_ops: RunAsOps, as_outsider: RunAsOps, socket_path: Path) -> Check:
     """Outsiders cannot connect; ops outside the bound run's process tree is refused a mutating verb.
 
-    Holds whether or not a run is active: the probe is never a descendant of Claude.
+    Holds whether or not a run is active: the probe is never a descendant of the AI run.
     """
     outsider = _probe_socket(as_outsider, socket_path)
     if not str(outsider.get("connect", "")).startswith("denied:"):

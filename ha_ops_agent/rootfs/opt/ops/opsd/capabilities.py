@@ -1,4 +1,4 @@
-"""Capability registry: every power Claude can request, declared once.
+"""Capability registry: every power the AI can request, declared once.
 
 A `Capability` row generates everything that used to be hand-copied: the
 RPC request schema (`parse_request`), the `opsctl` argparse tree
@@ -18,7 +18,7 @@ of the prompts and the daemon refuses it (`unavailable`).
 
 `internal=True` rows (the update executors) are powers of the
 daemon itself: they never appear in the socket schema, the `opsctl` parser,
-the guard's verb list or any prompt, so Claude cannot request them at all.
+the guard's verb list or any prompt, so the AI cannot request them at all.
 The daemon still runs them through `policy.decide` (tier, origin, mode) and
 the audit log, exactly like a socket request (see `updexec.Executors`).
 """
@@ -66,7 +66,7 @@ class RequestError(ValueError):
 
 
 class CapabilityError(ValueError):
-    """A validator or executor refused the request; the message is safe to show Claude."""
+    """A validator or executor refused the request; the message is safe to show the AI."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,7 +474,7 @@ REGISTRY: tuple[Capability, ...] = (
         origins=frozenset({Origin.AGENT_SELF}),
         internal=True,
     ),
-    # Update executors: daemon-internal, never offered to Claude.
+    # Update executors: daemon-internal, never offered to the AI.
     Capability(
         "backup.create",
         "backup-create",
@@ -539,7 +539,7 @@ BY_VERB: dict[str, Capability] = {c.verb: c for c in REGISTRY}
 
 
 def enabled(registry: Mapping[str, Capability] = CAPABILITIES) -> list[Capability]:
-    """What Claude can reach (socket, CLI, guard, prompts): enabled and not daemon-internal."""
+    """What the AI can reach (socket, CLI, guard, prompts): enabled and not daemon-internal."""
     return [c for c in registry.values() if c.enabled and not c.internal]
 
 
@@ -549,7 +549,7 @@ def internal(registry: Mapping[str, Capability] = CAPABILITIES) -> dict[str, Cap
 
 
 def cli_verbs(registry: Mapping[str, Capability] = CAPABILITIES) -> frozenset[str]:
-    """What the guard hook lets Claude run as `opsctl <verb>`."""
+    """What the guard hook lets the AI run as `opsctl <verb>`."""
     return frozenset(c.verb for c in enabled(registry))
 
 

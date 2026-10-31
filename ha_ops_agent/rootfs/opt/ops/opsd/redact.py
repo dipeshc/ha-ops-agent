@@ -1,4 +1,4 @@
-"""Secret redaction for everything the agent logs, stores or shows to Claude."""
+"""Secret redaction for everything the agent logs, stores or shows to the AI."""
 
 import re
 from collections.abc import Iterable

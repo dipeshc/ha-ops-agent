@@ -164,7 +164,7 @@ const { els } = P;
 const MAX = 2000, WARN_AT = 1800;
 const CARD = {
   ai_disabled: ["AI is off", "power"], share_cap: ["Agent share used for this window", "clock"],
-  run_cap_reached: ["Run limit reached", "clock"], usage_limited: ["Claude usage limit", "clock"],
+  run_cap_reached: ["Run limit reached", "clock"], usage_limited: ["AI usage limit", "clock"],
   account_busy: ["Subscription busy", "clock"], skipped_busy: ["Agent busy", "clock"],
   chat_cap: ["Chat limit reached", "clock"], busy: ["Not sent", "alert"], interrupted: ["Interrupted", "alert"], error: ["Run failed", "alert"],
   investigation: ["Investigation", "search"], share_reserve: ["Saving budget for monitoring", "clock"], proposal: ["Approval requested", "alert"],

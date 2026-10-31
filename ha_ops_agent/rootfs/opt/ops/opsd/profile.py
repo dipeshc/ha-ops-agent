@@ -124,7 +124,7 @@ class GitProfile:
 
 @dataclass(frozen=True, slots=True)
 class DocsProfile:
-    # The runbook and the house facts the prompts point at; `readable` adds files or directories Claude may read.
+    # The runbook and the house facts the prompts point at; `readable` adds files or directories the AI may read.
     runbook: str = ""
     facts: str = ""
     readable: tuple[str, ...] = ()

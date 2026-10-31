@@ -8,7 +8,7 @@ At the update window (default 04:00 local) the daemon:
    names it (Core: one that breaks in the target version), or when Home
    Assistant's own notes list a breaking change for an integration this
    house uses (`opsd.evidence`, read-only; unreadable notes ask too). A
-   capability-free Claude `update_review` run then reads the candidates'
+   capability-free AI `update_review` run then reads the candidates'
    release notes as fenced, untrusted data and can only hold an update back.
    For a Core update held by its notes or a repair, the same run may write
    the config change it needs: the daemon records it as a one-tap proposal
@@ -39,7 +39,7 @@ State is durable (`update_runs`, `update_jobs` in the store). After a
 restart an active run resumes: a job caught mid-install is never installed
 again. Its version decides: the new one means "verify", the old one with no
 Supervisor job running means "failed, not retried". A rollback is started at
-most once per job. Nothing here depends on Claude being on; the review is
+most once per job. Nothing here depends on the AI being on; the review is
 skipped when AI is off and only ever adds caution.
 
 An approved HAOS update has two steps. Since Supervisor 2026.07.0
@@ -844,7 +844,7 @@ class UpdateManager:
         }
 
     async def _apply_review(self, plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Cached assessments first; unreviewed AUTO candidates (and updates that ask) go to one Claude run."""
+        """Cached assessments first; unreviewed AUTO candidates (and updates that ask) go to one AI run."""
         autos = auto_items(plan) + [i for i in plan if approvable(i) and not waits_quietly(i)]
         cached: dict[str, dict[str, Any]] = {}
         missing = []

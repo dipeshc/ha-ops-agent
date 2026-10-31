@@ -1,7 +1,7 @@
-"""`run_agent(profile, ...)`: the one way the daemon starts Claude.
+"""`run_agent(profile, ...)`: the one way the daemon starts the AI.
 
 A `Profile` bundles a system prompt section, an output schema, model
-settings, a budget class and the capabilities Claude may request. The
+settings, a budget class and the capabilities the AI may request. The
 runner owns the fail-closed preflight that used to live in the triage
 cycle, in the same order: token, kill switch and backoff, memory floor,
 the `ops` account, the live isolation check, a passing self-test, and a
@@ -62,7 +62,7 @@ GUARD_ANOMALY_DAYS = 7
 # Statuses that mean a cap or control refused the run before it started.
 BLOCKED_STATUSES = frozenset({"run_cap_reached", "ai_disabled", "usage_limited", "share_cap", "account_busy",
                               "share_reserve"})  # fmt: skip
-# Never reached Claude: nothing to charge.
+# Never reached the AI: nothing to charge.
 NOT_STARTED = frozenset({"export_failed", "setup_failed"})
 
 READ_CAPABILITIES = frozenset(c.name for c in CAPABILITIES.values() if c.read_only)
@@ -351,7 +351,7 @@ def _refusal_status(reason: str) -> str:
 
 
 class AgentRunner:
-    """Preflight, reserve, export, bind, run, account. One Claude process at a time."""
+    """Preflight, reserve, export, bind, run, account. One AI process at a time."""
 
     def __init__(
         self,
@@ -379,12 +379,12 @@ class AgentRunner:
         self._caps = caps or (lambda: Caps.from_options(self.options))
         self._after_run = after_run
         self._slot = asyncio.Lock()
-        # The profile and thread holding the Claude slot (for the panel's "waiting for ..." label).
+        # The profile and thread holding the AI slot (for the panel's "waiting for ..." label).
         self.current: RunContext | None = None
         self._task: asyncio.Future[RunResult] | None = None
         self._kill_reason: str | None = None
         self._token = token
-        # Indirection so tests can stub the Claude process.
+        # Indirection so tests can stub the AI process.
         self.run_claude: Callable[..., Awaitable[RunResult]] = claude_runner.run_claude
         # Indirections so tests can stub the OS-facing parts.
         self.host_available_mb: Callable[[], int] = claude_runner.host_available_mb
@@ -412,33 +412,33 @@ class AgentRunner:
         return self._task is not None and not self._task.done()
 
     def kill(self, reason: str) -> bool:
-        """Stop the running Claude process now (kill switch). True if one was running."""
+        """Stop the running AI process now (kill switch). True if one was running."""
         if not self.running or self._task is None:
             return False
         self._kill_reason = reason
         self._task.cancel()
-        _LOGGER.warning("Claude run killed", extra={"reason": reason})
+        _LOGGER.warning("AI run killed", extra={"reason": reason})
         return True
 
     def preflight(self, profile: Profile, now: datetime) -> RunResult | None:
-        """A refusal, or None when Claude may start. Order matters: cheapest and safest first."""
+        """A refusal, or None when the AI may start. Order matters: cheapest and safest first."""
         if not self.options.valid:
             # Invalid add-on options fail closed; the health check reports them.
             return RunResult(status="options_invalid", error="; ".join(self.options.all_problems)[:300])
         if self.options.llm.provider == "none":
             return RunResult(status="no_provider", error="llm.provider is none")
         if not self._token():
-            _LOGGER.warning("no Claude token configured; deterministic alerting only")
+            _LOGGER.warning("no AI token configured; deterministic alerting only")
             return RunResult(status="no_token")
         if self.store is None:
-            # Without the ledger and the audit log nothing Claude does can be accounted for.
+            # Without the ledger and the audit log nothing the AI does can be accounted for.
             return RunResult(status="store_unavailable")
         control = self.control.refusal(now)
         if control is not None:
             return RunResult(status=control, error=control)
         available = self.host_available_mb()
         if available < CLAUDE_MIN_AVAILABLE_MB:
-            _LOGGER.warning("not enough memory to run Claude", extra={"available_mb": available})
+            _LOGGER.warning("not enough memory to run the AI", extra={"available_mb": available})
             return RunResult(status="skipped_low_memory", error=f"{available} MB available")
         return self._user_reserve(profile, now)
 
@@ -463,16 +463,16 @@ class AgentRunner:
             return None, None
         account = self.ops_account()
         if account is None:
-            _LOGGER.error("ops user missing; refusing to run Claude as root")
+            _LOGGER.error("ops user missing; refusing to run the AI as root")
             return RunResult(status="isolation_failed", error="ops user missing"), None
         exposed = self.isolation_problems(self.paths, account)
         if exposed:
-            _LOGGER.error("sensitive paths reachable by ops; not running Claude", extra={"paths": exposed})
+            _LOGGER.error("sensitive paths reachable by ops; not running the AI", extra={"paths": exposed})
             return RunResult(status="isolation_failed", error=f"reachable by ops: {exposed}"), None
         selftest = self._selftest()
         if selftest is None or not selftest.ok:
             summary = selftest.summary() if selftest else "not run"
-            _LOGGER.error("privilege self-test not passing; not running Claude", extra={"selftest": summary})
+            _LOGGER.error("privilege self-test not passing; not running the AI", extra={"selftest": summary})
             return RunResult(status="isolation_failed", error=f"self-test {summary}"), None
         return None, (account.uid, account.gid)
 
@@ -491,7 +491,7 @@ class AgentRunner:
         on_slot: Callable[[RunContext], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> RunOutcome:
-        """`wait_s` > 0 waits that long for the single Claude slot (chat waits for a triage).
+        """`wait_s` > 0 waits that long for the single AI slot (chat waits for a triage).
 
         `on_slot` is called once the slot is held, before the preflight. `cancelled` is asked
         then too: if it says so, nothing starts (status `cancelled`, nothing reserved).
@@ -580,7 +580,7 @@ class AgentRunner:
             system_prompt = compose_system_prompt(self.paths.prompts_dir, profile, self.options.profile)
             prompt_file.parent.mkdir(parents=True, exist_ok=True)
             prompt_file.write_text(system_prompt)
-            # World-readable on purpose: Claude (as ops) reads its own instructions.
+            # World-readable on purpose: the AI (as ops) reads its own instructions.
             os.chmod(prompt_file, 0o644)
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / "prompt.txt").write_text(prompt)

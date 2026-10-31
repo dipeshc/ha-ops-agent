@@ -2,7 +2,7 @@
 
 These are the daemon's own powers. Their registry rows are `internal`, so
 they are never on the socket, the CLI, the guard's verb list or a prompt:
-nothing Claude produces can call them. Every call still goes through
+nothing the AI produces can call them. Every call still goes through
 `policy.decide` (code tier, the update rule as tier resolver, the
 `agent-self` origin, `observe` mode, option tightening) and the audit log,
 and refuses on anything but "execute".

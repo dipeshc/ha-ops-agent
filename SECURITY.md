@@ -19,7 +19,7 @@ In scope: anything in this repository, in particular a way to
   should ask (an update, a config change, a reboot);
 - make it operate, or reload the integration of, a lock, an alarm panel, a
   garage door or anything else that opens the house;
-- let the Claude process escape its unprivileged account, read the
+- let the AI process escape its unprivileged account, read the
   Supervisor token, `/data`, the live config or backups, or call the
   Supervisor or Core directly;
 - make the agent change itself, the Supervisor or the host outside the

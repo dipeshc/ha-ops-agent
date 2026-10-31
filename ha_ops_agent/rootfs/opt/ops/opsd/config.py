@@ -32,10 +32,10 @@ from opsd.selfguard import SELF_SLUG
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = ["SELF_SLUG", "Options", "Paths"]
-# The unprivileged account Claude Code runs as (created in the Dockerfile).
+# The unprivileged account the AI runs as (created in the Dockerfile).
 OPS_USER = "ops"
 # The HA config is mapped below a root-only directory so the ops user cannot
-# reach it at all; Claude sees a filtered, read-only export instead.
+# reach it at all; the AI sees a filtered, read-only export instead.
 HA_CONFIG_MOUNT = "/mnt/ha/config"
 
 
@@ -132,7 +132,7 @@ class Paths:
 
     @property
     def export_dir(self) -> Path:
-        """Read-only copy of the tracked, secret-free config: Claude's cwd."""
+        """Read-only copy of the tracked, secret-free config: the AI's cwd."""
         return self.export_root / "config"
 
     @property
@@ -467,7 +467,7 @@ class Options:
 
     @property
     def reads(self) -> Reads:
-        """What Claude may read: the base lists plus the house profile's documents."""
+        """What the AI may read: the base lists plus the house profile's documents."""
         return Reads.with_extra(self.profile.docs.read_extra)
 
     @classmethod

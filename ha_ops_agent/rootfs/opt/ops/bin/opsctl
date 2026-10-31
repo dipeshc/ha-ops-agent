@@ -1,4 +1,4 @@
 #!/bin/sh
-# Read-only maintenance CLI exposed to Claude.
+# Read-only maintenance CLI exposed to the AI.
 # -I: isolated mode (no cwd or PYTHON* env on sys.path); the package path is explicit.
 exec python3 -I -c 'import sys; sys.path.insert(0, "/opt/ops"); from opsd.opsctl import main; sys.exit(main())' "$@"

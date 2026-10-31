@@ -1,4 +1,4 @@
-"""opsctl: Claude's only window onto the Supervisor, Core, git history and its effects.
+"""opsctl: the AI's only window onto the Supervisor, Core, git history and its effects.
 
 This is a thin, unprivileged client. It holds no token and reads nothing
 itself; its command line is generated from the capability registry, and it

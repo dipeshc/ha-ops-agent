@@ -2,8 +2,8 @@ name: HA Ops Agent
 version: "0.17.0"
 slug: ha_ops_agent
 description: >-
-  Unattended maintenance for Home Assistant: a daily health check, Claude Code
-  triage when something changed, soaked updates with a backup, a health diff
+  Unattended maintenance for Home Assistant: a daily health check, AI triage
+  when something changed, soaked updates with a backup, a health diff
   and rollback, and one admin chat. Not affiliated with Home Assistant or
   Anthropic.
 url: https://github.com/dipeshc/ha-ops-agent
@@ -17,11 +17,11 @@ boot: auto
 stage: experimental
 hassio_api: true
 # Minimum role that covers backups, Core/OS/add-on updates and host logs (later
-# phases). Claude never receives the token; opsctl mediates every call.
+# phases). The AI never receives the token; opsctl mediates every call.
 hassio_role: manager
 homeassistant_api: true
 # Mapped below /mnt/ha, which init-ops makes root-only (0700), so the
-# unprivileged `ops` account that runs Claude cannot reach either mount.
+# unprivileged `ops` account that runs the AI cannot reach either mount.
 map:
   - type: homeassistant_config
     read_only: false

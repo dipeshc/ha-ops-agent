@@ -1,7 +1,7 @@
 """The house profile: strict schema, the generic agent without one, and hostile profiles.
 
 A profile can add caution and name house things; no value in it can weaken an invariant (the daemon executes
-and Claude proposes; locks, the alarm and garage doors are never operable; untrusted text is data; the agent
+and the AI proposes; locks, the alarm and garage doors are never operable; untrusted text is data; the agent
 never modifies itself).
 """
 

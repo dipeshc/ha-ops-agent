@@ -9,3 +9,5 @@ htmlcov/
 dist/
 build/
 .DS_Store
+.delivery-team/worktrees/
+.delivery-team/progress/

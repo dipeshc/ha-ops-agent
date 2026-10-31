@@ -104,7 +104,8 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
 - U13. **Order.** One job at a time: add-ons, HACS plugins, HACS
   integrations, Core, firmware, OS. Test
   `test_act_mode_backs_up_then_installs_one_at_a_time`.
-- U14. **Backup.** One per run, before the first job, through the websocket
+- U14. **Backup.** Exactly one per run, before the first job and never per
+  job, through the websocket
   `backup/generate_with_automatic_settings` (the user's own automatic
   settings; the backup configuration itself is never read). The daemon
   waits up to 40 minutes for a new backup that is automatic, holds the
@@ -147,8 +148,10 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
 - U19. **Rollback.** Core: reinstall the previous version only when the
   recorder schema version is readable and unchanged, else escalate. HACS:
   install the previous version (and restart Core if the new code loaded).
-  Add-ons, OS and firmware: escalate (the add-on restore would need the
-  backup key the agent never has). One rollback attempt per job; after it
+  Add-ons, OS and firmware MUST NOT be rolled back by the agent: a
+  regression (a watched entity included) escalates to the admin, naming
+  the backup to restore (the add-on restore would need the backup key the
+  agent never has). One rollback attempt per job; after it
   the health must settle healthy or the job is `rollback_failed`. Tests
   `test_core_and_hacs_roll_back_by_version`,
   `test_core_is_not_downgraded_over_a_migrated_database`,
@@ -171,8 +174,10 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
 - U22. A version hold (`update_hold:<entity>@<version>`) is set on a
   rollback, a failed rollback, an escalation, an OS fallback after reboot
   and a reconcile regression. It makes that exact version `approve` with
-  `held=True`; a newer version is unaffected. No code path deletes a hold:
-  the admin clears it by approving that version. Other holds: a pause
+  `held=True`; a newer version is unaffected. Approving that version in the
+  panel is the only way to release a hold: there is no separate "clear"
+  action, no code path deletes a hold key, and the hold MUST persist across
+  restarts and plans until that approval. Other holds: a pause
   (panel, or set by a failure until the panel resumes), the review hold, the
   unreviewed hold, repair and breaking-change holds (re-evaluated each
   plan), version gates, fragile pinned/never, `updates.never`, an admin

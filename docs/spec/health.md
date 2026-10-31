@@ -65,7 +65,7 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 | --- | --- | --- |
 | `core:down` | critical | Core state not running, or the API down. |
 | `entities:<platform>` | critical for a custom integration, else warning | Newly down entities not in the baseline or `health.expected_unavailable`; flips younger than 6 hours are skipped unless the platform is custom and the state is hard `unavailable`. |
-| `custom:<domain>` | critical | A custom integration that was ok in the baseline now has a failed entry or all entities down. |
+| `custom:<domain>` | critical | A custom integration that was ok in the baseline now has a failed entry or all entities down. An entity in `health.expected_unavailable` MUST NOT count as down here. **Currently violated:** `baseline.py:202-215` counts it (backlog `P1-expected-unavailable-custom-critical`). |
 | `entry:<id>` | critical for a custom domain, else warning | New failed config entry. |
 | `repair:<key>` | critical iff Home Assistant says critical, else warning | New repair. |
 | `supervisor:<issue>` | warning | New Supervisor issue; `no_current_backup` is dropped when a complete encrypted backup finished within 26 hours and is critical otherwise; unhealthy/unsupported reasons are warnings every run. |

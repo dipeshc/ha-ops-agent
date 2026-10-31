@@ -140,6 +140,15 @@ dispatch on `llm.provider`.
   process as `CLAUDE_CODE_OAUTH_TOKEN` and nowhere else; the 0.17.0 code
   does not detect or handle an API key differently. Test
   `test_options_parsing_and_token`.
+- AP1a. **API key (planned, not yet implemented; backlog
+  `P2-api-key-credential`).** `claude.token` MUST also accept a provider API
+  key. The runner detects a key by its `sk-ant-` prefix and exports it as
+  `ANTHROPIC_API_KEY` instead of `CLAUDE_CODE_OAUTH_TOKEN`; a setup token
+  keeps today's path. With a key there are no subscription usage windows:
+  the share rule ([budget.md](budget.md) B3) does not apply, the run caps
+  and `limits.run_max_usd` do, and `claude.plan` is ignored. The key is
+  never logged (the redactor already masks `sk-ant-` values) and the panel
+  reports which credential kind is in use without showing it.
 - AP2. **Process.** `nice -n 10 claude -p <prompt> --output-format
   stream-json --verbose --model <m> --max-turns <n> --max-budget-usd <x>
   --permission-mode dontAsk --tools Read,Grep,Glob,Bash[,Write]

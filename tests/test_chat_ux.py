@@ -1,7 +1,6 @@
 """Chat UX on the daemon side: refusal cards, automatic retry, presence, summaries, test pushes, the hub."""
 
 import asyncio
-import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,7 +18,7 @@ from opsd.live import LEASE_S, MAX_LEASES, QUEUE_SIZE, Hub
 from opsd.policy import Origin
 from opsd.runctx import Principal, RunContext
 from opsd.runner import BLOCKED_STATUSES, SUMMARY, Profile, RunOutcome
-from opsd.store import MIGRATIONS, RETRY_KEY, Store
+from opsd.store import RETRY_KEY, Store
 from tests.conftest import FakeHA
 from tests.test_assistant import ADMIN, CHAT
 from tests.test_daemon import Harness
@@ -406,43 +405,6 @@ async def test_push_replies_show_in_the_thread_once(h: Harness) -> None:
     await a.drain()
     admin = [t for t in store.turns_page(thread) if t.role == "admin"]
     assert len(admin) == 1 and admin[0].meta["via"] == "notification" and admin[0].meta["channel"] == "companion"
-
-
-# ---------------------------------------------------------------- migration
-
-
-def test_v4_store_migrates_with_tasks_and_threads_intact(tmp_path: Path) -> None:
-    path = tmp_path / "ops.db"
-    conn = sqlite3.connect(path)
-    for number in range(4):
-        for statement in MIGRATIONS[number].split(";"):
-            if statement.strip():
-                conn.execute(statement)
-    conn.execute("PRAGMA user_version = 4")
-    now = "2026-01-26T00:00:00+00:00"
-    conn.execute("INSERT INTO tasks (kind, title, owner, created_by, system_key, state, next_fire_at, created_at,"
-                 " updated_at, idempotency_key) VALUES ('reminder', 'old', 'admin', 't', NULL, 'pending', ?, ?, ?,"
-                 " 'k-old')", (now, now, now))  # fmt: skip
-    conn.execute("INSERT INTO threads (id, principal, channel, created_at, updated_at, turns) VALUES"
-                 " ('0123456789abcdef', 'admin', 'companion', ?, ?, 1)", (now, now))  # fmt: skip
-    conn.execute("INSERT INTO turns (thread_id, role, text, at) VALUES ('0123456789abcdef', 'admin', 'hi', ?)", (now,))
-    conn.commit()
-    conn.close()
-    store = Store.open(path)
-    try:
-        assert store.schema_version() == len(MIGRATIONS)
-        [task] = store.open_tasks()
-        assert task.title == "old"
-        # Earlier threads are deleted only once a main chat is recorded; this store never had one,
-        # so its thread stays (unreachable from the panel, which only serves the main chat).
-        assert store.get_thread("0123456789abcdef") is not None
-        assert [t.text for t in store.turns_page("0123456789abcdef")] == ["hi"]
-        assert store.activity() == []
-        with pytest.raises(sqlite3.IntegrityError):
-            store.create_task(kind="shell", title="x", owner="admin", created_by="t", next_fire_at=datetime.now(UTC),
-                              payload={}, idempotency_key="bad", now=datetime.now(UTC))  # fmt: skip
-    finally:
-        store.close()
 
 
 async def test_hub_long_poll_wakes_on_publish() -> None:

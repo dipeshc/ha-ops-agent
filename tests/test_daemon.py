@@ -267,7 +267,7 @@ async def test_user_ack_from_panel_can_accept(h: Harness) -> None:
     assert outcome.result == "ok"
 
 
-async def test_run_cap_and_floor_cost(h: Harness) -> None:
+async def test_run_cap(h: Harness) -> None:
     await h.daemon().health_cycle("catch_up")
     h.fake.set_unavailable("light.kitchen", hours_ago=8)
     h.claude_status = "timeout"
@@ -278,8 +278,7 @@ async def test_run_cap_and_floor_cost(h: Harness) -> None:
     from opsd.budget import Period
 
     now = datetime.now(UTC)
-    spent = d.store.usage(Period.at(now, d.tz), at=now)["day"]["usd"]
-    assert spent == pytest.approx(daemon_mod.ABORTED_RUN_FLOOR_USD * daemon_mod.MAX_CLAUDE_RUNS_PER_DAY)
+    assert d.store.usage(Period.at(now, d.tz), at=now)["day"]["runs"] == daemon_mod.MAX_CLAUDE_RUNS_PER_DAY
 
 
 async def test_manual_trigger_cap(h: Harness) -> None:

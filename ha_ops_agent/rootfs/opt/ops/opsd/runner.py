@@ -54,7 +54,6 @@ _LOGGER = logging.getLogger(__name__)
 
 CLAUDE_MIN_AVAILABLE_MB = 1200
 MAX_CLAUDE_RUNS_PER_DAY = RUNS_PER_DAY["triage"]
-ABORTED_RUN_FLOOR_USD = 0.25
 KEEP_RUN_DAYS = 60
 GUARD_ANOMALY_KEY = "guard.anomaly"
 # How long the health check keeps reporting the latest anomaly.
@@ -660,15 +659,10 @@ class AgentRunner:
         return result, run_dir
 
     def _account(self, profile: Profile, context: RunContext, result: RunResult, model: str) -> None:
-        """Replace the reservation with what the run used; aborted runs are charged a floor."""
+        """Replace the reservation with what the run used; an aborted run keeps part of its reservation."""
         if self.store is None:
             return
         aborted = result.status != "ok" and result.tokens_in + result.tokens_out == 0
-        cost = (
-            max(result.cost_usd, ABORTED_RUN_FLOOR_USD)
-            if result.status not in ("ok", *NOT_STARTED)
-            else (result.cost_usd)
-        )
         shares: dict[str, float | None] = {}
         estimated = False
         for window in ("five_hour", "seven_day"):
@@ -682,7 +676,7 @@ class AgentRunner:
             self.store.finish_run(
                 context.run_id, status=result.status, at=datetime.now(UTC), turns=result.turns,
                 tokens_in=result.tokens_in, tokens_out=result.tokens_out, tokens_cache_read=result.tokens_cache_read,
-                cost_usd=cost, duration_s=result.duration_s, model=model,
+                duration_s=result.duration_s, model=model,
                 charge_reservation=aborted and result.status not in NOT_STARTED,
                 share_5h=shares["five_hour"], share_7d=shares["seven_day"], share_estimated=estimated,
                 acct_5h=utilisation(result.rate_last, "five_hour"),

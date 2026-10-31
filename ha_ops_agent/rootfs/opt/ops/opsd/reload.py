@@ -16,7 +16,7 @@ Everything that bounds the power lives here, in code, and fails closed:
   include a lock, an alarm panel, a cover that is not positively a
   blind/shade/curtain/awning/shutter, or a switch/button/valve named after a garage,
   gate, door or lock (checked live against the registry and the states).
-- At most one reload per domain every 10 minutes (persisted; a corrupt state file refuses),
+- At most one reload per domain every 10 minutes (persisted in the store's `kv`; a corrupt state refuses),
   on top of the capability's daily quota, which is only taken once every check passed.
 - Never while one of the integration's vacuums is cleaning, returning or paused.
 - One overall deadline below the 120 s RPC timeout; a partial reload is reported.
@@ -26,19 +26,20 @@ the caller.
 """
 
 import asyncio
+import json
 import logging
 import re
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from opsd.access import named_like_access
 from opsd.api import LiveAPI
 from opsd.capabilities import Args, CapabilityError
-from opsd.jsonstore import read_json, write_json_atomic
 from opsd.policy import NEVER_RELOAD_DOMAINS
+from opsd.store import RELOAD_KEY, Store, StoreError
 
 if TYPE_CHECKING:
     from opsd.runctx import ExecContext
@@ -53,7 +54,6 @@ RECOVER_TIMEOUT_S = 60.0
 DEADLINE_S = 100.0
 POST_TIMEOUT_S = 30.0
 POLL_S = 3.0
-STATE_FILE = "reloads.json"
 NEVER_PREFIX = "integration.reload."
 
 # Never reloaded, even when allowlisted: the generic list in code (`policy.NEVER_RELOAD_DOMAINS`) plus the house
@@ -94,15 +94,14 @@ def static_refusal(domain: str, allowed: Iterable[str], never: Iterable[str] = (
     return None
 
 
-def _state_path(data_dir: Path) -> Path:
-    return data_dir / STATE_FILE
-
-
-def _load_state(data_dir: Path) -> dict[str, datetime]:
-    """Last reload per domain. Corrupt, naive or odd content refuses (fail closed)."""
+def _load_state(store: Store | None) -> dict[str, datetime]:
+    """Last reload per domain (`kv` `reload.last`). No store, corrupt, naive or odd content refuses (fail closed)."""
+    if store is None:
+        raise CapabilityError("the store is not available; not reloading")
     try:
-        raw = read_json(_state_path(data_dir), {})
-    except (ValueError, OSError) as err:
+        text = store.kv_get(RELOAD_KEY)
+        raw = json.loads(text) if text else {}
+    except (ValueError, StoreError, sqlite3.Error) as err:
         raise CapabilityError(f"reload state unreadable ({type(err).__name__}); not reloading") from err
     if not isinstance(raw, dict):
         raise CapabilityError("reload state is malformed; not reloading")
@@ -118,8 +117,8 @@ def _load_state(data_dir: Path) -> dict[str, datetime]:
     return state
 
 
-def rate_refusal(data_dir: Path, domain: str, now: datetime) -> str | None:
-    last = _load_state(data_dir).get(domain)
+def rate_refusal(store: Store | None, domain: str, now: datetime) -> str | None:
+    last = _load_state(store).get(domain)
     # A future timestamp (clock jump, hand edit) is ignored rather than blocking forever.
     if last is not None and last <= now and now - last < RATE_LIMIT:
         wait = int((RATE_LIMIT - (now - last)).total_seconds() // 60) + 1
@@ -129,12 +128,13 @@ def rate_refusal(data_dir: Path, domain: str, now: datetime) -> str | None:
     return None
 
 
-def _mark(data_dir: Path, domain: str, now: datetime) -> None:
-    state = _load_state(data_dir)
+def _mark(store: Store | None, domain: str, now: datetime) -> None:
+    state = _load_state(store)
     cutoff = now - timedelta(days=2)
     kept = {k: v.isoformat() for k, v in state.items() if cutoff < v <= now}
     kept[domain] = now.isoformat()
-    write_json_atomic(_state_path(data_dir), kept)
+    if store is not None:
+        store.kv_set(RELOAD_KEY, json.dumps(kept, sort_keys=True), now=now)
 
 
 def _require_list(value: Any, what: str) -> list[dict[str, Any]]:
@@ -219,7 +219,7 @@ def _unavailable(states: Mapping[str, Mapping[str, Any]], entity_ids: Iterable[s
 
 async def reload_domain(
     api: ReloadAPI,
-    data_dir: Path,
+    store: Store | None,
     domain: str,
     *,
     allowed: Iterable[str],
@@ -244,7 +244,7 @@ async def reload_domain(
     never = tuple(never)
     deny = frozenset(deny)
     async with _GATE:
-        refusal = static_refusal(domain, allowed, never, deny) or rate_refusal(data_dir, domain, when)
+        refusal = static_refusal(domain, allowed, never, deny) or rate_refusal(store, domain, when)
         if refusal is not None:
             raise CapabilityError(refusal)
         planned = await plan(api, domain, allowed, never, deny)
@@ -252,7 +252,7 @@ async def reload_domain(
             raise CapabilityError("integration.reload daily quota reached")
         _INFLIGHT.add(domain)
     try:
-        return await _run(api, data_dir, domain, planned, when=when, start=start, wait_s=wait_s, poll_s=poll_s,
+        return await _run(api, store, domain, planned, when=when, start=start, wait_s=wait_s, poll_s=poll_s,
                           deadline_s=deadline_s, post_timeout_s=post_timeout_s, sleep=sleep,
                           clock=clock)  # fmt: skip
     finally:
@@ -261,7 +261,7 @@ async def reload_domain(
 
 async def _run(
     api: ReloadAPI,
-    data_dir: Path,
+    store: Store | None,
     domain: str,
     planned: dict[str, Any],
     *,
@@ -292,7 +292,7 @@ async def _run(
             continue
         if attempted == 0:
             # The 10-minute lockout starts with the first entry actually reloaded.
-            _mark(data_dir, domain, when)
+            _mark(store, domain, when)
         attempted += 1
         try:
             await asyncio.wait_for(api.core_post(f"/config/config_entries/entry/{entry['entry_id']}/reload"), budget)
@@ -378,7 +378,7 @@ def validate_reload(ctx: ExecContext, args: Args) -> Args:
     options = ctx.options
     refusal = static_refusal(
         domain, options.reloadable, options.capabilities.never, options.profile.reload.deny
-    ) or rate_refusal(ctx.paths.data, domain, datetime.now(UTC))
+    ) or rate_refusal(ctx.env.store, domain, datetime.now(UTC))
     if refusal is not None:
         raise CapabilityError(refusal)
     return args
@@ -389,7 +389,7 @@ async def exec_reload(ctx: ExecContext, args: Args) -> dict[str, Any]:
     domain = args.text("domain")
     options = ctx.options
     async with LiveAPI(ctx.client) as api:
-        result = await reload_domain(api, ctx.paths.data, domain, allowed=options.reloadable,
+        result = await reload_domain(api, ctx.env.store, domain, allowed=options.reloadable,
                                      never=options.capabilities.never, deny=options.profile.reload.deny)  # fmt: skip
     if ctx.run is not None:
         ctx.run.effects.notes.append(result["message"][:300])

@@ -221,7 +221,7 @@ async def test_the_approval_is_checked_against_its_plan_row(rig: Rig) -> None:
         found = rig.approvals.request(items[WEATHER], plan_run=run, user=ADMIN, when="window")
         with rig.store._tx() as conn:
             edited = json.dumps(found["plan"] | edit)
-            conn.execute("UPDATE approvals SET plan = ? WHERE id = ?", (edited, found["id"]))
+            conn.execute("UPDATE approvals SET payload = ? WHERE kind = 'approval' AND id = ?", (edited, found["id"]))
         assert not rig.approvals.bound(rig.store.approval(found["id"]) or {})
         assert await rig.manager.confirm_approval(found["id"], ADMIN) == "void"
     # So does a change to the plan row it came from (what the admin was shown).

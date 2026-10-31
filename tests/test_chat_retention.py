@@ -26,9 +26,10 @@ def h(paths: Any, fake_ha: FakeHA, monkeypatch: pytest.MonkeyPatch, meminfo: Pat
 def test_the_main_chat_is_never_pruned(h: Harness) -> None:
     _d, a, store, _, _ = setup(h)
     main = a.main_thread()
-    store._db().execute("UPDATE threads SET updated_at = ? WHERE id = ?", (OLD.isoformat(timespec="seconds"), main))
+    store.append_turn(main, role="admin", text="an old question", now=OLD)
     store.prune(now=datetime.now(UTC))
     assert store.get_thread(main) is not None
+    assert [t.text for t in store.turns_page(main)] == ["an old question"]
 
 
 def test_summary_run_still_has_no_capabilities() -> None:

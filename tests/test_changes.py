@@ -468,7 +468,8 @@ async def test_tampering_voids_the_approval(w: World, tamper: str) -> None:
     if tamper == "row_hash":
         files = [f | {"new_sha256": "0" * 64} for f in found["files"]]
         with w.store._tx() as conn:
-            conn.execute("UPDATE change_proposals SET files = ? WHERE id = ?", (json.dumps(files), found["id"]))
+            conn.execute("UPDATE approvals SET payload = json_set(payload, '$.files', json(?)) WHERE kind = 'change'"
+                         " AND id = ?", (json.dumps(files), str(found["id"])))  # fmt: skip
     elif tamper == "ref":
         other = w.propose({TEMPLATE: FILES[TEMPLATE].replace("{{ 1 }}", "{{ 3 }}")})
         git(w.repo_path, "update-ref", found["ref"], other["commit_sha"])
@@ -485,7 +486,8 @@ async def test_a_binding_change_after_the_tap_stops_the_apply(w: World) -> None:
     assert await w.manager.confirm(approval, ADMIN) == "approved"
     files = [f | {"old_sha256": "0" * 64} for f in found["files"]]
     with w.store._tx() as conn:
-        conn.execute("UPDATE change_proposals SET files = ? WHERE id = ?", (json.dumps(files), found["id"]))
+        conn.execute("UPDATE approvals SET payload = json_set(payload, '$.files', json(?)) WHERE kind = 'change'"
+                         " AND id = ?", (json.dumps(files), str(found["id"])))  # fmt: skip
     outcome = await w.manager.execute(approval)
     assert outcome.state == "refused" and w.read(ALERT) == FILES[ALERT]
     assert w.store.approval(approval)["state"] == "void"  # type: ignore[index]

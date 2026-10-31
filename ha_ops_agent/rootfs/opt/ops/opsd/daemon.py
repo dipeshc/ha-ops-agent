@@ -68,7 +68,6 @@ from opsd.redact import Redactor, build_redactor
 from opsd.rpc import RpcServer
 from opsd.runctx import AGENT_SELF, ExecEnv, RunEffects
 from opsd.runner import (
-    ABORTED_RUN_FLOOR_USD,
     GUARD_ANOMALY_DAYS,
     GUARD_ANOMALY_KEY,
     MAINTENANCE_PLAN,
@@ -93,7 +92,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-__all__ = ["ABORTED_RUN_FLOOR_USD", "MAX_CLAUDE_RUNS_PER_DAY", "Daemon", "supervisor_jobs_busy"]
+__all__ = ["MAX_CLAUDE_RUNS_PER_DAY", "Daemon", "supervisor_jobs_busy"]
 
 LIVENESS_INTERVAL_S = 60
 # s6 sends SIGKILL a few seconds after SIGTERM: the pushes in flight get this long.

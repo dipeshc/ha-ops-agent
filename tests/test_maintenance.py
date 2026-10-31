@@ -155,7 +155,7 @@ class Rig:
         return result
 
     def items(self) -> dict[str, dict[str, Any]]:
-        return {r["title"]: r for r in self.store.items_all(derived=True) if r["kind"] == "maintenance"}
+        return {r["title"]: r for r in self.store.items_all() if r["kind"] == "maintenance"}
 
     async def deliver(self) -> list[str]:
         return await self.book.deliver()

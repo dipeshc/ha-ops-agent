@@ -21,7 +21,7 @@ from opsd.policy import Bump, Decision, Tier
 from opsd.redact import Redactor
 from opsd.runctx import ExecContext, ExecEnv
 from opsd.runner import CHAT, INVESTIGATE, compose_system_prompt
-from opsd.store import MIGRATIONS, Store, UpdateJob
+from opsd.store import UpdateJob
 from opsd.supervisor import ApiError
 from opsd.updates import OS_NOTE, OsState, cmd_plan, os_phase
 from opsd.updexec import ExecutorRefused, os_log_lines
@@ -475,49 +475,6 @@ def test_the_chat_prompt_explains_version_pending() -> None:
     prompt = (PROMPTS / "profiles/chat.md").read_text()
     assert "`version_pending` is installed and waits for a reboot" in " ".join(prompt.split())
     assert "It needs no new approval" in " ".join(prompt.split())
-
-
-# ------------------------------------------------------------------ store migration
-
-
-def test_migration_16_keeps_every_job_and_allows_the_reboot_states(tmp_path: Path) -> None:
-    import sqlite3
-
-    path = tmp_path / "ops.db"
-    conn = sqlite3.connect(path)
-    conn.execute("PRAGMA foreign_keys=ON")
-    for number in range(15):
-        for statement in MIGRATIONS[number].split(";"):
-            if statement.strip():
-                conn.execute(statement)
-    conn.execute("PRAGMA user_version = 15")
-    conn.execute("INSERT INTO update_runs (id, window_day, trigger, mode, state, created_at, updated_at)"
-                 " VALUES (7, '2026-01-30', 'window', 'act', 'done', 't', 't')")  # fmt: skip
-    conn.execute(
-        "INSERT INTO update_jobs (id, run_id, seq, entity_id, kind, title, from_version, to_version, target, state,"
-        " install_attempts, detail, idempotency_key, started_at, finished_at, updated_at) VALUES (3, 7, 0, ?, 'os',"
-        " 'HAOS', '17.3', '17.4', '{\"approval\": \"a\"}', 'failed', 1, 'install did not complete; still on 17.3',"
-        " '7:x:17.3:17.4', 's', 'f', '2026-01-30T11:05:08+00:00')",
-        (OS,),
-    )
-    conn.commit()
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE update_jobs SET state = 'rebooting' WHERE id = 3")
-    conn.close()
-    store = Store.open(path)
-    try:
-        job = store.update_job(3)
-        assert job is not None and job.state == "failed" and job.target == {"approval": "a"}
-        assert job.detail == "install did not complete; still on 17.3" and job.install_attempts == 1
-        now = datetime(2026, 1, 30, 14, 30, tzinfo=UTC)
-        assert store.transition_job(3, expect=("failed",), to="reboot_pending", now=now)
-        assert store.transition_job(3, expect=("reboot_pending",), to="rebooting", now=now)
-        found = store.update_jobs_where(kind="os", states=("rebooting",), since=now - timedelta(days=1))
-        assert [j.id for j in found] == [3]
-        with pytest.raises(ValueError, match="unknown job state"):
-            store.transition_job(3, expect=("rebooting",), to="activated", now=now)
-    finally:
-        store.close()
 
 
 # ----------------------------------------------------------- the selfguard delta, end to end

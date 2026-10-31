@@ -88,7 +88,7 @@ def test_reservation_replaced_by_actuals(db: Store) -> None:
     usage = db.usage(P, at=NOW)
     assert usage["window"]["seconds"] == 180.0 and usage["window"]["turns"] == 15
     db.finish_run("a", status="ok", at=NOW, turns=3, tokens_in=1000, tokens_out=200, tokens_cache_read=5000,
-                  cost_usd=0.01, duration_s=20, model="m", share_5h=0.002, share_7d=0.0004, acct_5h=0.3,
+                  duration_s=20, model="m", share_5h=0.002, share_7d=0.0004, acct_5h=0.3,
                   acct_7d=0.1)  # fmt: skip
     usage = db.usage(P, at=NOW)
     assert (usage["window"]["tokens"], usage["window"]["turns"], usage["window"]["seconds"]) == (1200, 3, 20)
@@ -135,7 +135,7 @@ def test_each_cap_refuses(db: Store, setup: str, reason: str) -> None:
     if setup in ("share_5h", "share_7d", "account", "seconds"):
         assert not isinstance(reserve(db, caps, run_id="seed", at=NOW - timedelta(minutes=30)), str)
         db.finish_run("seed", status="ok", at=NOW - timedelta(minutes=10), turns=1, tokens_in=1, tokens_out=1,
-                      tokens_cache_read=0, cost_usd=0, model="m",
+                      tokens_cache_read=0, model="m",
                       duration_s=caps.window_seconds if setup == "seconds" else 1,
                       share_5h=0.039 if setup == "share_5h" else 0.0,
                       share_7d=0.039 if setup == "share_7d" else 0.0,
@@ -154,9 +154,20 @@ def test_crashed_runs_keep_their_reservation(db: Store) -> None:
 def test_prune_bounds_the_store(db: Store) -> None:
     old = NOW - timedelta(days=120)
     db.issue_action("OPS_DONE_" + "a" * 32, kind="DONE", tag="t", thread_id=None, now=old, expires_at=old)
+    db.issue_action("OPS_DONE_" + "b" * 32, kind="DONE", tag="t", thread_id=None, now=NOW,
+                    expires_at=NOW + timedelta(days=3))  # fmt: skip
     reserve(db, Caps.from_options(Options()), run_id="old", at=old)
+    db.bump(old.date().isoformat(), "chat_turns")
+    settled = db.hold_push("{}", title="sent after quiet hours", now=old)
+    db.settle_held([settled], to="delivered", outcome="sent", now=old)
+    held = db.hold_push("{}", title="still held", now=old)
+    fact = db.add_fact("an old fact", thread_id=None, turn_id=None, now=old)
+    assert db.decide_fact(fact, "rejected", now=old)
     counts = db.prune(now=NOW)
-    assert counts["actions"] == 1 and counts["runs"] == 1
+    assert counts["actions"] == 1 and counts["runs"] == 1 and counts["counters"] == 1
+    assert db.issued_action("OPS_DONE_" + "b" * 32) is not None and db.count(old.date().isoformat(), "chat_turns") == 0
+    assert [h["id"] for h in db.held_pushes(states=("held", "delivered"))] == [held]
+    assert db.fact(fact) is None
 
 
 # ---------------------------------------------------------- claude output

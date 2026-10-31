@@ -50,10 +50,11 @@ the `integration.reload` row in `opsd/capabilities.py`. Tests:
   `test_switches_named_like_access_are_protected`,
   `test_a_room_named_garage_is_not_an_access_control`, `test_odd_replies_fail_closed`,
   `test_never_while_a_vacuum_is_busy`.
-- L4. **Rate.** Once per domain per 10 minutes, persisted in
-  `/data/reloads.json` (corrupt or naive timestamps refuse, future ones are
-  ignored, entries older than 2 days pruned), marked at the first entry
-  actually posted; concurrent requests reload once. Quota 2 per run and 6
+- L4. **Rate.** Once per domain per 10 minutes, persisted in the store
+  (`kv` `reload.last`, [storage.md](storage.md) S3; no store, corrupt or
+  naive timestamps refuse, future ones are ignored, entries older than 2
+  days pruned), marked at the first entry actually posted; concurrent
+  requests reload once. Quota 2 per run and 6
   per day, taken only after every check passed and refunded on a refusal.
   Tests `test_once_per_domain_per_10_minutes`, `test_concurrent_requests_reload_once`,
   `test_socket_daily_quota`, `test_socket_refusals_do_not_burn_the_daily_quota`,

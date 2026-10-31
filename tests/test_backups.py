@@ -224,9 +224,8 @@ async def test_act_mode_heals_a_missing_backup_once_and_tells_the_admin(h: Harne
     await d.items_flush()
     assert not [x for x in h.pushes() if "backup" in x["title"].lower()]
     assert d.store is not None
-    assert any(i["kind"] == "backup" and i["state"] == "done" for i in d.store.items_all(derived=False))
+    assert any(i["kind"] == "backup" and i["state"] == "done" for i in d.store.items_all(prefix="activity:"))
     assert d.store is not None and json.loads(d.store.kv_get(LAST_KEY))["by"] == "agent"
-    assert any(e["kind"] == "backup" for e in d.store.activity())
     # Not again within 24 hours.
     await d.health_cycle("daily")
     assert ops.created == 1
@@ -251,7 +250,7 @@ async def test_a_failed_self_heal_pushes_and_raises_an_item(h: Harness) -> None:
     # A failed one is an item in Needs you, pushed once with the item as its tag.
     await d.items_flush()
     assert d.store is not None
-    [item] = [i for i in d.store.items_all(derived=False) if i["kind"] == "backup"]
+    [item] = [i for i in d.store.items_all(prefix="activity:") if i["kind"] == "backup"]
     assert item["state"] == "failed" and item["needs"]
     [push] = [x for x in h.pushes() if x["title"] == "Ops Agent: backup"]
     assert push["data"]["tag"] == item["id"]

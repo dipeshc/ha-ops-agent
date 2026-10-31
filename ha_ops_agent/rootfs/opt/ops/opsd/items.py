@@ -968,7 +968,7 @@ class ItemBook:
         deriver = Deriver(self.store, ctx, now, self._tz())
         specs = deriver.run()
         self.plan_stale = deriver.plan_at is not None and deriver.plan_at < self.started
-        existing = {r["key"]: r for r in self.store.items_all(derived=True)}
+        existing = {r["key"]: r for r in self.store.items_all() if not str(r["key"]).startswith("activity:")}
         # Held until a fresh plan: plan-only update items, and update items the stale plan no longer derives.
         self._held = (
             deriver.plan_only | {k for k, r in existing.items() if r["kind"] == "update" and k not in specs}
@@ -1059,7 +1059,7 @@ class ItemBook:
             "id": ident, "key": spec.key, "revision": revision, "as_of": as_of, "at": at,
             "needs_since": needs_since, "resolved_at": resolved_at,
             "created_at": old["created_at"] if old else (spec.created or stamp), "updated_at": stamp,
-            "source": source, "confirm": None, "derived": True,
+            "source": source,
             # Leaving Needs you forgets the push, so coming back (a skipped approved job) pushes again.
             "push": old["push"] if old and needs else {},
         }  # fmt: skip
@@ -1204,7 +1204,7 @@ class ItemBook:
     def ack(self, record: Mapping[str, Any], *, now: datetime) -> bool:
         """The admin acknowledged a failure: a derived one by its source token, a standalone one directly."""
         source = record.get("source") or {}
-        if record.get("derived"):
+        if not str(record.get("key")).startswith("activity:"):
             token = source.get("ack")
             if not isinstance(token, str):
                 return False

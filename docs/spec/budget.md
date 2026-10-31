@@ -45,11 +45,13 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
   duration over the window and flagged `share_estimated`. Tests
   `test_usage.py:64-78,454-463`, `test_usage_estimates.py:32-65`.
 - B7. **Reservation.** One transaction inserts the `runs` row with reserved
-  turns, cost, seconds and share before the provider starts; `finish_run`
+  turns, seconds and share before the provider starts; `finish_run`
   replaces them with actuals; an aborted run with no tokens keeps a quarter
-  of the reservation; a run that is not ok is charged at least 0.25 USD; a
-  run the daemon lost (crash) is closed as `interrupted` at its full
-  reservation. Tests `test_usage.py:84-96,146-151`, `test_runner.py:131-137`.
+  of the reservation; a run the daemon lost (crash) is closed as
+  `interrupted` at its full reservation. The ledger records no cost: the
+  per-run cost cap goes to the provider (B2) and no limit reads a cost.
+  Tests `test_usage.py:84-96,146-151`,
+  `test_failed_run_charges_its_reservation_and_one_slot`.
 - B8. Exposure: `sensor.ops_agent_ai` (state `enabled`, `ai_disabled` or
   `usage_limited`; attributes plan, caps, shares, run time, today's totals,
   per-profile counts, last run), `sensor.ops_agent_runs_today`, `GET

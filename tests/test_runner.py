@@ -128,13 +128,15 @@ async def test_privsep_drops_to_ops(s: Setup) -> None:
     assert s.calls[0].run_as == (1001, 1002)
 
 
-async def test_failed_run_charges_floor_and_one_slot(s: Setup) -> None:
+async def test_failed_run_charges_its_reservation_and_one_slot(s: Setup) -> None:
     async def timeout(cfg: RunConfig, prompt: str, **kw: Any) -> RunResult:
         return RunResult(status="timeout")
 
     s.runner.run_claude = timeout
     await s.go()
-    assert s.store.usage(Period.at(NOW, UTC), at=NOW)["day"]["usd"] == 0.25
+    day = s.store.usage(Period.at(NOW, UTC), at=NOW)["day"]
+    # A run that reported nothing keeps a quarter of its reservation (it never counts as free).
+    assert day["runs"] == 1 and day["turns"] > 0 and day["seconds"] > 0
     async with s.runner._slot:
         assert s.runner.busy and (await s.go()).status == "skipped_busy"
 

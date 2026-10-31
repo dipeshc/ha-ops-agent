@@ -164,14 +164,14 @@ async def test_approval_requests_respect_rejections_live_approvals_and_quotas(h:
     assert "rejected this update" in h.in_run_responses[0]["error"]
     # A live approval (the admin already started one) is not asked for again.
     with d.store._tx() as conn:
-        conn.execute("DELETE FROM approvals WHERE id = ?", (rejected["id"],))
+        conn.execute("DELETE FROM approvals WHERE kind = 'approval' AND id = ?", (rejected["id"],))
     d.updates.approvals.request(item, plan_run=run, user="u-admin", when="window")
     h.in_run_responses.clear()
     await ask(d, "approve acme_weather")
     assert "nothing to ask" in h.in_run_responses[0]["error"]
     # Per run: two at most, whatever the model tries.
     with d.store._tx() as conn:
-        conn.execute("DELETE FROM approvals")
+        conn.execute("DELETE FROM approvals WHERE kind = 'approval'")
     h.in_run_requests = [{"verb": "request-approval", "args": {"entity": WEATHER}}] * 3
     h.in_run_responses.clear()
     await ask(d, "approve acme_weather three times")

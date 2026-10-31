@@ -15,6 +15,7 @@ from opsd.config import Paths
 from opsd.policy import CHAT_EFFECTS, Effect, Origin, PolicyTier, decide
 from opsd.runctx import Principal
 from opsd.runner import CHAT, FOLLOWUP, INVESTIGATE, SUMMARY, TRIAGE
+from opsd.store import Store
 from tests.conftest import GENERIC, SAMPLE_PROFILE, make_options
 from tests.test_daemon import Harness, h  # noqa: F401
 from tests.test_rpc_effects import World
@@ -90,11 +91,24 @@ async def _no_sleep(_: float) -> None:
     return None
 
 
+_STORES: dict[Path, Store] = {}
+
+
+def store_of(paths: Paths) -> Store:
+    """The store holding the reload rate state (one per test's data directory)."""
+    found = _STORES.get(paths.data)
+    if found is None:
+        found = _STORES[paths.data] = Store.open(paths.data / "ops.db")
+    return found
+
+
 @pytest.fixture(autouse=True)
 def _reset_inflight() -> Iterator[None]:
     reload_mod._INFLIGHT.clear()
     yield
     reload_mod._INFLIGHT.clear()
+    while _STORES:
+        _STORES.popitem()[1].close()
 
 
 @pytest.fixture
@@ -104,7 +118,7 @@ def api() -> FakeReloadAPI:
 
 async def reload(api: FakeReloadAPI, paths: Paths, domain: str, **kw: Any) -> dict[str, Any]:
     kw.setdefault("allowed", ALLOWED)
-    return await reload_mod.reload_domain(api, paths.data, domain, now=kw.pop("now", NOW), sleep=_no_sleep, **kw)
+    return await reload_mod.reload_domain(api, store_of(paths), domain, now=kw.pop("now", NOW), sleep=_no_sleep, **kw)
 
 
 # ---------------------------------------------------------------- allowlist and denylist
@@ -262,7 +276,7 @@ async def test_always_unavailable_entities_do_not_fail_or_hold_the_reload(api: F
         sleeps.append(s)
 
     result = await reload_mod.reload_domain(
-        api, paths.data, "acme_vacuum", now=NOW, sleep=counting_sleep, allowed=ALLOWED, wait_s=60, poll_s=3
+        api, store_of(paths), "acme_vacuum", now=NOW, sleep=counting_sleep, allowed=ALLOWED, wait_s=60, poll_s=3
     )
     assert result["ok"] and result["newly_unavailable"] == []
     assert result["still_unavailable"] == ["sensor.robot_vacuum_battery"] and sleeps == []
@@ -329,16 +343,16 @@ async def test_never_while_a_vacuum_is_busy(api: FakeReloadAPI, paths: Paths, st
     "content", ["{not json", '["a"]', '{"acme_vacuum": "yesterday"}', '{"acme_vacuum": "2026-01-29T11:55:00"}']
 )
 async def test_corrupt_state_refuses(api: FakeReloadAPI, paths: Paths, content: str) -> None:
-    paths.data.mkdir(parents=True, exist_ok=True)
-    (paths.data / reload_mod.STATE_FILE).write_text(content)
+    store_of(paths).kv_set(reload_mod.RELOAD_KEY, content, now=NOW)
     with pytest.raises(CapabilityError, match="reload state"):
         await reload(api, paths, "acme_vacuum")
     assert api.posts == []
 
 
 async def test_future_dated_state_is_ignored(api: FakeReloadAPI, paths: Paths) -> None:
-    paths.data.mkdir(parents=True, exist_ok=True)
-    (paths.data / reload_mod.STATE_FILE).write_text(json.dumps({"acme_vacuum": (NOW + timedelta(days=3)).isoformat()}))
+    store_of(paths).kv_set(
+        reload_mod.RELOAD_KEY, json.dumps({"acme_vacuum": (NOW + timedelta(days=3)).isoformat()}), now=NOW
+    )
     assert (await reload(api, paths, "acme_vacuum"))["ok"]
 
 
@@ -442,8 +456,8 @@ def _live(api: FakeReloadAPI) -> type:
 def world(paths: Paths, api: FakeReloadAPI, monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
     real = reload_mod.reload_domain
 
-    async def fast(api_: Any, data: Path, domain: str, **kw: Any) -> dict[str, Any]:
-        return await real(api_, data, domain, sleep=_no_sleep, **kw)
+    async def fast(api_: Any, store: Any, domain: str, **kw: Any) -> dict[str, Any]:
+        return await real(api_, store, domain, sleep=_no_sleep, **kw)
 
     monkeypatch.setattr(reload_mod, "LiveAPI", _live(api))
     monkeypatch.setattr(reload_mod, "reload_domain", fast)

@@ -26,8 +26,11 @@ Tests: `tests/test_approvals.py`, `tests/test_dashboards.py`, `tests/test_items.
 
 ## Records
 
-- A5. States: `pending`, `approved`, `rejected`, `expired`, `used`, `void`.
-  Live states are `pending` and `approved`. At most 20 approvals may be
+- A5. An approval is an `approvals` record of kind `approval`
+  ([storage.md](storage.md) S3); every approval read and decision names that
+  kind, so a request, a change proposal or a house fact in the same table is
+  never read as one. States: `pending`, `approved`, `rejected`, `expired`,
+  `used`, `void`. Live states are `pending` and `approved`. At most 20 approvals may be
   pending; a new request for the same subject voids any earlier live one
   (`superseded`).
 - A6. Ids are 32 hex characters (`secrets.token_hex(16)`). Every approval

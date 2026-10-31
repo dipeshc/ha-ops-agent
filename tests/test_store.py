@@ -62,8 +62,7 @@ def test_newer_schema_is_refused(tmp_path: Path) -> None:
 
 
 def test_failed_migration_rolls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(store_mod, "MIGRATIONS", ("CREATE TABLE a (x INTEGER); CREATE TABLE a (y INTEGER)",))
-    monkeypatch.setattr(store_mod, "SCHEMA_VERSION", 1)
+    monkeypatch.setattr(store_mod, "SCHEMA", "CREATE TABLE a (x INTEGER); CREATE TABLE a (y INTEGER)")
     path = tmp_path / "ops.db"
     with pytest.raises(sqlite3.OperationalError):
         Store.open(path)
@@ -71,6 +70,23 @@ def test_failed_migration_rolls_back(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
     assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'a'").fetchone() is None
     conn.close()
+
+
+def test_a_write_inside_another_joins_its_transaction(db: Store) -> None:
+    with pytest.raises(RuntimeError, match="boom"), db.atomic():
+        db.bump("d", "x")
+        db.kv_set("k", "v", now=T0)
+        raise RuntimeError("boom")
+    assert db.count("d", "x") == 0 and db.kv_get("k") == ""
+    action = "OPS_DONE_" + "d" * 32
+    with db.atomic():
+        db.bump("d", "x")
+        # A failed inner group rolls back alone (a savepoint); the outer one still commits.
+        with pytest.raises(sqlite3.IntegrityError), db.atomic():
+            db.kv_set("k", "v", now=T0)
+            db.issue_action(action, kind="DONE", tag="t", thread_id=None, now=T0, expires_at=T0)
+            db.issue_action(action, kind="DONE", tag="t", thread_id=None, now=T0, expires_at=T0)
+    assert db.count("d", "x") == 1 and db.kv_get("k") == "" and db.issued_action(action) is None
 
 
 def test_closed_store_fails_closed(db: Store) -> None:
@@ -263,7 +279,7 @@ def test_idempotency_keys_are_unique(db: Store) -> None:
         for _ in range(2):
             conn.execute(
                 "INSERT INTO tasks (kind, title, owner, created_by, created_at, updated_at, idempotency_key)"
-                " VALUES ('intent', 't', 'o', 'c', 'x', 'x', 'update:core@2026.11.1')"
+                " VALUES ('reminder', 't', 'o', 'c', 'x', 'x', 'update:core@2026.11.1')"
             )
 
 
@@ -282,50 +298,3 @@ def test_checkpoint_never_fails_the_backup(tmp_path: Path, capsys: pytest.Captur
     assert "ops-backup-pre" in capsys.readouterr().err
     path.write_bytes(b"garbage" * 100)
     assert checkpoint_main(path) == 0
-
-
-def test_migration_15_renames_declined_and_dismissed_to_rejected(tmp_path: Path) -> None:
-    import sqlite3
-
-    from opsd.store import MIGRATIONS
-
-    path = tmp_path / "ops.db"
-    conn = sqlite3.connect(path)
-    for number in range(14):
-        for statement in MIGRATIONS[number].split(";"):
-            if statement.strip():
-                conn.execute(statement)
-    now = "2026-01-26T00:00:00+00:00"
-    conn.execute("INSERT INTO approvals (id, plan, plan_hash, requested_by, state, created_at, expires_at, subject,"
-                 " detail) VALUES ('a', '{}', 'h', 'u', 'declined', ?, ?, 'update.x@2', 'not now')",
-                 (now, now))  # fmt: skip
-    conn.execute("INSERT INTO approvals (id, plan, plan_hash, requested_by, state, created_at, expires_at, subject,"
-                 " used_by_job) VALUES ('b', '{}', 'h', 'u', 'used', ?, ?, 'update.y@3', 7)", (now, now))  # fmt: skip
-    conn.execute("INSERT INTO change_proposals (kind, subject, state, detail, requested_by, created_at, expires_at,"
-                 " updated_at) VALUES ('change', 's', 'declined', 'declined by u-admin', 'x', ?, ?, ?)",
-                 (now, now, now))  # fmt: skip
-    conn.execute("INSERT INTO change_proposals (kind, subject, state, detail, requested_by, created_at, expires_at,"
-                 " updated_at, applied_sha) VALUES ('facts', 't', 'applied', 'committed abc', 'x', ?, ?, ?, 'abc')",
-                 (now, now, now))  # fmt: skip
-    conn.execute("INSERT INTO fact_proposals (text, created_at, status, change_id) VALUES ('f', ?, 'dismissed', 1)",
-                 (now,))  # fmt: skip
-    conn.execute("PRAGMA user_version = 14")
-    conn.commit()
-    conn.close()
-    store = Store.open(path)
-    try:
-        assert store.schema_version() == SCHEMA_VERSION
-        a, b = store.approval("a"), store.approval("b")
-        assert a is not None and a["state"] == "rejected" and a["detail"] == "rejected"
-        assert b is not None and b["state"] == "used" and b["used_by_job"] == 7
-        rejected, applied = store.change(1), store.change(2)
-        assert rejected is not None and rejected["state"] == "rejected" and rejected["detail"] == "rejected by u-admin"
-        assert applied is not None and applied["state"] == "applied" and applied["applied_sha"] == "abc"
-        fact = store._db().execute("SELECT status, change_id FROM fact_proposals").fetchone()
-        assert tuple(fact) == ("rejected", 1)
-        indexes = {r[0] for r in store._db().execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
-        assert {"approvals_subject", "change_proposals_state", "fact_proposals_status"} <= indexes
-        with pytest.raises(sqlite3.IntegrityError):
-            store._db().execute("UPDATE approvals SET state = 'declined' WHERE id = 'a'")
-    finally:
-        store.close()

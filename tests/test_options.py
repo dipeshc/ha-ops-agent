@@ -184,9 +184,8 @@ def test_activity_days_option_reaches_the_activity_log(tmp_path: Path) -> None:
         log = ActivityLog(
             store, Hub(), context_days=Options.from_mapping({"chat": {"activity_days": 2}}).chat.activity_days
         )
-        store.add_activity(kind="check", title="old", detail="", needs_admin=False, ref={},
-                           now=datetime(2020, 1, 1, tzinfo=UTC))  # fmt: skip
-        store.add_activity(kind="check", title="new", detail="", needs_admin=False, ref={}, now=datetime.now(UTC))
+        ActivityLog(store, Hub(), clock=lambda: datetime(2020, 1, 1, tzinfo=UTC)).record("check", "old")
+        log.record("check", "new")
         text = log.context(UTC)
         assert "new" in text and "old" not in text
     finally:

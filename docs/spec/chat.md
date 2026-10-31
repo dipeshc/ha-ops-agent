@@ -41,10 +41,12 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
 - T6. Context for the AI: the last 8 turns (fenced, 1000 characters each),
   up to 20 open tasks, the daemon's context block (pending and approved
   approvals, open approval requests, holds, open health items), 7 days of
-  activity (`chat.activity_days`, at most 40 entries) and the latest
+  activity (`chat.activity_days`, at most 40 entries of the items'
+  timelines: item id, time, kind, a needs-admin mark, title and the event's
+  text, or a standalone entry's own words, all fenced) and the latest
   summary; angle brackets in untrusted text are replaced. Every 30 turns a
   capability-free `summary` run condenses all but the last 8 into a system
-  turn; old turns are kept and threads are never pruned. Tests
+  turn; old turns are kept and the chat's turns are never pruned. Tests
   `test_full_chat.py:376-411`, `test_chat_ux.py:341-381`,
   `test_the_main_chat_is_never_pruned`.
 - T7. The reply schema is `{reply: null|<=1500, summary<=300}`; control
@@ -59,7 +61,8 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   refused verbs; a footer of at most 240 characters. Tests
   `test_full_chat.py:376-439`.
 - T9. **Ask, never approve.** `approval.request` (2 per run, 6 a day)
-  creates a row in `approval_proposals` with the versions and title from
+  creates a request (an `approvals` record of kind `request`,
+  [storage.md](storage.md) S3) with the versions and title from
   the stored plan, never from the model; it refuses the agent and the
   Supervisor, non-approvable tiers, entities not in the plan, a live
   approval, a version rejected within 7 days and more than 5 open; it

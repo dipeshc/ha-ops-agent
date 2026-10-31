@@ -74,8 +74,10 @@ function system() {
       buttons(btn("Run the self-test", selftest), btn("Download diagnostics", diagnostics), note("agent")),
     ]),
     section("Budget", null, [
-      kv("5-hour share", `${P.share(u.agent_share_5h_percent, u.agent_share_5h_estimated)} of ${cap}%`),
-      kv("7-day share", `${P.share(u.agent_share_7d_percent, u.agent_share_7d_estimated)} of ${cap}%`),
+      ...(st.ai && st.ai.credential === "api_key"
+        ? [kv("Credential", "API key: no subscription windows, run caps and the per-run cost cap apply")]
+        : [kv("5-hour share", `${P.share(u.agent_share_5h_percent, u.agent_share_5h_estimated)} of ${cap}%`),
+           kv("7-day share", `${P.share(u.agent_share_7d_percent, u.agent_share_7d_estimated)} of ${cap}%`)]),
       kv("Runs today", `${today.runs || 0}`),
       kv("Chat messages today", `${(st.chat || {}).used || 0} of ${(st.chat || {}).cap || "–"}`),
       kv("Tokens today", P.fmtN(today.tokens)),

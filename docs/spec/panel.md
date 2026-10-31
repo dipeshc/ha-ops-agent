@@ -157,7 +157,7 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
 
 | Route | Behaviour |
 | --- | --- |
-| `GET state` | `status` (off, paused, working, waiting, ready), `ai {on, state, backoff_until}`, `usage` (see [budget.md](budget.md)), `run {profile, thread}` or null, `queue`, `chat {used, cap: 30, thread}`, `options` (a notice or null), `held {count, until, undelivered[]}` or null, `tz`, `version`, `store`, `quiet {from, to}` (a side is null when unset), `mode`, `updates {auto, window}`, `needs_count`, `csrf`. |
+| `GET state` | `status` (off, paused, working, waiting, ready), `ai {on, state, backoff_until, credential}` (`credential`: `setup_token`, `api_key` or null, never the value; [ai-runner.md](ai-runner.md) AP1a), `usage` (see [budget.md](budget.md)), `run {profile, thread}` or null, `queue`, `chat {used, cap: 30, thread}`, `options` (a notice or null), `held {count, until, undelivered[]}` or null, `tz`, `version`, `store`, `quiet {from, to}` (a side is null when unset), `mode`, `updates {auto, window}`, `needs_count`, `csrf`. |
 | `GET ops` | `items` (open health items, redacted, each merged with `{item, item_state, needs}`), `needs_count`, `history` (the last 30 cycle records, newest first), `status`, `profile {path, loaded, problems, git, overlays, push_target, notify_problem}`. |
 | `GET usage` | 169 hourly points `{t, s5, s7}` over 7 days, `max_share_percent`, `share_stop_percent`, `today`. |
 | `POST ai {on}` | `on: false` pauses the AI at once; `on: true` is a high-impact admin action (`panel.ai_on`), refused unless the user is the admin; 400 `bad_ai`, 503 without the usage guard. Returns `{ok, state}`. |

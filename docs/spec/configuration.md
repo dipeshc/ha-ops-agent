@@ -43,8 +43,8 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 | --- | --- | --- | --- |
 | `agent.mode` | `observe` | `observe` / `act` | `observe` reports only; `act` lets the daemon install updates (with `updates.auto_install`), make backups and reload allowed integrations. |
 | `llm.provider` | `claude` | `claude` / `none` | `none`: no AI runs; deterministic checks, pushes and the update rule continue, but with `updates.hold_if_unreviewed` on (the default) every AUTO candidate is held for approval because nothing reviewed it. |
-| `claude.token` | empty | secret, not pattern-checked | Provider credential; see [ai-runner.md](ai-runner.md). Falls back to `/data/secrets/claude_oauth_token`. No token: AI runs are refused (`no_token`) and the deterministic fallback is used. |
-| `claude.plan` | `auto` | `auto` / `pro` / `max5` / `max20` | Subscription tier for the usage-share estimate. |
+| `claude.token` | empty | secret, not pattern-checked | Provider credential: a setup token or an API key; see [ai-runner.md](ai-runner.md) AP1. Falls back to `/data/secrets/claude_oauth_token`. No token: AI runs are refused (`no_token`) and the deterministic fallback is used. |
+| `claude.plan` | `auto` | `auto` / `pro` / `max5` / `max20` | Subscription tier for the usage-share estimate. Ignored with an API key. |
 | `claude.model_standard` | `claude-sonnet-5-5` | `[a-z0-9][a-z0-9.-]{1,63}` | Model for every run profile except summaries. |
 | `claude.model_fast` | empty | same pattern or empty | Model for the summary profile; empty means `model_standard`. |
 | `chat.activity_days` | 7 | 1..30 | Chat activity retention. |

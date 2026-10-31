@@ -64,8 +64,11 @@ class UsageGuard:
         send: Callable[[Message], Awaitable[str]],
         kill: Callable[[str], bool],
         admin_user: Callable[[], str | None] = lambda: None,
+        api_key: Callable[[], bool] = lambda: False,
     ) -> None:
         self._admin_user = admin_user
+        # True when the credential is a provider API key: no subscription windows apply.
+        self._api_key = api_key
         self.store = store
         self.control = control
         self.options = options
@@ -80,7 +83,8 @@ class UsageGuard:
         return Period.at(now, self._tz())
 
     def caps(self) -> Caps:
-        return Caps.from_options(self.options, detected_plan=self.store.kv_get("ai.plan_hint") or None)
+        return Caps.from_options(self.options, detected_plan=self.store.kv_get("ai.plan_hint") or None,
+                                 windows=not self._api_key())  # fmt: skip
 
     def view(self, now: datetime) -> dict[str, Any]:
         """Everything the sensors and the panel show."""
@@ -92,11 +96,13 @@ class UsageGuard:
         window, week, day = usage["window"], usage["week"], usage["day"]
         account = usage.get("account") or {}
         last = usage.get("last_run") or {}
+        # With an API key there is no plan and no window cap to show (they are unbounded, not JSON).
+        windows = caps.windows
         return {
             **self.control.snapshot(now),
-            "plan": caps.plan,
+            "plan": caps.plan if windows else None,
             "max_share_percent": round(caps.share_limit * 100, 2),
-            "share_stop_percent": round(caps.share_stop * 100, 2),
+            "share_stop_percent": round(caps.share_stop * 100, 2) if windows else None,
             "agent_share_5h_percent": _pct(window["share_5h"]),
             "agent_share_7d_percent": _pct(week["share_7d"]),
             # True when the figure includes run-time estimates (utilisation moved less than its resolution).
@@ -105,9 +111,9 @@ class UsageGuard:
             "account_5h_percent": _pct(account.get("five_hour")),
             "account_7d_percent": _pct(account.get("seven_day")),
             "run_time_5h_s": window["seconds"],
-            "run_time_5h_cap_s": round(caps.window_seconds),
+            "run_time_5h_cap_s": round(caps.window_seconds) if windows else None,
             "run_time_7d_s": week["seconds"],
-            "run_time_7d_cap_s": round(caps.week_seconds),
+            "run_time_7d_cap_s": round(caps.week_seconds) if windows else None,
             "today": {k: day[k] for k in ("runs", "turns", "tokens", "cache_read")},
             "profiles_today": usage.get("profiles", {}),
             "last_run": {k: last.get(k) for k in ("profile", "status", "started_at", "turns", "tokens",

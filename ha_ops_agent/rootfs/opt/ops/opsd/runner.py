@@ -40,7 +40,7 @@ from opsd.capabilities import CAPABILITIES, capability_table
 from opsd.changepaths import GLOBS, ProposalRules
 from opsd.channels import BudgetClass
 from opsd.claude_runner import DRAFT_TOOLS, TOOLS, RunConfig, RunResult
-from opsd.config import Options, Paths
+from opsd.config import CredentialKind, Options, Paths, credential_kind
 from opsd.conversation import fence
 from opsd.guard import READ_ENV
 from opsd.profile import PROFILE_PATH, HouseProfile
@@ -390,7 +390,7 @@ class AgentRunner:
         self._rpc = rpc
         self._require_privsep = require_privsep
         self.control = control or AiControl(store)
-        self._caps = caps or (lambda: Caps.from_options(self.options))
+        self._caps = caps or (lambda: Caps.from_options(self.options, windows=not self.api_key))
         self._after_run = after_run
         self._slot = asyncio.Lock()
         # The profile and thread holding the AI slot (for the panel's "waiting for ..." label).
@@ -416,6 +416,11 @@ class AgentRunner:
         """What the guard hook needs from the house profile: its documents, and for draft runs the proposal rules."""
         rules = self.options.profile.proposal_rules if profile.drafts else ProposalRules()
         return {READ_ENV: ",".join(self.options.profile.docs.read_extra), **rules.env()}
+
+    @property
+    def api_key(self) -> bool:
+        """The credential is a provider API key: no subscription windows apply to its runs."""
+        return credential_kind(self._token()) is CredentialKind.API_KEY
 
     @property
     def busy(self) -> bool:
@@ -607,6 +612,8 @@ class AgentRunner:
         if refusal is not None:
             # The kill switch went off while the run was being prepared.
             return RunResult(status=refusal, error=refusal), None
+        # Read once, so the variable chosen and the secret in it cannot disagree.
+        token = self._token()
         config = RunConfig(
             model=settings.model,
             max_turns=reservation.turns,
@@ -621,6 +628,7 @@ class AgentRunner:
             run_as=run_as,
             tools=DRAFT_TOOLS if profile.drafts else TOOLS,
             guard_env=self.guard_env(profile),
+            credential=credential_kind(token) or CredentialKind.SETUP_TOKEN,
         )
         try:
             prepare_drafts(self.paths.drafts_dir, run_as if profile.drafts else None, keep=profile.drafts,
@@ -635,7 +643,7 @@ class AgentRunner:
             self.run_claude(
                 config,
                 prompt,
-                oauth_token=self._token(),
+                token=token,
                 transcript_path=run_dir / "transcript.jsonl.gz",
                 redactor=redactor,
                 on_start=rpc.attach_process if rpc is not None else None,

@@ -13,7 +13,7 @@ import pytest
 from opsd.budget import Caps, Period
 from opsd.capabilities import CAPABILITIES
 from opsd.claude_runner import RunConfig, RunResult
-from opsd.config import Options, Paths
+from opsd.config import CredentialKind, Options, Paths
 from opsd.privsep import Account
 from opsd.redact import Redactor
 from opsd.rpc import RpcServer
@@ -48,8 +48,11 @@ class Setup:
         self.calls: list[RunConfig] = []
         self.bound: list[Any] = []
 
+        self.tokens: list[str] = []
+
         async def run_claude(cfg: RunConfig, prompt: str, **kw: Any) -> RunResult:
             self.calls.append(cfg)
+            self.tokens.append(kw["token"])
             kw["on_start"](77)
             run = self.rpc.active_run
             self.bound.append((run.profile, run.root_pid) if run else None)
@@ -118,6 +121,29 @@ async def test_preflight_refusals_never_start_claude(s: Setup, change: str, stat
         s.runner.build_export = broken
     assert (await s.go()).status == status
     assert s.calls == [] and s.rpc.active_run is None
+
+
+async def test_an_api_key_run_gets_the_key_and_skips_the_user_reserve(
+    s: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = s.store.usage
+
+    def busy(period: Any, *, at: datetime) -> dict[str, Any]:
+        figures = original(period, at=at)
+        figures["window"]["share_5h"] = 0.039  # far past the user-class reserve of a subscription
+        return figures
+
+    monkeypatch.setattr(s.store, "usage", busy)
+    chat = PROFILES["chat"]
+    assert (await s.go(chat)).status == "share_reserve" and s.calls == []
+    s.token = "sk-ant-api03-TEST-ONLY-NOT-REAL"
+    assert s.runner.api_key and s.runner._caps().windows is False
+    assert (await s.go(chat)).status == "ok"
+    assert s.calls[-1].credential is CredentialKind.API_KEY and s.tokens[-1] == s.token
+    s.token = "oat-token"
+    s.runner._slot = type(s.runner._slot)()
+    monkeypatch.setattr(s.store, "usage", original)
+    assert (await s.go()).status == "ok" and s.calls[-1].credential is CredentialKind.SETUP_TOKEN
 
 
 async def test_privsep_drops_to_ops(s: Setup) -> None:

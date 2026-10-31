@@ -15,6 +15,11 @@ the agent's share of each subscription window (5-hour, 7-day) stays under
   reports, else pro, the smallest), and run time per window is capped at
   the same share.
 
+With a provider API key there are no subscription windows (`Caps.windows`
+false): the share rule, the account-busy yield and the plan estimate do not
+apply, while the daily run caps, `--max-turns`, the run timeout and the
+per-run cost cap still do.
+
 A run reserves its share in one store transaction before the AI starts; the
 reservation is replaced by the actual figures when it ends. The kill switch
 and the usage-limit backoff are in `aicontrol`.
@@ -23,6 +28,7 @@ and the usage-limit backoff are in `aicontrol`.
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
+from math import inf
 
 from opsd.config import Options
 
@@ -76,14 +82,23 @@ class Caps:
     share_limit: float = SHARE_LIMIT
     profile_runs: Mapping[str, int] = field(default_factory=lambda: dict(RUNS_PER_DAY))
     reserve_seconds: Mapping[str, float] = field(default_factory=lambda: dict(RESERVE_SECONDS))
+    # False with an API key: no subscription usage windows, so every window threshold below is unbounded.
+    windows: bool = True
 
     @property
     def share_stop(self) -> float:
-        return self.share_limit * SHARE_MARGIN
+        return self.share_limit * SHARE_MARGIN if self.windows else inf
+
+    @property
+    def account_busy(self) -> float:
+        """The account utilisation at which the agent yields to the admin's own use."""
+        return ACCOUNT_BUSY if self.windows else inf
 
     @property
     def week_seconds(self) -> float:
         """Run time the agent may use per 7 days: its share of the plan's weekly allowance (estimate)."""
+        if not self.windows:
+            return inf
         return PLAN_WEEKLY_HOURS.get(self.plan, PLAN_WEEKLY_HOURS["pro"]) * 3600 * self.share_limit
 
     @property
@@ -92,6 +107,8 @@ class Caps:
 
     def estimated_share(self, seconds: float, window: str) -> float:
         """A run's share of a whole subscription window from its run time (the fallback, an estimate)."""
+        if not self.windows:
+            return 0.0
         return max(0.0, seconds) / _whole_window_seconds(self.plan, window)
 
     def seconds_for(self, profile: str) -> float:
@@ -101,10 +118,12 @@ class Caps:
         return self.profile_runs.get(profile, DEFAULT_PROFILE_RUNS)
 
     @classmethod
-    def from_options(cls, options: Options, *, detected_plan: str | None = None) -> Caps:
+    def from_options(cls, options: Options, *, detected_plan: str | None = None, windows: bool = True) -> Caps:
+        """`windows` is false when the credential is an API key (no subscription windows)."""
         return cls(
             plan=resolve_plan(options.claude.plan, detected_plan),
             share_limit=share_fraction(options.usage.max_share_percent),
+            windows=windows,
         )
 
 

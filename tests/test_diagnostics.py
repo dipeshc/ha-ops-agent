@@ -1,7 +1,11 @@
 """The diagnostics export: useful for a bug report, and nothing in it that should not be shared."""
 
+import gzip
 import json
+import logging
 from datetime import UTC, datetime
+
+import pytest
 
 from opsd import __version__, diagnostics
 from opsd.daemon import Daemon
@@ -59,6 +63,35 @@ async def test_secrets_and_house_names_never_leave(h: Harness) -> None:  # noqa:
                  # Entities from the health check and item keys.
                  "light.kitchen", "light.porch", "entities:", "routine, not exported"):  # fmt: skip
         assert leak not in text, leak
+
+
+async def test_an_api_key_never_leaves_in_the_export_or_the_state(
+    h: Harness,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from opsd.panelapi import PanelHandlers
+
+    key = "sk-ant-api03-TEST-ONLY-NOT-REAL"
+    caplog.set_level(logging.DEBUG)
+    d = h.daemon(claude__token=key)
+    await d.health_cycle("catch_up")
+    h.fake.set_unavailable("light.kitchen", hours_ago=8)
+    await d.health_cycle("daily")  # a triage run with the key
+    _audit(d, "error", f"provider said: invalid key {key}")
+    out = diagnostics.build(d)
+    state = PanelHandlers(d).state()
+    assert out["options"]["claude"]["token"] == "set" and out["health"]["ai_credential"] == "api_key"
+    assert state["ai"]["credential"] == "api_key"
+    assert state["usage"]["share_stop_percent"] is None and state["usage"]["run_time_5h_cap_s"] is None
+    for text in (json.dumps(out), json.dumps(state, allow_nan=False), caplog.text):
+        assert key not in text and "TEST-ONLY" not in text
+    for run_dir in d.paths.runs_dir.iterdir():
+        for f in run_dir.iterdir():
+            raw = gzip.open(f).read() if f.suffix == ".gz" else f.read_bytes()
+            assert b"TEST-ONLY" not in raw, f.name
+    # A setup token reports its own kind; no token reports none.
+    assert PanelHandlers(h.daemon()).state()["ai"]["credential"] == "setup_token"
+    assert diagnostics.build(h.daemon(claude__token=""))["health"]["ai_credential"] is None
 
 
 async def test_a_missing_store_is_reported_not_raised(h: Harness) -> None:  # noqa: F811

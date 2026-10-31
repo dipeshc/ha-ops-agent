@@ -156,6 +156,7 @@ def build(daemon: Daemon, *, now: datetime | None = None) -> dict[str, Any]:
             "selftest": _text(redactor, status.get("selftest", "")),
             "inbound": status.get("inbound"),
             "ai_state": status.get("ai_state"),
+            "ai_credential": daemon.credential_kind(),
             "updates": {k: updates.get(k) for k in ("option", "paused", "effective")} if updates else None,
         },
     }

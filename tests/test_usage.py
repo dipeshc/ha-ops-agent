@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import json
 import sys
 import threading
 from collections.abc import Iterator
@@ -143,6 +144,41 @@ def test_each_cap_refuses(db: Store, setup: str, reason: str) -> None:
     assert reserve(db, caps) == reason
 
 
+@pytest.mark.parametrize("setup", ["share_5h", "share_7d", "account", "seconds", "profile_runs"])
+def test_an_api_key_skips_the_share_rule_but_not_the_run_caps(db: Store, setup: str) -> None:
+    windowed = Caps.from_options(Options())
+    caps = Caps.from_options(Options(), windows=False)
+    if setup == "profile_runs":
+        caps = dataclasses.replace(caps, profile_runs={"chat": 0})
+    else:
+        # The same history that makes each window cap refuse a subscription run (test_each_cap_refuses).
+        assert not isinstance(reserve(db, caps, run_id="seed", at=NOW - timedelta(minutes=30)), str)
+        db.finish_run("seed", status="ok", at=NOW - timedelta(minutes=10), turns=1, tokens_in=1, tokens_out=1,
+                      tokens_cache_read=0, cost_usd=0, model="m",
+                      duration_s=windowed.window_seconds if setup == "seconds" else 1,
+                      share_5h=0.039 if setup == "share_5h" else 0.0,
+                      share_7d=0.039 if setup == "share_7d" else 0.0,
+                      acct_5h=0.95 if setup == "account" else 0.2, acct_7d=0.1)  # fmt: skip
+        assert isinstance(reserve(db, windowed), str)
+    res = reserve(db, caps)
+    if setup == "profile_runs":
+        assert res == "run_cap_reached:chat"
+        return
+    assert not isinstance(res, str) and res.seconds == caps.seconds_for("chat") and res.budget_usd == 0.5
+    assert caps.estimated_share(600, "five_hour") == 0.0
+
+
+def test_an_api_key_shows_no_plan_or_window_caps(db: Store) -> None:
+    w = World(db, make_options(claude__plan="max20"))
+    assert w.guard.view(NOW)["plan"] == "max20"
+    w.guard._api_key = lambda: True
+    assert w.guard.caps().windows is False
+    view = w.guard.view(NOW)
+    assert view["plan"] is None and view["share_stop_percent"] is None
+    assert view["run_time_5h_cap_s"] is None and view["run_time_7d_cap_s"] is None
+    json.dumps(view, allow_nan=False)  # no unbounded value leaks into the sensor or the panel
+
+
 def test_crashed_runs_keep_their_reservation(db: Store) -> None:
     caps = Caps.from_options(Options())
     reserve(db, caps, run_id="crash")
@@ -210,7 +246,7 @@ async def test_stream_rate_limit_events(tmp_path: Path, meminfo: Path, status: s
     script.chmod(0o755)
     proc_dir = tmp_path / "proc"
     proc_dir.mkdir()
-    result = await run_claude(config(tmp_path, str(script)), "p", oauth_token="t", transcript_path=tmp_path / "t.gz",
+    result = await run_claude(config(tmp_path, str(script)), "p", token="t", transcript_path=tmp_path / "t.gz",
                               redactor=Redactor(), proc_dir=proc_dir, meminfo=meminfo)  # fmt: skip
     assert result.status == expected and result.plan_hint == "max5"
     assert run_share(result.rate_first, result.rate_last, "five_hour") == pytest.approx(0.03)

@@ -26,6 +26,12 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
   utilisation in the last hour is at least 90 % (`account_busy:<window>`),
   or when the time reservation falls under 60 seconds
   (`share_cap:run_time`). Tests `test_usage.py:46-53,121-143`.
+  **Exemption:** with a provider API key ([ai-runner.md](ai-runner.md)
+  AP1a) there are no subscription windows, so none of B3, B4 or B5
+  applies: no `share_cap:*`, `account_busy:*` or `share_reserve:*`
+  refusal, and the run time is the profile's reserve (R3). B1, B2 and the
+  per-run cost cap still apply. Test
+  `test_an_api_key_skips_the_share_rule_but_not_the_run_caps`.
 - B4. Plan tiers for the time estimate: `claude.plan` `pro` 40, `max5` 140,
   `max20` 240 hours a week (low-end estimates); the 5-hour window is 20 %
   of the week; `auto` uses the provider's plan hint, else `pro`. Week
@@ -53,7 +59,8 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
 - B8. Exposure: `sensor.ops_agent_ai` (state `enabled`, `ai_disabled` or
   `usage_limited`; attributes plan, caps, shares, run time, today's totals,
   per-profile counts, last run), `sensor.ops_agent_runs_today`, `GET
-  api/usage` and the `usage` block of `GET api/state`. Test
+  api/usage` and the `usage` block of `GET api/state`. With an API key the
+  plan, `share_stop_percent` and the run-time caps are null. Test
   `test_usage.py:324-334`.
 
 ## What is skipped when exhausted

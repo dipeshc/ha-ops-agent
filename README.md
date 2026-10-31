@@ -104,17 +104,22 @@ The agent reaches its AI model through a provider, chosen with
 headless, which the image installs at build time, at a pinned version, from
 Anthropic's signed package repository.
 
-- **Sign-in.** Paste a Claude Code setup token into `claude.token`: run
-  `claude setup-token` on your own computer (it needs a Claude Pro or Max
-  subscription). A setup token is the only sign-in supported today. The
-  token stays on your Home Assistant machine and is only passed to Claude
-  Code.
+- **Sign-in.** Paste either credential into `claude.token`:
+  - a Claude Code setup token: run `claude setup-token` on your own
+    computer (it needs a Claude subscription);
+  - or an Anthropic API key (`sk-ant-api...`) from the Claude Console,
+    billed per use. With a key there are no subscription windows, so
+    `usage.max_share_percent` and `claude.plan` do not apply; the daily run
+    caps and `limits.run_max_usd` do.
+
+  The agent tells them apart by the key's prefix. The credential stays on
+  your Home Assistant machine and is only passed to Claude Code.
 - **Models.** `claude.model_standard` (default `claude-sonnet-5-5`) is used
   for triage and chat; the optional `claude.model_fast` for chat
   summaries.
 - **Spend.** `usage.max_share_percent` (default 5) caps how much of each
-  subscription usage window the agent may use, and `limits.run_max_usd`
-  caps each run's estimated cost.
+  subscription usage window the agent may use (setup token only), and
+  `limits.run_max_usd` caps each run's estimated cost.
 
 `llm.provider: none` turns the AI off. The health check, pushes, approvals
 and the update rules keep working, but automatic updates wait for your

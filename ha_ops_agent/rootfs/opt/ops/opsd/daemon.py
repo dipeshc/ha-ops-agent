@@ -48,7 +48,7 @@ from opsd.changepaths import SUPPRESS_PATH
 from opsd.changes import ChangeManager, ChangeRefused, LiveFiles, registry_entities
 from opsd.channels import BudgetClass, CompanionPush, Message
 from opsd.claude_runner import RunResult
-from opsd.config import Options, Paths, claude_token
+from opsd.config import Options, Paths, claude_token, credential_kind
 from opsd.conversation import clean_text, context_block
 from opsd.events import Dispatcher, Event, EventQueue, Priority, Schedule, TaskScheduler
 from opsd.evidence import EvidenceCache, EvidenceSource
@@ -328,6 +328,7 @@ class Daemon:
                 send=self.send_now,
                 kill=self.runner.kill,
                 admin_user=lambda: self.inbound.admin.user_id if self.inbound.admin is not None else None,
+                api_key=lambda: self.runner.api_key,
             )
             self.runner._caps = self.usage.caps
             self.runner._after_run = self.usage.after_run
@@ -683,6 +684,11 @@ class Daemon:
             return ()
         found = record.get("anomalies")
         return tuple(f"{record.get('profile')}: {a}" for a in found) if isinstance(found, list) else ()
+
+    def credential_kind(self) -> str | None:
+        """Which kind of provider credential is configured (`setup_token`, `api_key`), never the value."""
+        kind = credential_kind(claude_token(self.options, self.paths))
+        return None if kind is None else str(kind)
 
     def options_notice(self) -> dict[str, Any] | None:
         """What the panel says about the add-on options: refused values and the provider."""

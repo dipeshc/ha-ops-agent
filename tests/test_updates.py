@@ -1235,8 +1235,8 @@ async def test_an_addon_regression_is_escalated_held_and_pauses_updates(rig: Rig
     assert jobs[CARD].state == "skipped"
     await rig.flush()
     alert = next(m for m in rig.sent if m.urgent)
-    matter = rig.item(BROKER, "4.2.1")
-    assert matter["state"] == "failed" and matter["needs"] and alert.tag == matter["id"]
+    failed = rig.item(BROKER, "4.2.1")
+    assert failed["state"] == "failed" and failed["needs"] and alert.tag == failed["id"]
     assert alert.title == "Example Broker 4.2.0 → 4.2.1" and "encryption key" in alert.body
     assert alert.budget_class == "safety"
     # Paused, and the failed night blocks installs until the admin resumes.

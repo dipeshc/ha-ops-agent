@@ -790,7 +790,8 @@ class Deriver:
                     source={"finding": finding.key}, pushes=False)  # fmt: skip
         spec.about = " ".join(f"{n}. {clean_text(s, 300)}" for n, s in enumerate(finding.steps[:5], 1)) or None
         facts = [("Affected", "; ".join(finding.affected[:8]))]
-        if finding.quote:
+        # A log line is anyone's text: it is shown only as untrusted text under `agent`, never as a fact.
+        if finding.quote and finding.signal != "log":
             facts.append(("Home Assistant says" if finding.signal != "replacement" else "Evidence", finding.quote))
         for label in ("parity", "impact"):
             if finding.detail.get(label):
@@ -802,6 +803,9 @@ class Deriver:
         if plan is not None:
             spec.agent = {"text": str(plan.get("plan") or ""), "sources": ["the findings above"], "not_read": [],
                           "run_id": None}  # fmt: skip
+        if finding.signal == "log" and finding.quote:
+            text = (f"{spec.agent['text']}\n\n" if spec.agent else "") + f"The Core log says: {finding.quote}"
+            spec.agent = {"text": ctx.redact(text), "sources": ["Core log"], "not_read": [], "run_id": None}
         if variant != "deprecation":
             spec.actions = [act("dismiss", "Not relevant here", "text")]
             return spec
@@ -854,7 +858,7 @@ class Deriver:
             spec.gist = f"{gist}; config change #{proposal['change']} waits for you"
             return spec
         spec.actions = [act("dismiss", "Not relevant here", "text")]
-        if left is not None and left <= maint.ESCALATE_RELEASES:
+        if left is not None and left <= maint.ESCALATE_RELEASES and finding.signal in maint.AUTHORITATIVE:
             token = f"left:{finding.removal}:{left}"
             if not acked(store, key, token):
                 text = (f"{finding.title()}: {gist}. Nothing here changes it by itself; the plan below says what to "

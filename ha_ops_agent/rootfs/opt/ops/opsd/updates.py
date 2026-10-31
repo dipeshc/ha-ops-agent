@@ -8,8 +8,8 @@ At the update window (default 04:00 local) the daemon:
    names it (Core: one that breaks in the target version), or when Home
    Assistant's own notes list a breaking change for an integration this
    house uses (`opsd.evidence`, read-only; unreadable notes ask too), or
-   when its version reaches the removal of something this install still uses
-   (`maintenance.removal_block`; the maintenance scan runs first when its
+   when its version reaches the removal of something this install still uses,
+   named by a repair or the release notes (`maintenance.removal_block`; the maintenance scan runs first when its
    last one is older than a day). A
    capability-free AI `update_review` run then reads the candidates'
    release notes as fenced, untrusted data and can only hold an update back.

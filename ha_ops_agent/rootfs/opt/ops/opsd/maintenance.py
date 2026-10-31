@@ -12,7 +12,9 @@ never followed.
   install only, so they need no matching.
 - **Core log** deprecation warnings (`system_log/list`): "deprecated", "will be removed", with the
   integration from the logger name. The log empties on a restart, so a log finding stays for
-  `LOG_STICKY` after it was last seen.
+  `LOG_STICKY` after it was last seen. Any integration can write a log line, so a log finding is a
+  quiet item: it never escalates, pushes or holds an update back (only `AUTHORITATIVE` signals do),
+  and its text is shown only under `agent` and fenced in the plan prompt.
 - **Release posts** of the installed Core minor, the two before it and every newer one
   (`evidence.EvidenceSource.posts`): backward-incompatible items, the developer-blog list and the
   farewell list, matched against the integrations, YAML features and dashboard cards in use. The
@@ -27,8 +29,9 @@ A signal that could not be read keeps its previous findings: missing evidence ne
 Variants (title, gist, need and plan steps are the daemon's words; the plan run's text is `agent`):
 
 - **deprecation ahead**: what is affected, the removal version, the releases left, a plan. It is in
-  Needs you (pushed once per release left) only when it is within `ESCALATE_RELEASES` releases of
-  removal and nothing else answers it; else it is Coming up and silent;
+  Needs you (pushed once per release left) only when it comes from a repair or the release notes, is
+  within `ESCALATE_RELEASES` releases of removal and nothing else answers it; else it is Coming up and
+  silent;
 - **replacement candidate**: never automatic, a plan only; Suggestions, never pushed;
 - **suggestion**: Suggestions, never pushed.
 
@@ -47,7 +50,7 @@ Integration replacement is always a plan the admin carries out.
 Cadence: after every daily health check (local signals, the cached release index); the GitHub
 checks weekly or when a new release post appears; and before each update plan when the last scan is
 older than `STALE_BEFORE_UPDATE`. The update rule asks for a Core update whose version reaches the
-removal version of an unresolved deprecation (`removal_block`).
+removal version of an unresolved deprecation from a repair or the release notes (`removal_block`).
 """
 
 import hashlib
@@ -98,6 +101,9 @@ PLATFORMS = frozenset({
     "media_player", "notify", "number", "remote", "scene", "select", "sensor", "siren", "switch", "text", "time",
     "todo", "update", "vacuum", "valve", "water_heater", "weather",
 })  # fmt: skip
+# Signals Home Assistant itself vouches for. Only their removals escalate or hold a Core update back: any
+# integration can write a log line, so a log finding stays a quiet item.
+AUTHORITATIVE = frozenset({"repair", "notes"})
 _DOMAIN_RE = re.compile(r"[a-z0-9_]{1,64}")
 _ISSUE_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}")
 _DEPRECATED_RE = re.compile(r"deprecat|will be removed|no longer (?:be )?supported|removed in", re.IGNORECASE)
@@ -417,7 +423,10 @@ def removal_block(item: Mapping[str, Any], findings: Iterable[Finding]) -> str |
     hits = sorted(
         f"{f.domain or 'Core'} (removed in {f.removal})"
         for f in findings
-        if f.variant == "deprecation" and (at := minor(f.removal)) is not None and at <= target
+        if f.variant == "deprecation"
+        and f.signal in AUTHORITATIVE
+        and (at := minor(f.removal)) is not None
+        and at <= target
     )
     if not hits:
         return None
@@ -590,8 +599,9 @@ class MaintenanceManager:
         return self._clock() - last > (STALE_BEFORE_UPDATE if before_update else timedelta(0))
 
     def removals(self) -> list[Finding]:
-        """Unresolved deprecations with a removal version (the update rule's input)."""
-        return [f for f in self.findings() if f.variant == "deprecation" and f.removal
+        """Unresolved deprecations with a removal version from a repair or the release notes (the update rule's
+        input); a log line never holds an update back."""
+        return [f for f in self.findings() if f.variant == "deprecation" and f.removal and f.signal in AUTHORITATIVE
                 and not hidden(self.store, f)]  # fmt: skip
 
     async def scan(self, trigger: str) -> dict[str, Any]:

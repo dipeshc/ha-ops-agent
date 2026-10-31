@@ -38,7 +38,14 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   `homeassistant.components.<d>` / `custom_components.<d>` logger; the
   removal is the `YYYY.M` next to the removal words, if any. A log finding
   stays `LOG_STICKY` (7 days) after it was last seen, since the log empties
-  on a restart. Test `test_a_log_warning_lasts_a_week_after_it_was_last_seen`.
+  on a restart. Any integration can write a log line, so a log finding is a
+  quiet, low-priority item: only repairs and release notes
+  (`AUTHORITATIVE`) escalate (M12), push (M13) or hold a Core update back
+  (M26), and the log text appears only under the item's `agent` field
+  ("The Core log says: …", source `Core log`) and fenced as evidence in
+  the plan prompt, never in a fact, the title, the gist or a need. Tests
+  `test_a_log_warning_lasts_a_week_after_it_was_last_seen`,
+  `test_a_log_line_never_holds_an_update_back_escalates_or_pushes`.
 - M4. **Release posts** of the installed Core minor, the two before it and
   every newer published one, newest first and at most `MAX_STEPS` (6) posts
   per scan (far behind, the newest win): backward-incompatible items, the developer-blog
@@ -93,14 +100,15 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 - M10. Each finding is one `maintenance` item, key `maint:<finding>`, id
   prefix `m`. Title, gist, need, facts and the numbered plan steps
   (`about`) are the daemon's words; the plan run's text is only in `agent`.
-  Facts quote the evidence, redacted. Test
+  Facts quote the evidence of repairs and release notes, redacted; a log
+  line is only in `agent` (M3). Test
   `test_the_plan_is_the_agents_text_and_the_title_and_need_stay_the_daemons`.
 - M11. Variants and their kicker: **Deprecation ahead** (what is affected,
   the removal version, the releases left, a plan), **Replacement candidate**
   (parity of entity platforms, entity-id impact, risk `low`/`medium`/`high`;
   never automatic) and **Suggestion**.
-- M12. **Escalation.** A deprecation is in Needs you, with an `ack`, only
-  when its removal is at most `ESCALATE_RELEASES` (2) Core minors away and
+- M12. **Escalation.** A deprecation from a repair or the release notes
+  is in Needs you, with an `ack`, only when its removal is at most `ESCALATE_RELEASES` (2) Core minors away and
   nothing else answers it (no proposal that is open or applying, no
   dashboard plan, no applied dashboard change, not hidden). A failed
   dashboard change to acknowledge takes precedence over all of these.
@@ -220,7 +228,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   `test_the_scan_is_due_before_an_update_only_when_it_is_old`.
 - M26. **A Core update that removes something still in use asks.** An AUTO
   Core candidate whose target minor reaches the removal of an unresolved,
-  not hidden deprecation is held for approval with the reason naming it
+  not hidden deprecation from a repair or the release notes (never a log
+  line) is held for approval with the reason naming it
   (`maintenance.removal_block`, beside `repair_block` in the update rule).
   Tests `test_a_core_update_that_reaches_a_removal_asks`,
   `test_a_pending_core_update_that_removes_something_in_use_asks`.

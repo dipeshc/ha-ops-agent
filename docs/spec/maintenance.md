@@ -40,7 +40,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   stays `LOG_STICKY` (7 days) after it was last seen, since the log empties
   on a restart. Test `test_a_log_warning_lasts_a_week_after_it_was_last_seen`.
 - M4. **Release posts** of the installed Core minor, the two before it and
-  every newer published one: backward-incompatible items, the developer-blog
+  every newer published one, newest first and at most `MAX_STEPS` (6) posts
+  per scan (far behind, the newest win): backward-incompatible items, the developer-blog
   list and the farewell list. An item counts only when its integration is in
   use (config entries, loaded components, YAML keys or platforms, custom
   integrations) or a code name it gives (with a `_ . : -` separator) is used
@@ -100,7 +101,9 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   never automatic) and **Suggestion**.
 - M12. **Escalation.** A deprecation is in Needs you, with an `ack`, only
   when its removal is at most `ESCALATE_RELEASES` (2) Core minors away and
-  nothing else answers it (no open proposal or dashboard plan, not hidden).
+  nothing else answers it (no proposal that is open or applying, no
+  dashboard plan, no applied dashboard change, not hidden). A failed
+  dashboard change to acknowledge takes precedence over all of these.
   OK hides it until one release closer (the ack token holds the releases
   left). Releases left count minors across years and are 0 once the removal
   is installed or due. Tests
@@ -124,7 +127,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 ## Plans and proposals
 
 - M16. **The plan run.** For deprecations and replacement candidates
-  without a plan for their current evidence, at most 4 per scan, one
+  that are not hidden and have no plan for their current evidence, at most
+  4 per scan, one
   capability-free `maintenance_plan` run reads the findings as fenced
   evidence. An answer is kept only for a finding that was asked about, once
   per finding and evidence; AI off, capped or failed is retried at the next
@@ -156,7 +160,10 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   guard or a prompt. Test `test_dashboard_save_is_an_approval_only_daemon_capability`.
 - M21. **Approval.** A dashboard approval (`kind: dashboard`, subject
   `dashboard:<finding>`) binds the finding, the url_path, the SHA-256 of the
-  dashboard JSON before and after, and the edit. It is requested and
+  dashboard JSON before and after, the edit, and the number and paths (at
+  most 40) of the changes. It shares the pending cap of
+  [approvals.md](approvals.md), and a new request voids any live one for the
+  same subject. It is requested and
   confirmed by the admin's one panel request for the revision shown, by the
   admin who asked; it is recomputed from the dashboard as Home Assistant
   serves it at confirmation and again right before the save; single use;
@@ -194,8 +201,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 
 ## Cadence and the update rule
 
-- M25. A scan runs after every daily health check (local signals and the
-  cached release index), with the GitHub checks weekly or when a newer
+- M25. A scan runs after every health cycle, whatever its trigger (local
+  signals and the cached release index), with the GitHub checks weekly or when a newer
   release post appears, and before a deciding update plan (`window`,
   `manual`) when the last scan is older than 26 hours. A scan never raises:
   a failure keeps the earlier findings. Test

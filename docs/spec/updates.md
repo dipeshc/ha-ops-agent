@@ -59,8 +59,13 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   target Core version, or raised by the HACS integration's domain, asks; a
   Core breaking or removed change for a domain the house uses (or with no
   domain), a developer-blog notice while a fragile custom domain is loaded,
-  unreadable notes, or an empty house-domain set all ask. Tests
+  unreadable notes, or an empty house-domain set all ask; so does a Core
+  target that reaches the removal of an unresolved, not hidden deprecation
+  this install still uses (`maintenance.removal_block`; a maintenance scan
+  older than 26 hours runs first, [maintenance.md](maintenance.md)
+  M25–M26). Tests
   `test_a_repair_that_breaks_in_the_target_core_version_asks`,
+  `test_a_core_update_that_reaches_a_removal_asks`,
   `test_a_core_breaking_change_for_an_integration_the_house_uses_asks`,
   `test_a_core_wide_breaking_change_asks`,
   `test_unreadable_core_notes_or_house_integrations_ask`.

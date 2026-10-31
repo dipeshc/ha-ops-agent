@@ -18,6 +18,7 @@ harm.
 | Approvals, items, pushes | [approvals.md](approvals.md), [items-and-pushes.md](items-and-pushes.md) | `approvals.py`, `items.py`, `activity.py`, `notify.py`, `channels.py`, `quiet.py` |
 | Panel and API | [panel.md](panel.md) | `panel.py`, `panelapi.py`, `live.py`, `panel/` |
 | Chat, inbound, tasks | [chat.md](chat.md) | `assistant.py`, `conversation.py`, `inbound.py`, `tasks.py`, `proposals.py`, `chatcards.py` |
+| Proactive maintenance | [maintenance.md](maintenance.md) | `maintenance.py`, `inventory.py`, `dashboards.py` (with `evidence.py`) |
 | Git proposals | [proposals.md](proposals.md) | `changes.py`, `changepaths.py`, `gitops.py`, `safegit.py`, `githistory.py`, `configcheck.py` |
 | AI runner and provider | [ai-runner.md](ai-runner.md) | `runner.py`, `runctx.py`, `claude_runner.py`, `guard.py`, `prompts/` |
 | Capabilities and opsctl | [capabilities.md](capabilities.md) | `capabilities.py`, `policy.py`, `rpc.py`, `opsctl.py`, `effects.py` |

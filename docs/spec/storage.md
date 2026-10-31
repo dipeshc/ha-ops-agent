@@ -15,7 +15,7 @@ Tests: `tests/test_store.py`, `tests/test_infra.py`, `tests/test_usage.py`
   `test_migrated_private_and_reopenable`,
   `test_store_file_created_private_even_with_open_umask`.
 - S2. **Migrations** are an ordered tuple of SQL scripts; the schema version
-  is their count (17 in 0.17.0) and is tracked in `PRAGMA user_version`.
+  is their count (18 in 0.18.0) and is tracked in `PRAGMA user_version`.
   Each pending script runs in one transaction and sets the version; a
   failure rolls back. A database with a newer version than the code MUST be
   refused (`StoreError`) and never quarantined. Tests
@@ -26,6 +26,18 @@ Tests: `tests/test_store.py`, `tests/test_infra.py`, `tests/test_usage.py`
   `update_runs`, `update_jobs`, `approval_proposals`, `change_proposals`,
   `held_pushes`, `activity`, `items` (with the generated `needs` column and
   its CHECK), `item_events`.
+- S11. **Migration 18** adds the `maintenance` item kind. SQLite cannot
+  change a CHECK in place, so it rebuilds `items` as `items_v18` with the
+  same columns and the `kind` CHECK extended by `maintenance`, copies every
+  row, drops the old table, renames the new one and recreates the
+  `items_needs`, `items_at` and `items_state` indexes; the generated
+  `needs` column is recomputed. No other table changes. Maintenance state
+  lives in `kv` under `maintenance:` (`findings`, `meta`, and per finding
+  `plan:`, `dashboard:`, `result:`, `migrated:`, `hidden:`); each scan
+  blanks the plan, dashboard-plan and result records of findings that are
+  gone. Tests `test_migration_17_backfills_items_and_nothing_old_needs_you`
+  (a version-16 store migrated to 18 keeps its items),
+  `test_only_deprecations_within_two_releases_need_the_admin_and_push`.
 - S4. **Open and recover.** A corrupt file (`SQLITE_CORRUPT`, `SQLITE_NOTADB`
   or a failed quick check) is renamed to `ops.db.corrupt-<UTC stamp>` (with
   its WAL and SHM) and a new store is created; the daemon audits
@@ -61,7 +73,10 @@ Tests: `tests/test_store.py`, `tests/test_infra.py`, `tests/test_usage.py`
   lines are read), `notify.json`, `open-items.json`, `reloads.json`,
   `selftest.json`, `secrets/push.json` (the cached relay URL),
   `secrets/claude_oauth_token`. Up to 30 snapshots live under
-  `/data/snapshots`. Test `test_jsonstore`.
+  `/data/snapshots`. Dashboard backups taken before a dashboard save live
+  under `/data/maintenance/dashboards/<url_path>/` (directories 0700, files
+  0600 written with `O_EXCL | O_NOFOLLOW`, the last 10 per dashboard kept;
+  [maintenance.md](maintenance.md) M22). Test `test_jsonstore`.
 - S8. `/data/run.lock` is an exclusive non-blocking `flock` (0600, holds
   the pid), released by the kernel on a crash. Test `test_run_lock`.
 - S9. Logs are one JSON object per line on stderr (`ts`, `level`, `logger`,

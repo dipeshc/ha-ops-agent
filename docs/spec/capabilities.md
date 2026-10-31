@@ -20,7 +20,7 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   set and the RPC schema are generated from it. Tests
   `test_every_reference_resolves`, `test_guard_parser_and_schema_are_generated`,
   `test_registry_rejects_bad_rows`, `test_disabled_capability_is_not_offered_anywhere`.
-- K2. Verbs on the socket (0.17.0): `status`, `baseline`, `health
+- K2. Verbs on the socket (0.18.0): `status`, `baseline`, `health
   [--diff]`, `repairs`, `entities`, `integrations`, `entries`, `updates`,
   `backups`, `logs <core|supervisor|host|addon>`, `history <entity>`,
   `system`, `update-plan`, `git-status`, `git-log`, `git-diff`, `git-show`
@@ -33,9 +33,10 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   `integration-reload <domain>` (2/6, refund on refusal).
 - K3. Internal capabilities never reachable from the socket, the CLI, the
   guard or the prompt: `change.apply`, `change.revert` (tier APPROVE),
-  `backup.create`, `update.install` (tier from the update rule),
-  `update.rollback` (AUTO_NOTIFY). Test
+  `dashboard.save` (tier APPROVE), `backup.create`, `update.install` (tier
+  from the update rule), `update.rollback` (AUTO_NOTIFY). Test
   `test_only_the_export_and_the_drafts_are_allowed` and the registry tests.
+
 - K4. "Read" capabilities (effects exactly `{READ}`): `health.snapshot`,
   `ha.entities`, `ha.entries`, `ha.logs`, `ha.history`, `update.plan`,
   `vacuum.rooms`, `git.status/log/diff/show`.
@@ -93,3 +94,13 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   run. `notify.admin` needs a message of at most 900 characters, `urgent`
   only when the hand-off has a critical item, and is sent with the run's
   budget class. Tests `test_rpc_effects.py:177-242`, `test_daemon.py:498-538`.
+- K12. **`dashboard.save`** (verb `dashboard-save`, executor
+  `opsd.dashboards:exec_internal`, which always refuses) is daemon-internal:
+  tier APPROVE, effect `{MUTATE_HA}`, origin agent-self only, in no run
+  profile's grant. The daemon saves one storage dashboard only through
+  `dashboards.DashboardWriter.execute`, after consuming the admin's
+  dashboard approval, in act mode, and refuses when `capabilities.never`
+  names `dashboard.save`; `capabilities.require_approval` cannot loosen
+  it. The save itself passes the self-guard only inside its approved scope
+  ([selfguard.md](selfguard.md) G8). See [maintenance.md](maintenance.md)
+  M20–M23. Test `test_dashboard_save_is_an_approval_only_daemon_capability`.

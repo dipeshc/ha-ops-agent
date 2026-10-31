@@ -3,12 +3,13 @@
 The agent never changes itself, the Supervisor or the host, and never
 targets a lock, an alarm or a door, whatever any input says. Selfguard is
 the code-level allowlist under every Supervisor, Core REST and websocket
-call, every update job, reload and proposal path.
+call, every update job, reload, proposal path and dashboard save.
 
 Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
 (`SupervisorClient.request`), `opsd/ws.py` (`send_json`),
-`opsd/updexec.py`, `opsd/changepaths.py`, `opsd/guard.py`. Tests:
-`tests/test_selfguard.py`.
+`opsd/updexec.py`, `opsd/changepaths.py`, `opsd/guard.py`,
+`opsd/dashboards.py`. Tests: `tests/test_selfguard.py`,
+`tests/test_dashboards.py`.
 
 ## HTTP
 
@@ -67,8 +68,11 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   `homeassistant/expose_entity/list`, `hacs/repository/info`,
   `update/release_notes`, `history/history_during_period`,
   `recorder/statistics_during_period`, `vacuum/get_segments`,
-  `input_boolean/list`, `input_boolean/create` (only the AI switch's name).
-  Tests `test_ws_self_targets_are_refused`,
+  `input_boolean/list`, `input_boolean/create` (only the AI switch's name),
+  and the dashboard reads `lovelace/config` (only a `url_path`),
+  `lovelace/dashboards/list` and `lovelace/resources` (no arguments). The
+  one write is `lovelace/config/save` under G8; every other `lovelace/...`
+  command is refused. Tests `test_ws_self_targets_are_refused`,
   `test_every_websocket_send_path_refuses_before_writing`,
   `test_the_agents_own_subscriptions_and_switch_pass`.
 
@@ -87,3 +91,21 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   ([reload.md](reload.md)); approval requests for the agent or the
   Supervisor are refused. Tests `test_reload_can_never_target_the_platform`,
   `test_update_approval_requests_for_the_agent_are_refused`.
+
+## Dashboards
+
+- G8. **Approved dashboard write.** `lovelace/config/save` passes only
+  inside `approved_dashboard_write(url_path, generated=...)`, with exactly
+  `{url_path, config}` (`config` a mapping) and that scope's url_path. The
+  scope is a context variable like G4: single use, closed when the block
+  ends, and admits one save. It is never opened for the default dashboard
+  (no url_path), a url_path longer than 100 characters or not lower case
+  with a hyphen (`[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+`), or one listed in the
+  profile's `dashboards.generated`; refusal raises `SelfTargetError`. Only
+  `dashboards.DashboardWriter` enters it, after consuming the admin's
+  dashboard approval, or to restore the backup after a failed save of that
+  plan ([maintenance.md](maintenance.md) M21–M23). Tests
+  `test_the_save_is_refused_outside_an_approved_scope`,
+  `test_the_scope_lets_exactly_one_save_of_its_own_dashboard_through`,
+  `test_the_scope_is_never_opened_for_the_default_a_generated_or_a_malformed_dashboard`,
+  `test_a_generated_dashboard_is_refused_even_with_a_forged_approval`.

@@ -25,7 +25,8 @@ diff, acks), `opsd/triage.py` (prompt and result), `opsd/fingerprint.py`,
   `/data/run.lock`; a second caller gets `skipped_busy`. Test `test_run_lock`.
 - H4. Before a cycle the daemon waits for updates to be idle and runs update
   upkeep (`reconcile`); a crash marks the status sensor `failed`; store and
-  run-directory retention runs after every check.
+  run-directory retention runs after every check, then the maintenance scan
+  ([maintenance.md](maintenance.md) M25).
 
 ## Collection
 
@@ -144,7 +145,10 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 
 ## Evidence and the config check
 
-- H19. `opsd/evidence.py` fetches release notes for the update rule only:
+- H19. `opsd/evidence.py` fetches release notes for the update rule and,
+  for proactive maintenance, release posts, archived flags of custom
+  integrations' repositories and Core's integration listings
+  ([maintenance.md](maintenance.md) M4–M5):
   HTTPS to `www.home-assistant.io` and `api.github.com` only, same-host
   redirects, 3 MiB, 20 seconds; results cached 12 hours in the store; a
   failed or unrecognised answer is never cached and marks the evidence

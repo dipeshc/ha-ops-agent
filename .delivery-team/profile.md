@@ -74,9 +74,12 @@ commands and triggers.
 
 - `tests/test_selfguard.py`: the agent never targets itself, the Supervisor or
   the host through any Supervisor, Core REST or websocket call, update job,
-  reload or proposal path, except the single-use approved OS update flow
-  (`docs/spec/selfguard.md`). Run whenever a call site or a URL-building
-  function changes.
+  reload or proposal path, except the single-use approved OS update flow;
+  `tests/test_dashboards.py`: a dashboard is saved only inside the
+  single-use scope of an approved plan, never a default, generated or
+  malformed one (`docs/spec/selfguard.md`, `docs/spec/maintenance.md`).
+  Run whenever a call site, a URL-building function or a dashboard save
+  changes.
 - `tests/test_privsep.py` and `tests/test_guard.py`: the AI process runs as
   the unprivileged `ops` account, reaches only the secret-free export and the
   drafts directory, never a secrets file or directory in any letter case, and

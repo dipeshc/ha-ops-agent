@@ -4,7 +4,7 @@ The AI is a bounded advisor: it reads a secret-free copy of the
 configuration, asks the daemon for named actions through `opsctl`, and
 returns a schema-checked result. The daemon decides whether to act on any
 of it. This document has two parts: the provider-independent run model, and
-the one provider the 0.17.0 code implements.
+the one provider the 0.18.0 code implements.
 
 Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 `opsd/runctx.py`, `opsd/guard.py` and `bin/guard-hook` (the tool guard),
@@ -22,6 +22,7 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 | `investigate` | `profiles/investigate.md` | `investigate-result` | reads + `task.list`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 25 | min(1.0, run_max_usd) | yes |
 | `summary` | `profiles/summary.md` | `reply-result` | none | USER | 5 | min(0.2, run_max_usd) | no |
 | `update_review` | `profiles/update_review.md` | `update-review` | none | AGENT | 6 | min(0.5, run_max_usd) | no |
+| `maintenance_plan` | `profiles/maintenance_plan.md` | `maintenance-plan` | none | AGENT | 8 | min(0.5, run_max_usd) | no |
 
 - R1. "Reads" are the capabilities whose only effect is READ
   ([capabilities.md](capabilities.md)). A profile's capability list is the
@@ -35,7 +36,8 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
   install has. Result schemas are passed verbatim to the provider and
   validated again by the daemon (`triage` `{result, summary<=600}`; reply
   `{reply: null|<=1500, summary<=300}`; investigate adds `next: null|<=600`;
-  update review as in [updates.md](updates.md) U8).
+  update review as in [updates.md](updates.md) U8; maintenance plan as in
+  [maintenance.md](maintenance.md) M16–M18).
 - R3. Run time is not per profile: `min(20 minutes, reservation)` where the
   reservation is the smaller of the profile's reserve (triage 600 s, chat
   180, followup 180, investigate 420, summary 90, others 180) and what the
@@ -128,7 +130,7 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 
 ## The AI provider
 
-The 0.17.0 code has one provider, selected by `llm.provider: claude`;
+The 0.18.0 code has one provider, selected by `llm.provider: claude`;
 `none` turns the AI off (deterministic checks, pushes and updates continue;
 AUTO updates are then held unless `updates.hold_if_unreviewed` is off). The
 runner calls `claude_runner.run_claude` directly; adding a provider means
@@ -137,7 +139,7 @@ dispatch on `llm.provider`.
 
 - AP1. **Credential.** `claude.token`, else the file
   `/data/secrets/claude_oauth_token`. The token is exported to the provider
-  process as `CLAUDE_CODE_OAUTH_TOKEN` and nowhere else; the 0.17.0 code
+  process as `CLAUDE_CODE_OAUTH_TOKEN` and nowhere else; the 0.18.0 code
   does not detect or handle an API key differently. Test
   `test_options_parsing_and_token`.
 - AP1a. **API key (planned, not yet implemented; backlog

@@ -4,8 +4,8 @@ An approval is the admin's explicit, bounded consent to one action the agent
 showed them. It is bound to the exact plan, used once and expires.
 
 Implementation: `opsd/approvals.py`, the act endpoint in `opsd/panelapi.py`,
-consumers in `opsd/updexec.py` and `opsd/changes.py`. Tests:
-`tests/test_approvals.py`, `tests/test_items.py`
+consumers in `opsd/updexec.py`, `opsd/changes.py` and `opsd/dashboards.py`.
+Tests: `tests/test_approvals.py`, `tests/test_dashboards.py`, `tests/test_items.py`
 `test_approve_then_withdraw_binds_each_action_to_its_revision`.
 
 ## Who and where
@@ -76,7 +76,7 @@ consumers in `opsd/updexec.py` and `opsd/changes.py`. Tests:
   `change_hash(binding, created_at)`, the same pending cap, superseding and
   72-hour expiry. Confirm re-binds against git and consume re-checks state,
   decider, proposal id, expiry and binding right before writing. Update
-  paths never accept change approvals and vice versa.
+  paths never accept change or dashboard approvals and vice versa.
 
 ## Reboot approvals
 
@@ -85,3 +85,20 @@ consumers in `opsd/updexec.py` and `opsd/changes.py`. Tests:
   versions, state and finish time; it is consumed just before the reboot step
   and the executor still needs the job's own update approval. See
   [os-update.md](os-update.md).
+
+## Dashboard approvals
+
+- A17. A dashboard migration plan ([maintenance.md](maintenance.md) M21)
+  uses subject `dashboard:<finding>`, `plan.kind: dashboard`, always
+  `run_when = now`, the same pending cap, superseding and 72-hour expiry.
+  `plan_hash` is `dashboard_hash(binding, created_at)`: the SHA-256 of the
+  canonical JSON of the finding, url_path, the dashboard JSON's SHA-256
+  before and after the edit, the edit, and the changes' count and paths.
+  The admin's one panel request (`apply_dashboard`) requests and confirms
+  it; confirm requires state `pending` and the confirming user equal to
+  `requested_by`, marks `expired` past expiry and `void` when the binding
+  recomputed from the dashboard as Home Assistant serves it no longer
+  matches. `consume_dashboard` re-checks state `approved`, a decider,
+  expiry and the recomputed binding right before the save and marks it
+  `used` (compare-and-set). Update, change and reboot paths never accept
+  it. Test `test_confirmation_needs_the_admin_who_asked_and_an_unchanged_dashboard`.

@@ -60,10 +60,12 @@ list holds at most 50 entries and MUST NOT repeat an entry.
 | `docs.runbook` | a path ending `.md` that passes the readable-entry rules. |
 | `docs.facts` | as `runbook`, and additionally `docs/[a-z0-9][a-z0-9_-]{0,63}.md`. |
 | `docs.readable` | list of readable entries: a `.md` file path, or a top-level directory name with no `/` and no `.`. |
+| `dashboards.generated` | list of storage-dashboard url_paths (`[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+`: lower case, with a hyphen) that something else writes; default empty. The agent never plans or saves a change to one ([maintenance.md](maintenance.md) M18, M23–M24). |
 
 Tests: `test_the_schema_is_strict`, `test_a_fragile_piece_can_only_hold_back`,
 `test_self_slug_must_name_the_agent`, `test_git_author_cannot_inject_options`,
-`test_proposal_kinds_are_the_three_the_config_check_knows`.
+`test_proposal_kinds_are_the_three_the_config_check_knows`,
+`test_profile_key_dashboards_generated_is_strict`.
 
 ## Readable entries
 
@@ -90,6 +92,10 @@ Tests: `test_the_schema_is_strict`, `test_a_fragile_piece_can_only_hold_back`,
   never-reload domain. Tests `test_reload_deny_only_adds`,
   `test_a_profile_listing_a_never_reload_domain_is_refused`,
   `test_lock_alarm_and_garage_vendors_are_never_reloaded`.
+- P16. `dashboards.generated` only narrows: it adds dashboards the
+  self-guard never opens a save scope for, and no profile key makes a
+  YAML-mode or the default dashboard writable. Test
+  `test_a_generated_dashboard_is_refused_even_with_a_forged_approval`.
 - P11. `house_notes`, the runbook and the facts document are data for the AI
   (fenced, size-capped); they grant no capability. Proposal rules derived from
   the profile are empty unless git is enabled and never reach the AI as

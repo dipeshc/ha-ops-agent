@@ -59,13 +59,18 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 | `updates.review` | `true` | bool | The AI reads AUTO candidates' release notes and may hold one back, never promote. |
 | `updates.hold_if_unreviewed` | `true` | bool | An AUTO candidate the AI could not review is held. |
 | `updates.need_approval`, `updates.never` | `[]` | `update.[a-z0-9_]{1,128}` | Always ask / never install (still reported). |
-| `capabilities.require_approval`, `capabilities.never` | `[]` | `[a-z][a-z0-9_]{0,40}.[a-z0-9_.]{1,60}` | Tighten a capability's tier by name; never loosens. |
+| `capabilities.require_approval`, `capabilities.never` | `[]` | `[a-z][a-z0-9_]{0,40}.[a-z0-9_.]{1,60}` | Tighten a capability's tier by name; never loosens. `never: [dashboard.save]` refuses even an approved dashboard plan. |
 | `capabilities.reloadable_domains` | empty | up to 40 comma-separated `[a-z0-9_]{1,64}` | Reload allowlist; empty means the profile's `reload.domains`. |
 | `usage.max_share_percent` | 5.0 | 0.5..25 | Share of a subscription usage window the agent may use (clamped again in the budget). |
 | `limits.run_max_turns` | 30 | 5..100 | Turn cap of the triage profile. |
 | `limits.run_max_usd` | 1.5 | 0.1..20 | Cost cap of the triage profile; other profiles use the smaller of their fixed cap and this. |
 | `limits.log_level` | `info` | `debug` / `info` / `warning` / `error` | Daemon log level. |
 | `limits.git_push` | `true` | bool | `false`: applied proposals are committed but not pushed. |
+
+Which storage dashboards the agent must never edit is the house profile's
+`dashboards.generated` ([profile.md](profile.md)); there is no option for
+it. Dashboard changes need `agent.mode: act` and an approval
+([maintenance.md](maintenance.md) M22).
 
 ## Quiet hours
 
@@ -80,6 +85,6 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 ## Paths
 
 `Paths` fixes the add-on's file layout: the config mount `/mnt/ha/config`,
-the backup mount `/mnt/ha/backup`, `/data` (options, the store, secrets, runs
-and snapshots), the run copy and drafts under `/run`, and the opsctl socket.
+the backup mount `/mnt/ha/backup`, `/data` (options, the store, secrets, runs,
+snapshots and the dashboard backups under `maintenance/dashboards`), the run copy and drafts under `/run`, and the opsctl socket.
 See [privsep.md](privsep.md) and [storage.md](storage.md).

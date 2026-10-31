@@ -28,7 +28,7 @@ full = [
 # triggers so a developer runs them first and a reviewer re-runs them. profile.md says what
 # each one protects.
 guards = [
-  { cmd = "uv run pytest tests/test_selfguard.py", when = "a change touches any Supervisor, Core REST or websocket call, update jobs, reloads or proposal paths (opsd/selfguard.py, supervisor.py, ws.py, updexec.py, reload.py, proposals.py, changepaths.py)" },
+  { cmd = "uv run pytest tests/test_selfguard.py tests/test_dashboards.py", when = "a change touches any Supervisor, Core REST or websocket call, update jobs, reloads, proposal paths or dashboard saves (opsd/selfguard.py, supervisor.py, ws.py, updexec.py, reload.py, proposals.py, changepaths.py, dashboards.py)" },
   { cmd = "uv run pytest tests/test_privsep.py tests/test_guard.py", when = "a change touches the run copy, the guard hook, readable documents, the ops account or anything under rootfs/etc or rootfs/opt/ops/bin" },
   { cmd = "uv run pytest tests/test_capabilities.py tests/test_rpc_effects.py tests/test_opsctl.py", when = "a change adds, renames or re-tiers a capability, an opsctl verb, an effect or the socket protocol" },
   { cmd = "uv run pytest tests/test_reload.py", when = "a change touches integration reloads, the never-reload list or the reload allowlist resolution" },

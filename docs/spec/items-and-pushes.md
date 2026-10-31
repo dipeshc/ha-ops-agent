@@ -12,11 +12,11 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 ## Vocabulary
 
 - I1. Kinds: `update`, `reminder`, `investigation`, `proposal`, `check`,
-  `backup`, `reload`, `window` (a store CHECK). States: `proposed`,
+  `backup`, `reload`, `window`, `maintenance` (a store CHECK). States: `proposed`,
   `waiting`, `scheduled`, `running`, `done`, `failed`, `cancelled`,
   `expired`; the last four are terminal.
 - I2. Need kinds: `approval`, `confirm`, `physical`, `answer`, `ack`. The
-  0.17.0 code only ever produces `approval` and `ack`. Actors: `you`,
+  0.18.0 code only ever produces `approval` and `ack`. Actors: `you`,
   `daemon`, `agent`. Action ids match `[a-z_]{1,32}`; item ids match
   `[a-z]-[0-9a-z]{1,40}`.
 - I3. **Needs you** is exactly `state == waiting`, or `failed` with a need.
@@ -24,9 +24,10 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `failed`. Tests `test_the_store_refuses_a_waiting_item_without_a_need`,
   `test_migration_17_backfills_items_and_nothing_old_needs_you`.
 - I4. Keys and ids: keys are `updates:<entity>@<version>`, `window:<run>`,
-  `change:<id>`, `fact:<id>`, `task:<id>`, `health:<key>`, `activity:<id>`.
-  The URL id is `<prefix>-<sha256(key)[:12]>` with prefixes `u` (updates),
-  `w` (window), `p` (change, fact), `r` (task), `c` (health), `x` (other);
+  `change:<id>`, `fact:<id>`, `task:<id>`, `health:<key>`, `maint:<finding>`,
+  `activity:<id>`. The URL id is `<prefix>-<sha256(key)[:12]>` with prefixes
+  `u` (updates), `w` (window), `p` (change, fact), `r` (task), `c` (health),
+  `m` (maintenance), `x` (other);
   activity items are `a-<n>`.
 
 ## Derivation
@@ -96,7 +97,8 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   needs the admin becomes `waiting` with an `ack` and also posts one chat
   message naming it. Test `test_activity_entries_become_items_and_events`.
 - I17. Home sections: `needs` oldest `needs_since` first; `running`;
-  `coming` (proposed, scheduled) by `at`; `today` (terminal, not quiet,
+  `coming` (proposed, scheduled) by `at`; `suggestions` (proposed
+  maintenance replacement candidates and suggestions) by `at`; `today` (terminal, not quiet,
   resolved since local midnight) newest first. History: 50 per page, keyset
   cursor on `(at, id)`, filters `all`, `needs`, `changes` (proposal, update,
   reload), `checks` (check, backup); day grouping and folding of quiet items
@@ -164,3 +166,12 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   button gets an id `OPS_<KIND>_<32 hex>` recorded with a 3-day expiry; the
   kinds are REPLY (text input), SNOOZE and DONE. Without a store no buttons
   are sent. Inbound handling is in [chat.md](chat.md).
+
+## Maintenance items
+
+- I19. Maintenance items are derived from the stored findings on every pass
+  like any other item; the derivation, escalation, pushes and actions are
+  in [maintenance.md](maintenance.md) M10–M18 and the wire shape in
+  [panel.md](panel.md) N20. Only entering Needs you pushes (a deprecation
+  within two releases, a dashboard plan waiting for approval, a failed
+  dashboard change); every other maintenance item is silent.

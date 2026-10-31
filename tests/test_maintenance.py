@@ -300,9 +300,10 @@ async def test_the_weekly_checks_find_archived_repositories_and_replacements(tmp
     [market] = by_signal(rig, "marketplace")
     assert market.variant == "suggestion"
     fetched = len(rig.fetched)
-    # Not again until a week has passed or a new post appears.
+    # Not again until a week has passed or a new post appears, whatever the trigger says.
     rig.now += timedelta(days=1)
     await rig.scan()
+    await rig.scan("weekly")
     assert not any("api.github.com" in u for u in rig.fetched[fetched:])
     assert by_signal(rig, "replacement") and by_signal(rig, "repository")
 
@@ -373,7 +374,7 @@ async def test_missing_evidence_never_resolves_a_finding(tmp_path: Path) -> None
     rig.offline = True
     rig.now += timedelta(days=8)
     # Offline (and the cache stale): the notes, repository and replacement findings stay as they were.
-    await rig.scan("weekly")
+    await rig.scan()
     assert {f.key for f in by_signal(rig, "notes")} == notes
     assert by_signal(rig, "repository") and by_signal(rig, "replacement")
 

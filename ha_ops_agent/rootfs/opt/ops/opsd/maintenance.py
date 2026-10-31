@@ -47,10 +47,11 @@ Acting: nothing fixes itself. For a new deprecation or replacement the capabilit
 
 Integration replacement is always a plan the admin carries out.
 
-Cadence: after every daily health check (local signals, the cached release index); the GitHub
-checks weekly or when a new release post appears; and before each update plan when the last scan is
-older than `STALE_BEFORE_UPDATE`. The update rule asks for a Core update whose version reaches the
-removal version of an unresolved deprecation from a repair or the release notes (`removal_block`).
+Cadence: after every health cycle, whatever its trigger (local signals, the cached release index); the
+GitHub checks when the last ones are at least a week old or a new release post appears; and before each
+update plan when the last scan is older than `STALE_BEFORE_UPDATE`. The update rule asks for a Core
+update whose version reaches the removal version of an unresolved deprecation from a repair or the
+release notes (`removal_block`).
 """
 
 import hashlib
@@ -641,8 +642,7 @@ class MaintenanceManager:
         else:
             failed |= {"notes", "marketplace"}
         full_at = info.get("full_at")
-        full = (trigger == "weekly" or not full_at or newest != info.get("newest")
-                or now - datetime.fromisoformat(str(full_at)) >= WEEK)  # fmt: skip
+        full = not full_at or newest != info.get("newest") or now - datetime.fromisoformat(str(full_at)) >= WEEK
         found = from_repairs(gathered.issues, installed) + from_logs(gathered.logs, now)
         found += self._unmigrated(from_notes(posts, inv, installed)) + marketplace(posts, inv)
         if full and self.evidence is not None:

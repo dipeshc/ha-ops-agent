@@ -60,7 +60,9 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   `test_repairs_logs_and_notes_become_deprecations_with_their_removal`,
   `test_the_post_parser_keeps_headings_and_new_integrations_and_fails_closed`,
   `test_an_unrecognised_post_is_a_problem_and_never_cached`.
-- M5. **Weekly GitHub checks** (or when a newer release post appears): a
+- M5. **Weekly GitHub checks**, run by a scan when the last ones are at
+  least 7 days old or a newer release post appears (no trigger forces
+  them): a
   custom integration whose manifest's GitHub repository is archived becomes
   a deprecation without a removal date; a custom integration whose domain
   Core has (its `homeassistant/components/<domain>` listing holds a
@@ -227,8 +229,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 ## Cadence and the update rule
 
 - M25. A scan runs after every health cycle, whatever its trigger (local
-  signals and the cached release index), with the GitHub checks weekly or when a newer
-  release post appears, and before a deciding update plan (`window`,
+  signals and the cached release index), with the GitHub checks of M5 when
+  they are due, and before a deciding update plan (`window`,
   `manual`) when the last scan is older than 26 hours. A scan never raises:
   a failure keeps the earlier findings. Test
   `test_the_scan_is_due_before_an_update_only_when_it_is_old`.

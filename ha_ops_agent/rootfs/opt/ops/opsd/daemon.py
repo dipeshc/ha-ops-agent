@@ -1141,19 +1141,26 @@ class Daemon:
     async def liveness_loop(self) -> None:
         while True:
             await asyncio.sleep(LIVENESS_INTERVAL_S)
-            try:
-                now = datetime.now(UTC)
-                await self.flush_held(now)
-                alive = await asyncio.to_thread(self.client.core_alive)
-                if alive:
-                    await self._core_up(now)
-                else:
-                    await self._core_down(now)
-                self._check_overdue(now)
-                # Time moves items too (an expiry, a daily re-surface, "today" on Home).
-                self.items_now()
-            except Exception:
-                _LOGGER.exception("liveness probe failed")
+            await self.liveness_pass()
+
+    async def liveness_pass(self) -> None:
+        """One minute: held pushes, Core, the overdue check, then the items' tick."""
+        try:
+            now = datetime.now(UTC)
+            await self.flush_held(now)
+            alive = await asyncio.to_thread(self.client.core_alive)
+            if alive:
+                await self._core_up(now)
+            else:
+                await self._core_down(now)
+            self._check_overdue(now)
+        except Exception:
+            _LOGGER.exception("liveness probe failed")
+        # Time moves items too (a recheck, a daily re-surface): on its own, so a failure above never skips it.
+        try:
+            self.items_now()
+        except Exception:
+            _LOGGER.exception("item tick failed")
 
     # ------------------------------------------------------------- dry run
 

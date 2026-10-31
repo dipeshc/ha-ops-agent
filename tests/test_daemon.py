@@ -828,3 +828,16 @@ async def test_agent_push_cannot_impersonate_a_safety_push(h: Harness) -> None:
     agent, safety = h.pushes()[-2:]
     assert agent["title"] == "Agent: Ops Agent: Core is back" and agent["data"]["tag"] == "ha-ops-agent"
     assert safety["title"] == "Ops Agent: critical" and safety["data"]["tag"] == "ha-ops-fallback"
+
+
+async def test_the_item_tick_survives_a_failed_minute(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    d = h.daemon()
+    ticks: list[int] = []
+
+    async def broken(now: datetime) -> str | None:
+        raise RuntimeError("the relay is down")
+
+    monkeypatch.setattr(d, "flush_held", broken)
+    monkeypatch.setattr(d, "items_now", lambda: ticks.append(1))
+    await d.liveness_pass()
+    assert ticks == [1]

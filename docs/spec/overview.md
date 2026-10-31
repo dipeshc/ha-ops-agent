@@ -108,7 +108,9 @@ These hold at every stage; each has tests named in the owning document.
   jobs are busy) and the "Core is back" push plus a health cycle on
   recovery, request an overdue check after 26 hours, and tick the items
   (the rechecks and the pushes time made due,
-  [items-and-pushes.md](items-and-pushes.md) I5b, N1).
+  [items-and-pushes.md](items-and-pushes.md) I5b, N1). The tick runs on its
+  own even when an earlier step of that minute failed. Test
+  `test_the_item_tick_survives_a_failed_minute`.
 - D3. The watchdog target is `/healthz` on the panel port. SIGTERM cancels
   the main task and drains in-flight pushes for at most 2.5 seconds; s6
   restarts the daemon on a non-zero exit.

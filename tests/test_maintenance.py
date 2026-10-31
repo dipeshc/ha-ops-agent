@@ -122,7 +122,6 @@ class Rig:
 
         self.book = ItemBook(self.store, Hub(), tz=lambda: BERLIN, context=lambda: Context(acting=self.acting),
                              send=send, clock=lambda: self.now)  # fmt: skip
-        self.book.sync()  # the upgrade backfill: silent
 
     def fetch(self, url: str) -> str:
         self.fetched.append(url)
@@ -151,7 +150,6 @@ class Rig:
     async def scan(self, trigger: str = "daily") -> dict[str, Any]:
         result = await self.manager.scan(trigger)
         assert result["result"] == "ok", result
-        self.book.sync()
         return result
 
     def items(self) -> dict[str, dict[str, Any]]:
@@ -346,7 +344,6 @@ async def test_an_acknowledged_deprecation_asks_again_one_release_closer(tmp_pat
     await rig.scan()
     near = rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]
     assert rig.book.ack(near, now=rig.now)
-    rig.book.sync()
     assert rig.items()[near["title"]]["state"] == "proposed"
     rig.installed, rig.now = "2030.3.0", rig.now + timedelta(days=30)
     await rig.scan()
@@ -364,7 +361,6 @@ async def test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home(tmp_path:
     assert item["state"] == "done" and item["gist"].startswith("resolved")
     candidate = by_signal(rig, "replacement")[0]
     assert rig.manager.hide(candidate.key)
-    rig.book.sync()
     hidden = rig.items()[f"acme_weather: {candidate.what}"]
     assert hidden["state"] == "cancelled" and hidden["gist"].startswith("hidden by you") and not hidden["needs"]
 
@@ -469,7 +465,7 @@ async def test_a_dashboard_plan_waits_for_approval_and_never_targets_another_das
     assert maintenance.dashboard_plan(other.store, card.key) is None
     # In observe mode the plan is shown, without the action and without a push.
     rig.acting = False
-    rig.book.sync()
+    rig.book.recompose()  # the options changed: the add-on restarted
     shown = rig.items()[item["title"]]
     assert shown["state"] == "proposed" and "act" in shown["gist"]
 

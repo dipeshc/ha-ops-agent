@@ -2,9 +2,8 @@
 
 Every surface reads the same record: the Home sections and the Needs you
 badge (`api/home`), an item's page (`api/items/<id>`), History, the push
-for that item, and the older views (Activity's "needs admin", the update
-approvals, tasks and changes, which carry their item's id and state).
-Nothing counts or infers "Needs you" anywhere else.
+for that item, and `sensor.ops_agent`. Nothing counts or infers "Needs you"
+anywhere else.
 
 The record (`items` in the store, `item_events` for its timeline):
 
@@ -21,16 +20,17 @@ The record (`items` in the store, `item_events` for its timeline):
   (when the daemon last observed the facts behind it) changes without a new
   revision.
 
-Derived items are recomputed by `ItemBook.sync` from the records that run
-the house's processes (update runs and jobs, approvals, change proposals,
-house facts, tasks, the health check's open items): the items are their
-one view, so a resolved process can never leave a stale "needs you" card.
-An item whose source disappears is resolved. Maintenance items (`opsd.maintenance`) are derived
-from the stored findings, their plans and their dashboard plans. A `follows` child (today: the
-Supervisor's `reboot_required` issue, which follows the OS update that
-needs the reboot) waits on its parent and is done when the parent is done.
-Activity entries that belong to no process (a health check, a reload) are
-standalone items written by `ActivityLog`.
+Items are written at their source. Every store write records what it touched (an update job or run,
+an approval, a change, a house fact, a task, a kv flag); before that transaction commits, the book
+composes the items those records show (`Composer`) and writes them with their events, so an item and
+its source never disagree, even after a crash. The health check's save of its open items, and each
+maintenance scan, write their own groups: what a group no longer lists is resolved with the group's
+reason (cleared, resolved, superseded). Nothing polls or re-derives. Time moves only what says when:
+an item may carry `source.recheck_at` (a health item that asks only once it lasts, a rejection that
+expires), and the minute tick recomposes it then. A `follows` child (the Supervisor's
+`reboot_required` issue, the host reboot an OS update made) waits on its parent and is done when the
+parent is done. Activity entries that belong to no process (a health check, a reload) are standalone
+items written by `ActivityLog`.
 
 Pushes (by design): none for routine results, summaries or
 digests. The book pushes only when an item enters Needs you (an approval to
@@ -46,7 +46,8 @@ import logging
 import re
 import sqlite3
 import statistics
-from collections.abc import Awaitable, Callable, Mapping
+import threading
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
@@ -59,8 +60,16 @@ from opsd.conversation import clean_text
 from opsd.live import Hub
 from opsd.notify import panel_url
 from opsd.policy import Tier, same_version
-from opsd.store import JOB_FINAL, Store, StoreError, UpdateJob
-from opsd.updates import ABORT_FAILED_KEY, REBOOT_HELP, needs_admin, waits_quietly
+from opsd.store import JOB_FINAL, Store, StoreError, Task, Touched, UpdateJob
+from opsd.updates import (
+    ABORT_FAILED_KEY,
+    FAILED_ACK_KEY,
+    FAILED_KEY,
+    PAUSED_KEY,
+    REBOOT_HELP,
+    needs_admin,
+    waits_quietly,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,7 +94,6 @@ RETRY = timedelta(minutes=15)
 # Outcomes that count as delivered: sent, relayed while Core was down, or held for after quiet hours.
 DELIVERED = frozenset({"sent", "relayed", "held"})
 PUSH_BODY = 400
-BACKFILL_KEY = "items.backfill"
 ACK_KEY = "item.ack:"
 REBOOT_SUBJECT = "reboot:"
 
@@ -185,7 +193,8 @@ class Spec:
     since: str | None = None
     created: str | None = None
     as_of: str | None = None
-    # Internal: what an action binds to (entity, plan run, job, change, task, health key).
+    # Internal: what an action binds to (entity, plan run, job, change, task, health key), and when to
+    # compose it again (`recheck_at`).
     source: dict[str, Any] = field(default_factory=dict)
     actor: str = "daemon"
     event: str | None = None
@@ -195,7 +204,7 @@ class Spec:
 
 @dataclass(slots=True)
 class Context:
-    """What the derivation reads besides the store (from the daemon, or a test)."""
+    """What the composition reads besides the store (from the daemon, or a test)."""
 
     window: str = "04:00"
     gate: str | None = None
@@ -205,6 +214,12 @@ class Context:
     redact: Callable[[str], str] = lambda text: text
     # Act mode: a dashboard plan can be applied (observe mode shows it without the action).
     acting: bool = False
+
+
+def _split(subject: str) -> tuple[str, str]:
+    """`entity@version` -> (entity, version)."""
+    entity, _, version = subject.rpartition("@")
+    return entity, version
 
 
 def need(kind: str, text: str, primary: dict[str, Any], secondary: list[dict[str, Any]] | None = None, *,
@@ -225,37 +240,73 @@ def acked(store: Store, key: str, token: str) -> bool:
         return False
 
 
-# ---------------------------------------------------------------- derivation
+# ------------------------------------------------------------ composition
 
 
-class Deriver:
-    """Builds every derived item's `Spec` from the store (pure reads)."""
+# The kv flags an update item shows (the gate, the paused switch, a failed night and its acknowledgement).
+_UPDATE_FLAGS = (PAUSED_KEY, FAILED_KEY, FAILED_ACK_KEY)
+# The maintenance state's kv keys (`opsd.maintenance`: findings, plans, dashboard plans, results, hidden).
+_MAINTENANCE_STATE = "maintenance:"
+
+
+@dataclass(slots=True)
+class Sources:
+    """What update items are composed from: the latest plan, recent jobs and the approvals (read once)."""
+
+    latest: dict[str, Any] | None
+    plan: dict[str, dict[str, Any]]
+    plan_at: datetime | None
+    jobs: list[UpdateJob]
+    by_subject: dict[str, UpdateJob]
+    live: dict[str, dict[str, Any]]
+    decided: dict[str, dict[str, Any]]
+    active: dict[str, Any] | None
+
+    @classmethod
+    def read(cls, store: Store, now: datetime) -> Sources:
+        runs = store.recent_update_runs(limit=1)
+        latest = runs[0] if runs else None
+        plan = {str(i.get("entity_id")): i for i in (latest or {}).get("plan", []) if isinstance(i, dict)}
+        jobs = store.recent_update_jobs(since=now - JOBS_SINCE)
+        live: dict[str, dict[str, Any]] = {}
+        decided: dict[str, dict[str, Any]] = {}
+        for found in store.approvals(limit=200):  # newest first
+            if is_change(found) or is_dashboard(found):
+                continue
+            (live if found["state"] in LIVE else decided).setdefault(str(found["subject"]), found)
+        return cls(latest=latest, plan=plan, plan_at=_parse((latest or {}).get("created_at")), jobs=jobs,
+                   by_subject={f"{j.entity_id}@{j.to_version}": j for j in jobs}, live=live, decided=decided,
+                   active=store.active_update_run())  # fmt: skip
+
+    def subjects(self) -> dict[str, tuple[str, str]]:
+        """Every update the plan, a recent job or a live approval speaks for (`entity@version`)."""
+        found: dict[str, tuple[str, str]] = {}
+        for entity, planned in self.plan.items():
+            if planned.get("latest") and (approvable(planned) or (planned.get("tier") == Tier.AUTO
+                                                                  and not planned.get("held"))):  # fmt: skip
+                found[f"{entity}@{planned['latest']}"] = (entity, str(planned["latest"]))
+        for subject, job in self.by_subject.items():
+            found.setdefault(subject, (job.entity_id, job.to_version))
+        for subject in self.live:
+            if subject.startswith(REBOOT_SUBJECT) or "@" not in subject:
+                continue
+            entity, version = subject.rsplit("@", 1)
+            found.setdefault(subject, (entity, version))
+        return found
+
+    def plan_only(self, subject: str) -> bool:
+        """Only the plan speaks for it (no job, no live approval): what it needs is the plan's classification."""
+        return subject not in self.by_subject and subject not in self.live
+
+
+class Composer:
+    """What one source record's item says now (pure reads). The book calls it at each transition."""
 
     def __init__(self, store: Store, ctx: Context, now: datetime, tz: tzinfo) -> None:
         self.store = store
         self.ctx = ctx
         self.now = now
         self.tz = tz
-        self.specs: dict[str, Spec] = {}
-        # The latest plan's pending updates, by entity (for an update item that is no longer derived).
-        self.plan: Mapping[str, Mapping[str, Any]] = {}
-        # When that plan was made (None: no plan yet), and the update items only that plan speaks for (no job, no
-        # live approval): what they need is the plan's classification, which an earlier rule may have made.
-        self.plan_at: datetime | None = None
-        self.plan_only: set[str] = set()
-
-    def run(self) -> dict[str, Spec]:
-        self.updates()
-        self.changes()
-        self.facts()
-        self.tasks()
-        self.health()
-        self.maintenance()
-        self.follows()
-        return self.specs
-
-    def add(self, spec: Spec) -> None:
-        self.specs[spec.key] = spec
 
     def _window_at(self) -> str:
         """The next update window, in UTC."""
@@ -279,48 +330,13 @@ class Deriver:
 
     # ---------------------------------------------------------------- updates
 
-    def updates(self) -> None:
-        store = self.store
-        runs = store.recent_update_runs(limit=1)
-        latest = runs[0] if runs else None
-        plan = {str(i.get("entity_id")): i for i in (latest or {}).get("plan", []) if isinstance(i, dict)}
-        self.plan = plan
-        self.plan_at = _parse((latest or {}).get("created_at"))
-        jobs = store.recent_update_jobs(since=self.now - JOBS_SINCE)
-        by_subject: dict[str, UpdateJob] = {}
-        for job in jobs:
-            by_subject[f"{job.entity_id}@{job.to_version}"] = job
-        approvals = [a for a in store.approvals(limit=200) if not is_change(a) and not is_dashboard(a)]
-        live: dict[str, dict[str, Any]] = {}
-        decided: dict[str, dict[str, Any]] = {}
-        for found in approvals:  # newest first
-            target = live if found["state"] in LIVE else decided
-            target.setdefault(str(found["subject"]), found)
-        active = store.active_update_run()
-        subjects: dict[str, tuple[str, str]] = {}
-        for entity, planned in plan.items():
-            if planned.get("latest") and (approvable(planned) or (planned.get("tier") == Tier.AUTO
-                                                                  and not planned.get("held"))):  # fmt: skip
-                subjects[f"{entity}@{planned['latest']}"] = (entity, str(planned["latest"]))
-        for subject, job in by_subject.items():
-            subjects.setdefault(subject, (job.entity_id, job.to_version))
-        for subject in live:
-            if subject.startswith(REBOOT_SUBJECT) or "@" not in subject:
-                continue
-            entity, version = subject.rsplit("@", 1)
-            subjects.setdefault(subject, (entity, version))
-        for subject, (entity, version) in subjects.items():
-            offered = plan.get(entity)
-            item = offered if offered is not None and same_version(offered.get("latest"), version) else None
-            spec = self._update(entity, version, item, by_subject.get(subject), live, decided, latest, active, jobs)
-            if spec is not None:
-                self.add(spec)
-                if subject not in by_subject and subject not in live:
-                    self.plan_only.add(spec.key)
-        for run in store.recent_update_runs(limit=30):
-            spec = self._window(run)
-            if spec is not None:
-                self.add(spec)
+    def update(self, entity: str, version: str, src: Sources) -> Spec | None:
+        """The item of one update (`entity@version`), or None when nothing speaks for it any more."""
+        subject = f"{entity}@{version}"
+        offered = src.plan.get(entity)
+        item = offered if offered is not None and same_version(offered.get("latest"), version) else None
+        return self._update(entity, version, item, src.by_subject.get(subject), src.live, src.decided, src.latest,
+                            src.active, src.jobs)  # fmt: skip
 
     def _update(self, entity: str, version: str, item: Mapping[str, Any] | None, job: UpdateJob | None,  # noqa: PLR0917
                 live: Mapping[str, dict[str, Any]], decided: Mapping[str, dict[str, Any]],
@@ -423,6 +439,8 @@ class Deriver:
             if rejected_at is not None and self.now - rejected_at < RECENT_REJECT:
                 base.state, base.gist, base.since = "cancelled", "rejected by you", rejected.get("decided_at")
                 base.actor, base.event = "you", "Rejected by you"
+                # It asks again once the week is over.
+                base.source["recheck_at"] = _iso(rejected_at + RECENT_REJECT)
                 return base
         os_reboot = " The host reboots once to activate it." if kind == "os" else ""
         secondary = [] if kind == "os" else [act("approve_now", "Install now")]
@@ -543,7 +561,7 @@ class Deriver:
             return base
         return None
 
-    def _window(self, run: Mapping[str, Any]) -> Spec | None:
+    def window(self, run: Mapping[str, Any]) -> Spec | None:
         """An update night that backed up or installed (report-only plans are no item: the updates carry them)."""
         if run.get("mode") != "act":
             return None
@@ -598,14 +616,7 @@ class Deriver:
 
     # ---------------------------------------------------------------- changes
 
-    def changes(self) -> None:
-        live = {a["subject"]: a for a in self.store.approvals(states=LIVE, limit=200) if is_change(a)}
-        for row in self.store.changes(limit=30):
-            spec = self._change(row, live)
-            if spec is not None:
-                self.add(spec)
-
-    def _change(self, row: Mapping[str, Any], live: Mapping[str, dict[str, Any]]) -> Spec | None:
+    def change(self, row: Mapping[str, Any], live: Mapping[str, dict[str, Any]]) -> Spec | None:
         cid = int(row["id"])
         state = str(row["state"])
         if state == "refused":
@@ -670,58 +681,58 @@ class Deriver:
                 return None
         return spec
 
-    def facts(self) -> None:
-        for fact in self.store.list_facts(now=self.now):
-            if fact.get("status") != "pending" or fact.get("change_id"):
-                continue
-            key = f"fact:{fact['id']}"
-            text = clean_text(str(fact.get("text") or ""), 300)
-            self.add(Spec(key=key, kind="proposal", title="House fact without a proposal", state="waiting",
-                          kicker="House fact", gist=text[:120], created=str(fact.get("created_at") or ""),
-                          since=str(fact.get("created_at") or ""), source={"fact": int(fact["id"])},
-                          need=need("ack", f"Not proposed as a change: {text}", act("dismiss", "Reject"))))  # fmt: skip
+    def fact(self, fact: Mapping[str, Any]) -> Spec | None:
+        """A house fact noted without a change proposal: the admin acknowledges it."""
+        key = f"fact:{fact['id']}"
+        if fact.get("status") != "pending" or fact.get("change_id"):
+            return None
+        text = clean_text(str(fact.get("text") or ""), 300)
+        return Spec(key=key, kind="proposal", title="House fact without a proposal", state="waiting",
+                    kicker="House fact", gist=text[:120], created=str(fact.get("created_at") or ""),
+                    since=str(fact.get("created_at") or ""), source={"fact": int(fact["id"])},
+                    need=need("ack", f"Not proposed as a change: {text}", act("dismiss", "Reject")))  # fmt: skip
 
     # ------------------------------------------------------------------ tasks
 
-    def tasks(self) -> None:
-        store = self.store
-        rows = store.list_tasks("upcoming", now=self.now) + store.list_tasks("done", now=self.now)
-        for task in rows:
-            if task.kind == "retry":
-                continue
-            investigation = task.kind == "followup" and bool(task.payload.get("investigation"))
-            kind = "investigation" if investigation else "reminder"
-            kicker = {"reminder": "Reminder", "followup": "Follow-up"}.get(task.kind, task.kind.capitalize())
-            if investigation:
-                kicker = "Investigation"
-            note = task.payload.get("note")
-            spec = Spec(key=f"task:{task.id}", kind=kind, title=clean_text(task.title, 120), state="scheduled",
-                        kicker=kicker, ref=f"#{task.id}", gist=clean_text(str(note), 120) if isinstance(note, str)
-                        and note else ("investigation" if investigation else "reminder"),
-                        source={"task": task.id, "thread": task.thread_id}, as_of=task.updated_at)  # fmt: skip
-            match task.state:
-                case "pending":
-                    spec.when = task.next_fire_at
-                    spec.actions = [act("stop", "Stop", "danger")] if investigation else [act("cancel", "Cancel",
-                                                                                              "text")]  # fmt: skip
-                    if investigation:
-                        spec.state = "running"
-                case "running" | "waiting_approval":
+    @staticmethod
+    def task(task: Task) -> Spec | None:
+        """A reminder, follow-up or investigation (never a system task or a chat retry)."""
+        if task.system_key is not None or task.kind not in ("reminder", "followup"):
+            return None
+        investigation = task.kind == "followup" and bool(task.payload.get("investigation"))
+        kind = "investigation" if investigation else "reminder"
+        kicker = "Investigation" if investigation else {"reminder": "Reminder", "followup": "Follow-up"}[task.kind]
+        note = task.payload.get("note")
+        spec = Spec(key=f"task:{task.id}", kind=kind, title=clean_text(task.title, 120), state="scheduled",
+                    kicker=kicker, ref=f"#{task.id}", gist=clean_text(str(note), 120) if isinstance(note, str)
+                    and note else ("investigation" if investigation else "reminder"),
+                    source={"task": task.id, "thread": task.thread_id}, as_of=task.updated_at,
+                    created=task.updated_at)  # fmt: skip
+        match task.state:
+            case "pending":
+                spec.when = task.next_fire_at
+                spec.actions = [act("stop", "Stop", "danger")] if investigation else [act("cancel", "Cancel",
+                                                                                          "text")]  # fmt: skip
+                if investigation:
                     spec.state = "running"
-                    if investigation:
-                        spec.actions = [act("stop", "Stop", "danger")]
-                case "done":
-                    spec.state, spec.since = "done", task.updated_at
-                case "cancelled":
-                    spec.state, spec.since = "cancelled", task.updated_at
-                case _:
-                    spec.state, spec.since = "failed", task.updated_at
-            self.add(spec)
+            case "running":
+                spec.state = "running"
+                if investigation:
+                    spec.actions = [act("stop", "Stop", "danger")]
+            case "done":
+                spec.state, spec.since = "done", task.updated_at
+            case "cancelled":
+                spec.state, spec.since = "cancelled", task.updated_at
+            case _:
+                spec.state, spec.since = "failed", task.updated_at
+        return spec
 
     # ----------------------------------------------------------------- health
 
-    def health(self) -> None:
+    def health(self) -> list[Spec]:
+        """The health check's open items (`open-items.json`)."""
         ctx = self.ctx
+        specs = []
         for raw in ctx.health_items:
             key = f"health:{raw.get('key')}"
             severity = str(raw.get("severity") or "info")
@@ -750,16 +761,20 @@ class Deriver:
                 spec.state, spec.need = "proposed", None
                 spec.gist = f"{severity}: watching; asks you if it lasts past {after.astimezone(self.tz):%H:%M}"
                 spec.actions = [act("snooze", "Snooze 7 days"), act("accept", "Accept as normal", "text")]
-            self.add(spec)
+                spec.source["recheck_at"] = _iso(after)
+            specs.append(spec)
+        return specs
 
     # ------------------------------------------------------------ maintenance
 
-    def maintenance(self) -> None:
+    def maintenance(self) -> list[Spec]:
+        """One item per stored finding, with its plan, dashboard plan and result."""
         store = self.store
         scanned = maint.meta(store)
         installed = str(scanned.get("installed") or "")
         at = str(scanned.get("at") or "") or None
         live = {a["subject"]: a for a in store.approvals(states=LIVE, limit=200) if is_dashboard(a)}
+        specs = []
         for finding in maint.load(store):
             spec = self._maintenance(finding, installed, at, live)
             if maint.hidden(store, finding):
@@ -767,7 +782,8 @@ class Deriver:
                 spec = Spec(key=spec.key, kind=spec.kind, title=spec.title, state="cancelled", kicker=spec.kicker,
                             gist="hidden by you: not relevant here", facts=spec.facts, agent=spec.agent,
                             source={"finding": finding.key}, actor="you", pushes=False)  # fmt: skip
-            self.add(spec)
+            specs.append(spec)
+        return specs
 
     def _maintenance(self, finding: maint.Finding, installed: str, at: str | None,
                      live: Mapping[str, dict[str, Any]]) -> Spec:  # fmt: skip
@@ -870,54 +886,54 @@ class Deriver:
                 spec.since, spec.pushes = at, True
         return spec
 
-    def follows(self) -> None:
+    def follow(self, specs: list[Spec], parents: list[dict[str, Any]]) -> None:
         """Health items that an OS update explains follow it, so they never linger as a separate card.
 
-        The Supervisor's `reboot_required` issue follows the OS update that waits for its reboot (done when
-        that update is); "host rebooted since last check" follows the OS update whose reboot that boot was.
+        `parents`: the OS update items (as stored). The Supervisor's `reboot_required` issue follows the OS
+        update that waits for its reboot (done when that update is); "host rebooted since last check" follows
+        the OS update whose reboot that boot was.
         """
-        updates = [s for s in self.specs.values() if s.kind == "update" and s.source.get("kind") == "os"]
-        for spec in list(self.specs.values()):
+        for spec in specs:
             if not spec.key.startswith("health:host:reboot:"):
                 continue
             boot = spec.key.rsplit(":", 1)[-1]
-            for parent in updates:
-                job = self.store.update_job(int(parent.source.get("job") or 0)) if parent.source.get("job") else None
+            for parent in parents:
+                job_id = (parent.get("source") or {}).get("job")
+                job = self.store.update_job(int(job_id)) if job_id else None
                 reboot = _dict(job.target.get("reboot")) if job is not None else {}
                 if str(reboot.get("boot_after")) != boot:
                     continue
-                spec.follows, spec.need = parent.key, None
-                if parent.state == "done":
-                    spec.state, spec.gist = "done", f"expected: the reboot that activated {parent.title}"
-                    spec.since = parent.since
+                spec.follows, spec.need = str(parent["key"]), None
+                if parent["state"] == "done":
+                    spec.state, spec.gist = "done", f"expected: the reboot that activated {parent['title']}"
+                    spec.since = parent.get("resolved_at")
                 else:
-                    spec.state, spec.gist = "scheduled", f"the reboot for {parent.title}; checked with it"
+                    spec.state, spec.gist = "scheduled", f"the reboot for {parent['title']}; checked with it"
                 break
-        self._reboot_required()
-
-    def _reboot_required(self) -> None:
-        parents = [s for s in self.specs.values() if s.kind == "update" and s.source.get("kind") == "os"
-                   and (s.source.get("reboot") or (s.state == "running" and s.phase and s.phase.get("current") == 2)
-                        or s.state == "done")]  # fmt: skip
-        for spec in list(self.specs.values()):
+        waiting = [p for p in parents if (p.get("source") or {}).get("reboot") or p["state"] == "done"
+                   or (p["state"] == "running" and (p.get("phase") or {}).get("current") == 2)]  # fmt: skip
+        for spec in specs:
             if not spec.key.startswith("health:supervisor:reboot_required"):
                 continue
-            parent = next((p for p in parents if p.state != "done"), None) or next(iter(parents), None)
-            if parent is None:
+            if not waiting:
                 continue
-            spec.follows = parent.key
-            if parent.state == "done":
-                spec.state, spec.need, spec.gist = "done", None, f"cleared: {parent.title} is active"
-                spec.since = parent.since
-            elif parent.state not in TERMINAL:
+            parent = next((p for p in waiting if p["state"] != "done"), waiting[0])
+            spec.follows = str(parent["key"])
+            if parent["state"] == "done":
+                spec.state, spec.need, spec.gist = "done", None, f"cleared: {parent['title']} is active"
+                spec.since = parent.get("resolved_at")
+            elif parent["state"] not in TERMINAL:
                 spec.state, spec.need = "scheduled", None
-                spec.gist = f"clears when {parent.title} is active"
+                spec.gist = f"clears when {parent['title']} is active"
 
 
 # -------------------------------------------------------------------- the book
 
 
 Send = Callable[[Message], Awaitable[str]]
+# Why a group no longer lists an item it wrote (each group's own words; an update says its reason itself).
+_GONE = {"health": ("done", "cleared: not reported by the latest health check"),
+         "maint": ("done", "resolved: the latest maintenance scan no longer finds it")}  # fmt: skip
 
 
 class ItemBook:
@@ -934,72 +950,233 @@ class ItemBook:
         self.outbox: list[tuple[str, str, Message]] = []
         # Decided and not yet answered by the channel: never decided twice.
         self._pending: set[tuple[str, str]] = set()
-        self._syncing = False
         # A plan made before this start (by an earlier version, or under an earlier rule) may class an update
-        # differently from what this version will: until a plan of this process exists, no update item enters or
-        # leaves Needs you and none is pushed (an old plan could push a soaking minor as "needs your approval").
+        # differently from what this version will: until a plan of this process exists, no plan-only update item
+        # enters or leaves Needs you and none is pushed (an old plan could push a soaking minor as "needs your
+        # approval").
         self.started = clock().replace(microsecond=0)
-        self.plan_stale = False
-        self._held: set[str] = set()
+        # Items written since the last `flush` (published, then pushes decided); writes come from any thread.
+        self._written: list[dict[str, Any]] = []
+        self._written_lock = threading.Lock()
+        # Set by the daemon: schedules `flush` and the deliveries on its loop (a write may come from any thread).
+        self.on_change: Callable[[], None] | None = None
+        store.observer = self._observe
+        store.committed = self._committed
 
-    # ------------------------------------------------------------------- sync
+    # ------------------------------------------------------------ the sources
 
-    def sync(self) -> list[dict[str, Any]]:
-        """Bring every derived item in line with the daemon's records; returns the items that changed."""
-        if self._syncing:
-            return []
-        self._syncing = True
-        try:
-            return self._sync()
-        except (StoreError, sqlite3.Error) as err:
-            _LOGGER.error("item sync failed", extra={"error": str(err)[:200]})
-            return []
-        except Exception:
-            # A view must never take the daemon down: the records it reads stay the source of truth.
-            _LOGGER.exception("item sync crashed")
-            return []
-        finally:
-            self._syncing = False
+    def _observe(self, touched: list[Touched]) -> None:
+        """Inside a write's transaction: write the items its records show."""
+        updates: set[str] | None = set()
+        runs: set[int] = set()
+        changes: set[int] = set()
+        facts: set[int] = set()
+        tasks: set[int] = set()
+        maintenance = False
+        for kind, ref in touched:
+            if kind == "job":
+                job = self.store.update_job(int(ref))
+                if job is not None and updates is not None:
+                    updates.add(f"{job.entity_id}@{job.to_version}")
+                if job is not None:
+                    runs.add(job.run_id)
+            elif kind == "run":
+                updates = None
+                runs.add(int(ref))
+            elif kind == "approval":
+                found = self.store.approval(str(ref))
+                subject = str((found or {}).get("subject") or "")
+                if subject.startswith("change:"):
+                    changes.add(int(subject.split(":")[1]))
+                elif subject.startswith("dashboard:"):
+                    maintenance = True
+                elif updates is not None and "@" in subject:
+                    updates.add(subject.removeprefix(REBOOT_SUBJECT))
+            elif kind == "change":
+                changes.add(int(ref))
+            elif kind == "fact":
+                facts.add(int(ref))
+            elif kind == "task":
+                tasks.add(int(ref))
+            elif kind == "item":
+                # A standalone entry (`ActivityLog`): published and its push decided like any other.
+                found = self.store.item(str(ref))
+                if found is not None:
+                    self._note(found)
+            elif kind == "kv":
+                key = str(ref)
+                if key in _UPDATE_FLAGS or key.startswith(ABORT_FAILED_KEY):
+                    updates = None
+                    runs.update(int(r["id"]) for r in self.store.recent_update_runs(limit=30))
+                elif key.startswith(f"{ACK_KEY}updates:") and updates is not None:
+                    updates.add(key.removeprefix(f"{ACK_KEY}updates:"))
+                elif key.startswith(f"{ACK_KEY}window:"):
+                    runs.add(int(key.rsplit(":", 1)[1]))
+                elif key.startswith(f"{ACK_KEY}change:"):
+                    changes.add(int(key.rsplit(":", 1)[1]))
+                elif key.startswith((f"{ACK_KEY}maint:", _MAINTENANCE_STATE)):
+                    maintenance = True
+        if not (updates is None or updates or runs or changes or facts or tasks or maintenance):
+            return
+        composer = self._composer()
+        if updates is None or updates:
+            self._updates(composer, updates)
+        for run_id in sorted(runs):
+            self._window(composer, run_id)
+        for change_id in sorted(changes):
+            self._change(composer, change_id)
+        for fact_id in sorted(facts):
+            self._fact(composer, fact_id)
+        for task_id in sorted(tasks):
+            task = self.store.get_task(task_id)
+            spec = composer.task(task) if task is not None else None
+            if spec is not None:
+                self._write(spec)
+        if maintenance:
+            self._maintenance(composer)
 
-    def _sync(self) -> list[dict[str, Any]]:
-        now = self._clock()
-        ctx = self._context()
-        first = self.store.kv_get(BACKFILL_KEY) == ""
-        deriver = Deriver(self.store, ctx, now, self._tz())
-        specs = deriver.run()
-        self.plan_stale = deriver.plan_at is not None and deriver.plan_at < self.started
-        existing = {r["key"]: r for r in self.store.items_all() if not str(r["key"]).startswith("activity:")}
-        # Held until a fresh plan: plan-only update items, and update items the stale plan no longer derives.
-        self._held = (
-            deriver.plan_only | {k for k, r in existing.items() if r["kind"] == "update" and k not in specs}
-            if self.plan_stale
-            else set()
-        )
-        changed: list[dict[str, Any]] = []
-        work = [(spec, existing.get(key)) for key, spec in specs.items()]
-        work += [(self._vanished(old, deriver.plan), old) for key, old in existing.items()
-                 if key not in specs and not (old["resolved_at"] and not old["needs"])]  # fmt: skip
-        for spec, old in work:
-            if spec.key in self._held and in_needs(spec.state, spec.need) != bool(old is not None and old["needs"]):
+    def _composer(self) -> Composer:
+        return Composer(self.store, self._context(), self._clock(), self._tz())
+
+    @property
+    def plan_stale(self) -> bool:
+        """The latest plan predates this start: plan-only update items wait for a fresh one (`started`)."""
+        runs = self.store.recent_update_runs(limit=1)
+        made = _parse(runs[0]["created_at"]) if runs else None
+        return made is not None and made < self.started
+
+    def _updates(self, composer: Composer, subjects: set[str] | None) -> None:
+        """Update items: these subjects, or (None) every one, resolving those nothing speaks for any more."""
+        src = Sources.read(self.store, composer.now)
+        stale = src.plan_at is not None and src.plan_at < self.started
+        targets = src.subjects() if subjects is None else {s: _split(s) for s in subjects if "@" in s}
+        if subjects is None:
+            for stored in self.store.items_all(open_only=True, prefix="updates:"):
+                found = str(stored["key"]).removeprefix("updates:")
+                if "@" in found:
+                    targets.setdefault(found, _split(found))
+        os_changed = False
+        for subject, (entity, version) in targets.items():
+            key = update_key(entity, version)
+            old = self.store.item_by_key(key)
+            spec = composer.update(entity, version, src)
+            if spec is None:
+                if old is None or (old["resolved_at"] and not old["needs"]):
+                    continue
+                spec = self._update_gone(old, src.plan)
+            if stale and src.plan_only(subject) and in_needs(spec.state, spec.need) != bool(old and old["needs"]):
                 continue
-            try:
-                record = self._apply(spec, old, now)
-            except (StoreError, sqlite3.Error) as err:
-                # One bad record (a CHECK it breaks) must not stop every other item from updating.
-                _LOGGER.error("item not written", extra={"key": spec.key[:120], "error": str(err)[:200]})
-                continue
-            if record is not None:
-                changed.append(record)
-        if first:
-            # The upgrade: what already waits was pushed by the version before; do not push it again now.
-            self.store.kv_set(BACKFILL_KEY, now.isoformat(timespec="seconds"), now=now)
-        self._decide_pushes(now, silent=first)
-        if changed:
-            count = self.store.needs_count()
-            for record in changed:
-                self.hub.publish("item", None, {"id": record["id"], "revision": record["revision"],
-                                                "state": record["state"], "needs_count": count})  # fmt: skip
-        return changed
+            written = self._write(spec, old)
+            os_changed |= written is not None and spec.source.get("kind") == "os"
+        if os_changed:
+            self._health(composer)
+
+    @staticmethod
+    def _update_gone(old: Mapping[str, Any], plan: Mapping[str, Mapping[str, Any]]) -> Spec:
+        """Nothing speaks for this update any more: resolved with the reason, never left waiting. An update is
+        never called installed here (that is the job's own item, from the version it confirmed)."""
+        entity, _, version = str(old["key"]).removeprefix("updates:").rpartition("@")
+        offered = plan.get(entity)
+        if offered is not None and same_version(offered.get("latest"), version):
+            gist = f"not offered now: {daemon_reason(offered)}"
+        elif offered is not None:
+            gist = f"superseded: Home Assistant now offers {clean_text(str(offered.get('latest')), 40)}"
+        else:
+            gist = "Home Assistant no longer lists it as pending"
+        return ItemBook._resolved(old, "cancelled", gist)
+
+    @staticmethod
+    def _resolved(old: Mapping[str, Any], state: str, gist: str) -> Spec:
+        return Spec(key=str(old["key"]), kind=str(old["kind"]), title=str(old["title"]), state=state, gist=gist,
+                    kicker=str(old.get("kicker") or ""), ref=str(old.get("ref") or ""), follows=old.get("follows"),
+                    source=dict(old.get("source") or {}), pushes=False)  # fmt: skip
+
+    def _window(self, composer: Composer, run_id: int) -> None:
+        run = self.store.update_run(run_id)
+        spec = composer.window(run) if run is not None else None
+        if spec is not None:
+            self._write(spec)
+
+    def _change(self, composer: Composer, change_id: int) -> None:
+        row = self.store.change(change_id)
+        if row is None:
+            return
+        live = {a["subject"]: a for a in self.store.approvals(states=LIVE, limit=200) if is_change(a)}
+        spec = composer.change(row, live)
+        if spec is not None:
+            self._write(spec)
+
+    def _fact(self, composer: Composer, fact_id: int) -> None:
+        fact = self.store.fact(fact_id)
+        if fact is None:
+            return
+        spec = composer.fact(fact)
+        old = self.store.item_by_key(f"fact:{fact_id}")
+        if spec is None:
+            if old is None or (old["resolved_at"] and not old["needs"]):
+                return
+            if fact.get("change_id"):
+                spec = self._resolved(old, "cancelled", f"proposed as config change #{fact['change_id']}")
+            elif fact.get("status") == "applied":
+                spec = self._resolved(old, "done", "applied")
+            else:
+                spec = self._resolved(old, "cancelled", "rejected")
+                spec.actor = "you"
+        self._write(spec, old)
+
+    def _group(self, prefix: str, specs: Iterable[Spec]) -> None:
+        """A group's current items; the ones it no longer lists resolve with the group's reason."""
+        listed = set()
+        for spec in specs:
+            listed.add(spec.key)
+            self._write(spec)
+        state, gist = _GONE[prefix]
+        for old in self.store.items_all(open_only=True, prefix=f"{prefix}:"):
+            if old["key"] not in listed:
+                self._write(self._resolved(old, state, gist), old)
+
+    def _health(self, composer: Composer) -> None:
+        specs = composer.health()
+        since = _iso(composer.now - JOBS_SINCE)
+        parents = [r for r in self.store.items_all(prefix="updates:") if (r.get("source") or {}).get("kind") == "os"
+                   and (not r["resolved_at"] or r["updated_at"] >= since)]  # fmt: skip
+        parents.sort(key=lambda r: (str(r["at"]), str(r["id"])), reverse=True)
+        composer.follow(specs, parents)
+        self._group("health", specs)
+
+    def _maintenance(self, composer: Composer) -> None:
+        self._group("maint", composer.maintenance())
+
+    def write_health(self) -> list[dict[str, Any]]:
+        """The health check saved its open items: write them (cleared ones resolve, new ones enter Needs you)."""
+        with self.store.atomic():
+            self._health(self._composer())
+        return self.flush() if self.on_change is None else []
+
+    def recompose(self) -> list[dict[str, Any]]:
+        """At start: the items that read the add-on options (the update gate and window, act mode)."""
+        with self.store.atomic():
+            composer = self._composer()
+            self._updates(composer, None)
+            for run in self.store.recent_update_runs(limit=30):
+                self._window(composer, int(run["id"]))
+            self._maintenance(composer)
+        return self.flush() if self.on_change is None else []
+
+    def tick(self) -> list[dict[str, Any]]:
+        """Every minute: recompose what asked to be (`recheck_at`), then decide the pushes time makes due."""
+        due = self.store.items_due(self._clock())
+        if due:
+            with self.store.atomic():
+                composer = self._composer()
+                updates = {str(r["key"]).removeprefix("updates:") for r in due if str(r["key"]).startswith("updates:")}
+                if updates:
+                    self._updates(composer, updates)
+                if any(str(r["key"]).startswith("health:") for r in due):
+                    self._health(composer)
+        return self.flush()
+
+    # ------------------------------------------------------------- writing
 
     @staticmethod
     def _material(spec: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -1009,7 +1186,20 @@ class ItemBook:
                 spec.get("phase"), spec.get("follows"), spec.get("agent"), spec.get("change"),
                 spec.get("footnote"), bool(spec.get("quiet")))  # fmt: skip
 
-    def _apply(self, spec: Spec, old: dict[str, Any] | None, now: datetime) -> dict[str, Any] | None:
+    def _write(self, spec: Spec, old: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Write `spec` over its stored record (read when `old` is not given); the record if it changed.
+
+        One bad record (a CHECK it breaks) never stops the others, nor the source's own write: it is logged.
+        """
+        try:
+            with self.store.atomic():
+                return self._put(spec, old if old is not None else self.store.item_by_key(spec.key))
+        except (StoreError, sqlite3.Error) as err:
+            _LOGGER.error("item not written", extra={"key": spec.key[:120], "error": str(err)[:200]})
+            return None
+
+    def _put(self, spec: Spec, old: dict[str, Any] | None) -> dict[str, Any] | None:
+        now = self._clock()
         fresh = {"kind": spec.kind, "title": spec.title, "state": spec.state, "gist": spec.gist,
                  "kicker": spec.kicker, "ref": spec.ref, "need": spec.need, "about": spec.about,
                  "actions": spec.actions, "phase": spec.phase, "follows": spec.follows, "facts": spec.facts,
@@ -1031,7 +1221,7 @@ class ItemBook:
         needs = in_needs(spec.state, spec.need)
         terminal = spec.state in TERMINAL
         revision = int(old["revision"]) + 1 if old else 1
-        # A new record takes its source's own times (the backfill); a change in this process is stamped now.
+        # A new record takes its source's own times; a change to a stored one is stamped now.
         needs_since: str | None = None
         if needs:
             if old is not None and old["needs"] and old["needs_since"]:
@@ -1069,31 +1259,35 @@ class ItemBook:
         self.store.add_item_event(ident, at=event_at, actor=spec.actor if spec.actor in ACTORS else "daemon",
                                   text=text, revision=revision)  # fmt: skip
         record["needs"] = needs
+        self._note(record)
         return record
 
-    @staticmethod
-    def _vanished(old: Mapping[str, Any], plan: Mapping[str, Mapping[str, Any]] | None = None) -> Spec:
-        """Its source no longer reports it: resolved, never left waiting. The words say the real reason; an update
-        is never called installed here (that is the job's own item, from the version it confirmed)."""
-        state, gist = "cancelled", "no longer pending"
-        key = str(old["key"])
-        prefix = key.split(":", 1)[0]
-        if prefix == "health":
-            state, gist = "done", "cleared: not reported by the latest health check"
-        elif prefix == "maint":
-            state, gist = "done", "resolved: the latest maintenance scan no longer finds it"
-        elif prefix == "updates":
-            entity, _, version = key.removeprefix("updates:").rpartition("@")
-            offered = (plan or {}).get(entity)
-            if offered is not None and same_version(offered.get("latest"), version):
-                gist = f"not offered now: {daemon_reason(offered)}"
-            elif offered is not None:
-                gist = f"superseded: Home Assistant now offers {clean_text(str(offered.get('latest')), 40)}"
-            else:
-                gist = "Home Assistant no longer lists it as pending"
-        return Spec(key=str(old["key"]), kind=str(old["kind"]), title=str(old["title"]), state=state, gist=gist,
-                    kicker=str(old.get("kicker") or ""), ref=str(old.get("ref") or ""), follows=old.get("follows"),
-                    source=dict(old.get("source") or {}), pushes=False)  # fmt: skip
+    def _note(self, record: dict[str, Any]) -> None:
+        """Remember a written record for `flush` (its latest revision once)."""
+        with self._written_lock:
+            self._written = [r for r in self._written if r["id"] != record["id"]] + [record]
+
+    def _committed(self) -> None:
+        if not self._written:
+            return
+        if self.on_change is not None:
+            self.on_change()
+        else:
+            self.flush()
+
+    def flush(self) -> list[dict[str, Any]]:
+        """Publish what was written and decide its pushes; returns the items that changed."""
+        with self._written_lock:
+            noted, self._written = self._written, []
+        # A record whose transaction rolled back after it was written is not published.
+        written = [r for r in noted if (self.store.item(str(r["id"])) or {}).get("revision") == r["revision"]]
+        if written:
+            count = self.store.needs_count()
+            for record in written:
+                self.hub.publish("item", None, {"id": record["id"], "revision": record["revision"],
+                                                "state": record["state"], "needs_count": count})  # fmt: skip
+        self._decide_pushes(self._clock())
+        return written
 
     # ------------------------------------------------------------------ pushes
 
@@ -1103,12 +1297,18 @@ class ItemBook:
         current = record.get("need") or {}
         return f"{record['state']}:{current.get('kind')}:{(current.get('primary') or {}).get('id', '')}"
 
-    def _decide_pushes(self, now: datetime, *, silent: bool) -> None:
+    def _held(self, record: Mapping[str, Any], stale: bool) -> bool:
+        """A plan-only update item while the plan predates this start (`plan_stale`)."""
+        source = record.get("source") or {}
+        return stale and record["kind"] == "update" and not source.get("job") and not source.get("approval")
+
+    def _decide_pushes(self, now: datetime) -> None:
         """Queue a push for each item that entered Needs you (or waited a day). It is recorded as pushed only
-        once the channel delivered it (`deliver`), so a restart or a failure never loses it. An update
-        item held for a fresh plan (`plan_stale`) waits for it."""
+        once the channel delivered it (`deliver`), so a restart or a failure never loses it. A plan-only update
+        item waits for a fresh plan (`plan_stale`)."""
+        stale = self.plan_stale
         for record in self.store.items_all(open_only=True):
-            if not record["needs"] or record["key"] in self._held:
+            if not record["needs"] or self._held(record, stale):
                 continue
             source = record.get("source") or {}
             current = record.get("need") or {}
@@ -1122,8 +1322,8 @@ class ItemBook:
             expires = _parse(current.get("expires_at"))
             if not due or (expires is not None and expires <= now) or (ident, key) in self._pending:
                 continue
-            if silent or not source.get("pushes", True):
-                # Nothing goes out for it (the upgrade backfill, the health check's own items): decided once.
+            if not source.get("pushes", True):
+                # Nothing goes out for it (the health check's own items): decided once.
                 self.store.set_item_fields(ident, push={"key": key, "at": _iso(now)})
                 continue
             self._pending.add((ident, key))
@@ -1149,7 +1349,8 @@ class ItemBook:
                        url=deep_link(str(record["id"])))  # fmt: skip
 
     async def deliver(self) -> list[str]:
-        """Send what `sync` decided (quiet hours and caps apply in the daemon's send), then record the outcome."""
+        """Send the pushes `flush` and `tick` decided (quiet hours and caps apply in the daemon's send), then record the
+        outcome."""
         outcomes = []
         queued, self.outbox = self.outbox, []
         latest = {ident: index for index, (ident, _, _) in enumerate(queued)}
@@ -1175,11 +1376,6 @@ class ItemBook:
                 self._pending.discard((ident, key))
         return outcomes
 
-    async def sync_and_deliver(self) -> list[dict[str, Any]]:
-        changed = self.sync()
-        await self.deliver()
-        return changed
-
     # ------------------------------------------------------------------- reads
 
     def get(self, ident: str) -> dict[str, Any] | None:
@@ -1202,7 +1398,8 @@ class ItemBook:
         return newer[-1]["text"] if newer else f"{WORD[str(record['state'])]}: {record.get('gist')}"
 
     def ack(self, record: Mapping[str, Any], *, now: datetime) -> bool:
-        """The admin acknowledged a failure: a derived one by its source token, a standalone one directly."""
+        """The admin acknowledged a failure: one with a source by its token (the source's item then resolves in
+        the same write), a standalone one directly."""
         source = record.get("source") or {}
         if not str(record.get("key")).startswith("activity:"):
             token = source.get("ack")
@@ -1217,11 +1414,10 @@ class ItemBook:
         updated = dict(record) | {"state": state, "need": None, "revision": int(record["revision"]) + 1,
                                   "updated_at": _iso(now), "resolved_at": resolved, "at": resolved,
                                   "needs_since": None}  # fmt: skip
-        self.store.put_item(updated)
-        self.store.add_item_event(str(record["id"]), at=now, actor="you", text="Acknowledged by you",
-                                  revision=int(updated["revision"]))  # fmt: skip
-        self.hub.publish("item", None, {"id": record["id"], "revision": updated["revision"], "state": state,
-                                        "needs_count": self.store.needs_count()})  # fmt: skip
+        with self.store.atomic():
+            self.store.put_item(updated)
+            self.store.add_item_event(str(record["id"]), at=now, actor="you", text="Acknowledged by you",
+                                      revision=int(updated["revision"]))  # fmt: skip
         return True
 
     def view(self, record: Mapping[str, Any], *, events: bool = False) -> dict[str, Any]:

@@ -1,11 +1,13 @@
 # Items, the state machine and the push policy
 
 Everything the agent does is an item on the panel's Home page, with its
-history. The daemon derives items from its own records; the panel never
-infers state. The wire shape is in [panel.md](panel.md).
+history. The daemon writes each item from its own records at the moment the
+record changes; the panel never infers state. The wire shape is in
+[panel.md](panel.md).
 
-Implementation: `opsd/items.py` (`ItemBook`), `opsd/activity.py`,
-`opsd/notify.py`, `opsd/channels.py`, `opsd/quiet.py`, `opsd/live.py`.
+Implementation: `opsd/items.py` (`ItemBook`, `Composer`), the transaction
+observer in `opsd/store.py`, `opsd/activity.py`, `opsd/notify.py`,
+`opsd/channels.py`, `opsd/quiet.py`, `opsd/live.py`.
 Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 `tests/test_notify_triage.py`, `tests/test_quiet.py`, `tests/test_chat_ux.py`.
 
@@ -21,23 +23,58 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `[a-z]-[0-9a-z]{1,40}`.
 - I3. **Needs you** is exactly `state == waiting`, or `failed` with a need.
   The store enforces it: `need` is non-null iff `waiting`, or the state is
-  `failed`. Tests `test_the_store_refuses_a_waiting_item_without_a_need`,
-  `test_migration_17_backfills_items_and_nothing_old_needs_you`.
+  `failed`. Test `test_the_store_refuses_a_waiting_item_without_a_need`.
 - I4. Keys and ids: keys are `updates:<entity>@<version>`, `window:<run>`,
   `change:<id>`, `fact:<id>`, `task:<id>`, `health:<key>`, `maint:<finding>`,
   `activity:<id>`. The URL id is `<prefix>-<sha256(key)[:12]>` with prefixes
   `u` (updates), `w` (window), `p` (change, fact), `r` (task), `c` (health),
   `m` (maintenance), `x` (other);
-  activity items are `a-<n>`.
+  activity items are `a-<n>`, numbered by `kv` `activity.seq` so a number is
+  never reused after a prune.
 
-## Derivation
+## Written at the source
 
-- I5. There is no stored transition table: every pass, `ItemBook.sync`
-  recomputes each derived item from its source record. A source that
-  disappears resolves its item (`cancelled` "no longer pending"; a health
-  item becomes `done` "cleared"; an update gets a reasoned gist); an item is
-  never left waiting for a vanished source. Test
-  `test_a_resolved_condition_resolves_its_item`.
+- I5. **Items are written at their source.** Every store write records what
+  it touched: an update job or run, an approval, a change proposal, a house
+  fact, a task, an item written directly (I16), or a `kv` key among the
+  update flags (paused, a failed night and its acknowledgement, a failed
+  backup or check before a night), the item acknowledgements
+  (`item.ack:<key>`) and the maintenance state (`maintenance:`). Before that
+  transaction commits, the item book composes the items those records show
+  and writes each one, with its event, in the same transaction: a job or an
+  update approval writes its update's item and its night's, a run (a new
+  plan, a night's progress) and an update flag every update item and night,
+  a change, a fact or a task its own item, a dashboard approval or the
+  maintenance state the maintenance items. The health check's save of its
+  open items writes the health items in one transaction. An item and its
+  source therefore never disagree, even after a crash. A failure to compose
+  or write one item is logged and blocks neither the source's write nor the
+  other items. Tests `test_an_item_is_written_in_its_sources_transaction`,
+  `test_an_item_that_cannot_be_composed_never_blocks_its_source`,
+  `test_review_5_one_bad_item_does_not_stop_the_others`.
+- I5a. **Nothing re-derives.** A group that lists its items resolves the ones
+  it no longer lists, with its own reason: the health check `done`
+  "cleared: not reported by the latest health check", the maintenance scan
+  `done` "resolved: the latest maintenance scan no longer finds it", the
+  update plan `cancelled` "not offered now: <reason>", "superseded: Home
+  Assistant now offers <version>" or "Home Assistant no longer lists it as
+  pending" (never "installed": that is the job's own item). A house fact
+  resolves with its decision (`cancelled` "rejected", `done` "applied", or
+  `cancelled` "proposed as config change #<id>"). Every other item changes
+  only when its source does: a reminder done weeks ago stays done, the
+  oldest of many open changes stays waiting. Tests
+  `test_a_resolved_condition_resolves_its_item`,
+  `test_an_old_record_never_turns_into_cancelled`,
+  `test_a_house_fact_item_resolves_with_its_decision`.
+- I5b. **Time.** An item whose words depend on the clock carries
+  `source.recheck_at`: a health item whose `needs_after` is ahead (I10), an
+  update rejected within the last 7 days (I6). The minute tick
+  ([overview.md](overview.md) D2) recomposes such an item once that time
+  passes, then decides the pushes time made due (N1). The add-on options
+  are a source too: at each start the daemon recomposes the update items
+  and nights (the gate and the window) and the maintenance items (act
+  mode). Tests `test_the_items_engine_asks_only_once_remote_access_stays_down`,
+  `test_a_rejected_update_asks_again_once_the_week_is_over`.
 - I6. Update items: AUTO and not held is `scheduled` (or `proposed` while a
   gate blocks the window); approved is `scheduled` with a `withdraw` action
   and a footnote naming the approval, versions and plan; an APPROVE item
@@ -87,15 +124,19 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   update items neither enter nor leave Needs you and are not pushed. Tests
   `test_a_plan_from_before_the_start_never_flashes_needs_you`,
   `test_an_update_already_waiting_before_the_start_stays_and_is_not_pushed_again`.
-- I15. Every changed record publishes a live `item {id, revision, state,
-  needs_count}` event. `needs_count` is one SQL count and the same number on
+- I15. Every item written publishes, once its transaction commits (on the
+  daemon's loop, whichever thread wrote it), a live `item {id, revision,
+  state, needs_count}` event; a write that rolled back publishes nothing.
+  Test `test_an_item_written_from_a_worker_thread_is_pushed_on_the_loop`. `needs_count` is one SQL count and the same number on
   `api/home`, `api/history`, `api/state` and the status sensor.
-- I16. Activity entries are items too: with an item key they become events of
-  that item, otherwise standalone `activity:<id>` items. Quiet kinds
+- I16. Activity entries are items too (there is no separate log): with an
+  item key they become events of that item, otherwise standalone
+  `activity:<n>` items, whose push is decided at the write like any other's. Quiet kinds
   (`check`, `suppressed`, `updates`, `reminder`, `investigation`) fold in
   History and never show on Home unless they need the admin; an entry that
   needs the admin becomes `waiting` with an `ack` and also posts one chat
-  message naming it. Test `test_activity_entries_become_items_and_events`.
+  message naming it. Tests `test_activity_entries_become_items_and_events`,
+  `test_a_standalone_entry_is_pushed_when_it_is_written`.
 - I17. Home sections: `needs` oldest `needs_since` first; `running`;
   `coming` (proposed, scheduled) by `at`; `suggestions` (proposed
   maintenance replacement candidates and suggestions) by `at`; `today` (terminal, not quiet,
@@ -109,12 +150,12 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 ## Pushes
 
 - N1. **Item pushes.** For each open item in Needs you, the push key is
-  `state:need.kind:primary.id`. The daemon pushes when the key differs from
-  the last pushed key, or when the last delivery is at least 1 day old
-  (resurface); a failed delivery is retried after 15 minutes; a need whose
-  `expires_at` passed, or a push already pending, is skipped. Sources with
-  `pushes=False` and the first sync after the item migration are marked
-  pushed silently. Leaving and re-entering Needs you pushes again. Tests
+  `state:need.kind:primary.id`. After each write and on the minute tick the
+  daemon pushes when the key differs from the last pushed key, or when the
+  last delivery is at least 1 day old (resurface); a failed delivery is
+  retried after 15 minutes; a need whose `expires_at` passed, or a push
+  already pending, is skipped. Sources with `pushes=False` are marked pushed
+  silently. Leaving and re-entering Needs you pushes again. Tests
   `test_entering_needs_pushes_once_and_coming_back_pushes_again`,
   `test_a_push_counts_only_once_it_was_delivered`,
   `test_a_push_decided_for_a_need_that_cleared_is_not_sent`.
@@ -169,8 +210,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 
 ## Maintenance items
 
-- I19. Maintenance items are derived from the stored findings on every pass
-  like any other item; the derivation, escalation, pushes and actions are
+- I19. Maintenance items are written from the stored findings, their plans
+  and their dashboard plans at each change of the maintenance state (I5);
+  the composition, escalation, pushes and actions are
   in [maintenance.md](maintenance.md) M10–M18 and the wire shape in
   [panel.md](panel.md) N20. Only entering Needs you pushes (a deprecation
   within two releases, a dashboard plan waiting for approval, a failed

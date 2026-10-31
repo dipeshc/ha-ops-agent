@@ -57,7 +57,7 @@ from opsd.health import Snapshot, collect, custom_domains
 from opsd.inbound import EVENT_TYPE, AdminIdentity, InboundGate, admin_identity, is_active_admin
 from opsd.items import Context, ItemBook
 from opsd.jsonstore import append_jsonl, read_json, read_jsonl, write_json_atomic
-from opsd.live import Hub, LiveEvent
+from opsd.live import Hub
 from opsd.lock import LockBusyError, run_lock
 from opsd.notify import Notifier, own_slug, set_panel_slug
 from opsd.panel import PanelServer
@@ -429,9 +429,10 @@ class Daemon:
                 store=self.store, options=options, approvals=Approvals(self.store), ws=self._ws_command,
                 backup_dir=paths.data / "maintenance" / "dashboards",
             )  # fmt: skip
-        # One record per item. Every surface reads it; it is re-derived whenever a record it shows changes.
+        # One record per item. Every surface reads it; each write of a record it shows writes it too.
         self.items: ItemBook | None = None
-        self._items_due = False
+        # The loop the item pushes are sent on (an item can be written from an executor thread).
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._item_pushes: set[asyncio.Task[Any]] = set()
         # What `sensor.ops_agent` last showed of Needs you (count, top title); see `_needs_changed`.
         self._needs_published: tuple[int, str | None] | None = None
@@ -440,9 +441,7 @@ class Daemon:
             self.items = ItemBook(
                 self.store, self.hub, tz=lambda: self.tz, context=self.items_context, send=self.send_now,
             )  # fmt: skip
-            self.hub.listeners.append(self._on_live)
-            # The first sync after an upgrade backfills the items; what already waited was pushed before.
-            self.items.sync()
+            self.items.on_change = self._items_changed
 
     def items_context(self) -> Context:
         """What the items are derived from besides the store: the update gate, the window, the open health items."""
@@ -463,28 +462,35 @@ class Daemon:
             acting=self.options.acting,
         )
 
-    def _on_live(self, event: LiveEvent) -> None:
-        """A record changed: re-derive the items once this turn of the loop (never for the items' own events)."""
-        if event.kind in ("item", "turn", "thread", "status") or self.items is None:
-            return
-        self.items_soon()
-
-    def items_soon(self) -> None:
+    def _items_changed(self) -> None:
+        """An item was written (from any thread): publish it and decide its pushes, on the daemon's loop."""
+        loop = self._loop
         try:
-            loop = asyncio.get_running_loop()
+            running: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
-            self.items_now()
+            running = None
+        if loop is not None and running is not loop and not loop.is_closed():
+            loop.call_soon_threadsafe(self._items_flushed)
             return
-        if not self._items_due:
-            self._items_due = True
-            loop.call_soon(self.items_now)
+        self._items_flushed()
 
-    def items_now(self) -> None:
-        """Sync the items and send the pushes it decided (in the background)."""
-        self._items_due = False
+    def _items_flushed(self) -> None:
         if self.items is None:
             return
-        self.items.sync()
+        self.items.flush()
+        self._items_sent()
+
+    def items_now(self) -> None:
+        """The minute tick: recompose what asked to be, decide the pushes time made due, send them."""
+        if self.items is None:
+            return
+        self.items.tick()
+        self._items_sent()
+
+    def _items_sent(self) -> None:
+        """Refresh the sensor when Needs you changed, and send the decided pushes (in the background)."""
+        if self.items is None:
+            return
         self._needs_changed()
         if not self.items.outbox:
             return
@@ -520,7 +526,7 @@ class Daemon:
         task.add_done_callback(self._item_pushes.discard)
 
     async def items_flush(self) -> None:
-        """Sync the items and wait for their pushes (start-up and tests; the loop does it on its own otherwise)."""
+        """Tick the items and wait for their pushes (start-up and tests; the loop does it on its own otherwise)."""
         self.items_now()
         if self.items is not None:
             await self.items.deliver()
@@ -1003,8 +1009,13 @@ class Daemon:
         write_json_atomic(
             self.paths.open_items_file, {"at": now.isoformat(timespec="seconds"), "items": [i.to_json() for i in items]}
         )
+        if self.items is None:
+            return
         # The health items are items too: cleared ones resolve, new ones enter Needs you.
-        self.items_soon()
+        try:
+            self.items.write_health()
+        except (StoreError, sqlite3.Error) as err:
+            _LOGGER.error("health items not written", extra={"error": str(err)[:200]})
 
     def open_items(self) -> list[Item]:
         raw = read_json(self.paths.open_items_file, {})
@@ -1345,8 +1356,6 @@ class Daemon:
                 await self.publish_status()
             if self.changes is not None:
                 self.changes.expire()
-            # Time alone moves some items (a health item that asks only once it lasts): re-derive them.
-            self.items_soon()
         finally:
             self._complete_task(event)
 
@@ -1777,6 +1786,13 @@ class Daemon:
             },
         )
 
+        self._loop = asyncio.get_running_loop()
+        if self.items is not None:
+            # The options are a source too (the update gate and window, act mode): they change only at a start.
+            try:
+                self.items.recompose()
+            except (StoreError, sqlite3.Error) as err:
+                _LOGGER.error("items not recomposed", extra={"error": str(err)[:200]})
         self.items_now()
         panel_server = self.panel_server()
         await panel_server.start()

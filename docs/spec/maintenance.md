@@ -10,7 +10,7 @@ Implementation: `opsd/maintenance.py` (signals, findings, the scan, the
 update-rule hook), `opsd/inventory.py`, `opsd/dashboards.py` (dashboard
 reads, the edit, `DashboardWriter`), `opsd/evidence.py` (`parse_post`,
 `EvidenceSource.posts`, `.archived`, `.core_platforms`), the
-`maintenance` derivation in `opsd/items.py`, `opsd/approvals.py` (dashboard
+maintenance composition in `opsd/items.py`, `opsd/approvals.py` (dashboard
 approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 `maintenance_plan` run profile in `opsd/runner.py` with
 `prompts/profiles/maintenance_plan.md` and

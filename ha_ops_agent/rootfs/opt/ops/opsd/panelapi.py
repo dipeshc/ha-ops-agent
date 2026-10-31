@@ -250,7 +250,6 @@ class PanelHandlers:
         d = self._d
         # Item details carry raw log samples; the panel shows them, so they get the same redaction as pushes.
         redactor = d.redactor()
-        d.items_now()
         return {
             "items": [redactor.redact_obj(i.to_json()) | self._item_mark(f"health:{i.key}") for i in d.open_items()],
             "needs_count": self._needs_count(),
@@ -417,7 +416,6 @@ class PanelHandlers:
     def home(self) -> Result:
         """`api/home`: the sections, the badge (the same table, the same moment) and the status strip."""
         d, book = self._d, self._book
-        d.items_now()
         sections = book.home()
         count = self._store.needs_count()
         state = d.state
@@ -461,7 +459,6 @@ class PanelHandlers:
         }
 
     def item(self, ident: str) -> Result:
-        self._d.items_now()
         found = self._book.get(ident)
         if found is None:
             return 404, {"error": "no_such_item"}
@@ -476,7 +473,6 @@ class PanelHandlers:
         before = _uncursor(raw) if raw is not None else None
         if raw is not None and before is None:
             return _bad("bad_cursor")
-        self._d.items_now()
         rows = self._store.items_page(kinds=HISTORY_FILTERS[name], needs_only=name == "needs", before=before,
                                       limit=PAGE_HISTORY + 1)  # fmt: skip
         more = len(rows) > PAGE_HISTORY
@@ -488,7 +484,6 @@ class PanelHandlers:
     async def item_act(self, ident: str, body: dict[str, Any], user: str) -> Result:
         """`api/items/<id>/act`: one offered action, for the revision the admin saw; the daemon re-checks it all."""
         book = self._book
-        self._d.items_now()
         found = book.get(ident)
         if found is None:
             return 404, {"error": "no_such_item"}
@@ -509,7 +504,6 @@ class PanelHandlers:
         except ApprovalError as err:
             status, result = 409, {"error": "not_available", "message": str(err)}
         self._audit_item(found, action, user, status)
-        self._d.items_now()
         fresh = book.get(ident) or found
         if status == 200:
             return status, {"item": book.view(fresh, events=True)}

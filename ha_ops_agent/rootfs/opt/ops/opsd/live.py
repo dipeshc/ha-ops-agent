@@ -68,8 +68,6 @@ class Hub:
         self._evicted = 0
         self._subscribers: set[Subscriber] = set()
         self._leases: dict[str, float] = {}
-        # In-process listeners (the item book re-derives its items when a record they show changed).
-        self.listeners: list[Callable[[LiveEvent], None]] = []
 
     # --------------------------------------------------------------- events
 
@@ -88,11 +86,6 @@ class Hub:
                 _LOGGER.warning("live subscriber too slow; dropped", extra={"thread_id": sub.thread})
                 self._subscribers.discard(sub)
                 sub.dropped.set()
-        for listener in list(self.listeners):
-            try:
-                listener(event)
-            except Exception:
-                _LOGGER.exception("live listener failed", extra={"kind": kind})
         return event
 
     def since(self, after: int, thread: str | None) -> list[LiveEvent] | None:

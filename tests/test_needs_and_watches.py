@@ -74,14 +74,18 @@ def test_the_items_engine_asks_only_once_remote_access_stays_down(tmp_path: Path
     clock = {"now": NOW}
     ctx = Context(health_at=NOW.isoformat(), health_items=[remote, power])
     book = ItemBook(store, Hub(), tz=lambda: UTC, context=lambda: ctx, clock=lambda: clock["now"])
-    book.sync()
+    book.write_health()
     found = {r["key"]: r for r in store.items_all() if r["kind"] == "check"}
     assert found["health:remote:down"]["state"] == "proposed" and not found["health:remote:down"]["needs"]
     assert {a["id"] for a in found["health:remote:down"]["actions"]} == {"snooze", "accept"}
     assert found["health:power:undervoltage"]["state"] == "waiting"
     assert found["health:power:undervoltage"]["need"]["kind"] == "ack"
-    clock["now"] = NOW + timedelta(hours=6)
-    book.sync()
+    clock["now"] = NOW + timedelta(hours=4, minutes=59)
+    book.tick()
+    assert not store.item(found["health:remote:down"]["id"])["needs"]  # type: ignore[index]
+    # Time alone moves it: the minute tick recomposes it once it said it would ask (six hours down).
+    clock["now"] = NOW + timedelta(hours=5)
+    book.tick()
     assert store.item(found["health:remote:down"]["id"])["needs"]  # type: ignore[index]
     store.close()
 
@@ -98,7 +102,7 @@ async def test_the_status_sensor_carries_the_needs_you_count_and_top_title(h: An
                "summary": "the host reports under-voltage " + "x" * 200, "detail": {}}]  # fmt: skip
     d._save_open_items([], datetime.now(UTC))
     d.items._context = lambda: Context(health_at=datetime.now(UTC).isoformat(), health_items=health)  # type: ignore[method-assign]
-    d.items.sync()
+    d.items.write_health()
     view = d.status_view()
     assert view["needs_you"] == d.store.needs_count() == 1
     assert view["needs_you_top"].startswith("the host reports under-voltage")

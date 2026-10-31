@@ -332,25 +332,23 @@ class Rig:
             self.sent.append(message)
             return "sent"
 
-        # The item book, as the daemon wires it: re-derived on every update event, its pushes in `sent`.
+        # The item book, as the daemon wires it: each write of a record writes its items, its pushes in `sent`.
         self.book = ItemBook(self.store, self.hub, tz=lambda: UTC, context=self.context, send=push,
                              clock=lambda: self.now)  # fmt: skip
-        self.hub.listeners.append(lambda event: None if event.kind == "item" else self.book.sync())
         self.manager = self.build()
-        # The daemon's first sync at start (the upgrade backfill), before anything happens.
-        self.book.sync()
+        # The daemon's start: the items that read the options.
+        self.book.recompose()
 
     def context(self) -> Context:
         return Context(window=self.options.updates.window, gate=self.manager.gate(), paused=self.manager.paused())
 
     async def flush(self) -> list[Message]:
-        """Sync the items and deliver their pushes (the daemon does this after every event)."""
-        self.book.sync()
+        """The minute tick, and the delivery of the pushes decided (the daemon sends them after every write)."""
+        self.book.tick()
         await self.book.deliver()
         return self.sent
 
     def item(self, entity_id: str, version: str) -> dict[str, Any]:
-        self.book.sync()
         found = self.store.item(item_id(f"updates:{entity_id}@{version}"))
         assert found is not None
         return found
@@ -608,7 +606,6 @@ async def test_backup_failure_aborts_before_any_install(rig: Rig) -> None:
     assert rig.item(CORE, "2026.10.4")["state"] == "scheduled"
     # Acknowledged, it leaves Needs you; it stays a failed night in History.
     assert rig.book.ack(night, now=rig.now)
-    rig.book.sync()
     acked = rig.store.item(night["id"])
     assert acked is not None and acked["state"] == "cancelled" and not acked["needs"]
 

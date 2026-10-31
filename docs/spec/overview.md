@@ -106,7 +106,9 @@ These hold at every stage; each has tests named in the owning document.
   Core (`GET /core/api/`), raise the Core-down alert after 5 minutes (20
   while Core is starting or inside the update window, 45 while Supervisor
   jobs are busy) and the "Core is back" push plus a health cycle on
-  recovery, request an overdue check after 26 hours, and refresh items.
+  recovery, request an overdue check after 26 hours, and tick the items
+  (the rechecks and the pushes time made due,
+  [items-and-pushes.md](items-and-pushes.md) I5b, N1).
 - D3. The watchdog target is `/healthz` on the panel port. SIGTERM cancels
   the main task and drains in-flight pushes for at most 2.5 seconds; s6
   restarts the daemon on a non-zero exit.

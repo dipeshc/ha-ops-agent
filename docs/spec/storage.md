@@ -15,7 +15,11 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   `trusted_schema=OFF`, and `quick_check` on every open. One connection,
   serialised by a lock; writes run in `BEGIN IMMEDIATE` transactions, and a
   write made inside another one joins it (a savepoint), so a caller can group
-  several writes into one transaction (`Store.atomic`). Tests
+  several writes into one transaction (`Store.atomic`). Each write records
+  what it touched; right before the transaction commits, the observer (the
+  item book) writes the items those records show inside it, in a savepoint
+  of its own that a failure rolls back alone
+  ([items-and-pushes.md](items-and-pushes.md) I5). Tests
   `test_migrated_private_and_reopenable`,
   `test_store_file_created_private_even_with_open_umask`.
 - S2. **Schema versions.** The schema version is tracked in `PRAGMA
@@ -38,7 +42,8 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
     are follow-ups), `recurring` (system tasks) and `retry` (chat retries);
     states `pending`, `running`, `done`, `cancelled`, `failed`;
     compare-and-set claims, idempotency keys and the fired-once mark. It
-    stays a table of its own because one scheduler serves all four kinds.
+    stays a table of its own because one scheduler serves all four kinds;
+    a reminder's or investigation's item is written with each transition.
   - `approvals`: one record for every approval and proposal, keyed by
     `(kind, id)`, with a `subject`, a `state`, a JSON `payload` and the
     decision columns. Kinds: `approval` (the admin's consent bound to one

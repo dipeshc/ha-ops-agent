@@ -18,7 +18,9 @@ conservative:
   "repaired": `StoreUnavailable` is raised and the daemon runs degraded, without store-dependent
   features, and alerts the admin.
 
-Every write runs in one transaction; a write inside another joins it (`atomic`).
+Every write runs in one transaction. A write records what it touched (a job, a run, an approval, a
+change, a fact, a task, a kv key); before the transaction commits, the `observer` (the item book) writes
+the items those records show, so an item and its source never disagree after a crash.
 
 Tasks fire at least once, not exactly once: a crash between a task's effect
 and its rescheduling repeats the firing after restart. Any future mutating
@@ -359,6 +361,10 @@ ACTIVITY_SEQ_KEY = "activity.seq"
 _CHANGE_PAYLOAD = frozenset({"files", "diff", "base_sha", "commit_sha", "ref", "applied_sha", "reverted_sha"})
 _CHANGE_COLUMNS = frozenset({"detail", "decided_at", "expires_at"})
 
+# What a write touched, for the observer: (`job`, id), (`run`, id), (`approval`, id), (`change`, id),
+# (`fact`, id), (`task`, id), (`kv`, key) or (`item`, id) for an item written outside the observer.
+Touched = tuple[str, Any]
+
 
 class StoreError(RuntimeError):
     """The store cannot be used; callers fail closed."""
@@ -594,6 +600,12 @@ class Store:
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
         self._depth = 0
+        self._touched: list[Touched] = []
+        # The item book (`opsd.items`): writes the items a transaction's records show, inside it.
+        self.observer: Callable[[list[Touched]], None] | None = None
+        # Called after each commit that the observer saw (it publishes the items it wrote).
+        self.committed: Callable[[], None] | None = None
+        self._observing = False
 
     # ----------------------------------------------------------- lifecycle
 
@@ -804,18 +816,49 @@ class Store:
                 return
             conn.execute("BEGIN IMMEDIATE")
             self._depth = 1
+            self._touched = []
             try:
                 yield conn
+                self._observe(conn)
             except BaseException:
                 conn.execute("ROLLBACK")
                 raise
             finally:
                 self._depth = 0
             conn.execute("COMMIT")
+            seen, self._touched = bool(self._touched), []
+        if seen and self.committed is not None:
+            try:
+                self.committed()
+            except Exception:
+                _LOGGER.exception("store commit hook failed")
 
     def atomic(self) -> contextlib.AbstractContextManager[sqlite3.Connection]:
-        """Group several writes into one transaction."""
+        """Group several writes (and the items they show) into one transaction."""
         return self._tx()
+
+    def _touch(self, kind: str, ref: Any) -> None:
+        if self._depth and not self._observing:
+            self._touched.append((kind, ref))
+
+    def _observe(self, conn: sqlite3.Connection) -> None:
+        """Before COMMIT: the observer writes the items these records show, in this transaction.
+
+        A failure in it never blocks the record's own change: its writes roll back alone and are logged.
+        """
+        if not self._touched or self.observer is None or self._observing:
+            return
+        touched = list(dict.fromkeys(self._touched))
+        self._observing = True
+        conn.execute("SAVEPOINT observe")
+        try:
+            self.observer(touched)
+        except Exception:
+            conn.execute("ROLLBACK TO observe")
+            _LOGGER.exception("items not written", extra={"touched": str(touched)[:200]})
+        finally:
+            conn.execute("RELEASE observe")
+            self._observing = False
 
     # --------------------------------------------------------------- audit
 
@@ -940,12 +983,15 @@ class Store:
                     (_iso(now), row["id"]),
                 ).rowcount
                 if updated:
+                    self._touch("task", int(row["id"]))
                     claimed.append(_task(conn.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()))
         return claimed
 
     def _task_cas(self, task_id: int, sql: str, args: tuple[Any, ...]) -> bool:
         with self._tx() as conn:
             done = bool(conn.execute(sql, args).rowcount)
+            if done:
+                self._touch("task", task_id)
             return done
 
     def reschedule(
@@ -972,6 +1018,8 @@ class Store:
             ids = [int(r[0]) for r in conn.execute("SELECT id FROM tasks WHERE state = 'running'").fetchall()]
             conn.execute("UPDATE tasks SET state = 'pending', next_fire_at = ?, updated_at = ? WHERE state = 'running'",
                          (_iso(now), _iso(now)))  # fmt: skip
+            for task_id in ids:
+                self._touch("task", task_id)
         return len(ids)
 
     def next_due_at(self) -> datetime | None:
@@ -1006,6 +1054,7 @@ class Store:
                 (kind, title, owner, created_by, json.dumps(payload), generation, _iso(next_fire_at), thread_id,
                  idempotency_key, _iso(now), _iso(now)),
             )  # fmt: skip
+            self._touch("task", int(cursor.lastrowid or 0))
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return _task(row), True
 
@@ -1579,6 +1628,7 @@ class Store:
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
                 (key, value, _iso(now)),
             )
+            self._touch("kv", key)
 
     def kv_prefix(self, prefix: str, *, limit: int = 200) -> dict[str, str]:
         """Non-empty values whose key starts with `prefix` (a literal prefix, not a pattern)."""
@@ -1612,6 +1662,7 @@ class Store:
                 (window_day, trigger, mode, json.dumps(plan, default=str), _iso(now), _iso(now)),
             )
             run_id = int(cursor.lastrowid or 0)
+            self._touch("run", run_id)
             return run_id
 
     def move_update_job(self, job_id: int, *, run_id: int, now: datetime) -> bool:
@@ -1619,6 +1670,8 @@ class Store:
         with self._tx() as conn:
             cursor = conn.execute("UPDATE update_jobs SET run_id = ?, updated_at = ? WHERE id = ? AND state = ?",
                                   (run_id, _iso(now), job_id, "reboot_pending"))  # fmt: skip
+            if cursor.rowcount == 1:
+                self._touch("job", job_id)
         return cursor.rowcount == 1
 
     def update_run(self, run_id: int) -> dict[str, Any] | None:
@@ -1669,6 +1722,8 @@ class Store:
             values.extend(expect)
         with self._tx() as conn:
             done = bool(conn.execute(f"UPDATE update_runs SET {', '.join(sets)} WHERE {where}", values).rowcount)  # noqa: S608
+            if done:
+                self._touch("run", run_id)
             return done
 
     def add_update_jobs(self, run_id: int, jobs: list[dict[str, Any]], *, now: datetime) -> list[UpdateJob]:
@@ -1683,6 +1738,8 @@ class Store:
                      json.dumps(job.get("target", {})),
                      f"{run_id}:{job['entity_id']}:{job['from_version']}:{job['to_version']}", _iso(now)),
                 )  # fmt: skip
+            for row in conn.execute("SELECT id FROM update_jobs WHERE run_id = ?", (run_id,)).fetchall():
+                self._touch("job", int(row[0]))
         return self.update_jobs(run_id)
 
     def update_jobs(self, run_id: int) -> list[UpdateJob]:
@@ -1732,6 +1789,8 @@ class Store:
         with self._tx() as conn:
             done = bool(conn.execute(f"UPDATE update_jobs SET {', '.join(sets)} WHERE {where}",  # noqa: S608
                                      (*values, job_id, *expect)).rowcount)  # fmt: skip
+            if done:
+                self._touch("job", job_id)
             return done
 
     def update_jobs_where(self, *, kind: str, states: tuple[str, ...], since: datetime) -> list[UpdateJob]:
@@ -1744,6 +1803,7 @@ class Store:
     def set_job_target(self, job_id: int, target: dict[str, Any]) -> None:
         with self._tx() as conn:
             conn.execute("UPDATE update_jobs SET target = ? WHERE id = ?", (json.dumps(target, default=str), job_id))
+            self._touch("job", job_id)
 
     def rollback_history(self, *, limit: int = 20) -> list[dict[str, Any]]:
         rows = self._all("SELECT * FROM update_jobs WHERE state IN ('rolled_back', 'rollback_failed', 'rolling_back')"
@@ -1788,6 +1848,7 @@ class Store:
                 (approval_id, json.dumps(plan, sort_keys=True), plan_hash, requested_by, _iso(now), _iso(expires_at),
                  subject, run_when, _iso(now)),
             )  # fmt: skip
+            self._touch("approval", approval_id)
 
     def approval(self, approval_id: str) -> dict[str, Any] | None:
         row = self._one("SELECT * FROM approvals WHERE kind = 'approval' AND id = ?", (approval_id,))
@@ -1811,6 +1872,8 @@ class Store:
         with self._tx() as conn:
             done = bool(conn.execute(f"UPDATE approvals SET {', '.join(sets)} WHERE {where}",  # noqa: S608
                                      (*values, approval_id, *expect)).rowcount)  # fmt: skip
+            if done:
+                self._touch("approval", approval_id)
             return done
 
     # --------------------------------------------------- approval requests
@@ -1866,6 +1929,7 @@ class Store:
                 (str(number), subject[:120], state, json.dumps(payload), detail[:300], requested_by[:100], run_id,
                  _iso(now), _iso(expires_at), _iso(now)),
             )  # fmt: skip
+            self._touch("change", number)
             row = conn.execute("SELECT * FROM approvals WHERE kind = 'change' AND id = ?", (str(number),)).fetchone()
         return _change(row)
 
@@ -1894,6 +1958,7 @@ class Store:
                 values.append(fields[name])
             conn.execute(f"UPDATE approvals SET {', '.join(sets)} WHERE kind = 'change' AND id = ? AND state = ?",  # noqa: S608
                          (*values, str(change_id), row["state"]))  # fmt: skip
+            self._touch("change", change_id)
             return True
 
     # ---------------------------------------------------------------- facts
@@ -1905,6 +1970,7 @@ class Store:
             conn.execute("INSERT INTO approvals (kind, id, state, payload, created_at, updated_at)"
                          " VALUES ('fact', ?, 'pending', ?, ?, ?)", (str(number), json.dumps(payload), _iso(now),
                                                                      _iso(now)))  # fmt: skip
+            self._touch("fact", number)
             return number
 
     def fact(self, fact_id: int) -> dict[str, Any] | None:
@@ -1925,12 +1991,15 @@ class Store:
             done = bool(conn.execute("UPDATE approvals SET state = ?, decided_at = ?, updated_at = ?"
                                      " WHERE kind = 'fact' AND id = ? AND state = 'pending'",
                                      (status, _iso(now), _iso(now), str(fact_id))).rowcount)  # fmt: skip
+            if done:
+                self._touch("fact", fact_id)
             return done
 
     def link_fact(self, fact_id: int, change_id: int) -> None:
         with self._tx() as conn:
             conn.execute("UPDATE approvals SET payload = json_set(payload, '$.change_id', ?) WHERE kind = 'fact'"
                          " AND id = ?", (change_id, str(fact_id)))  # fmt: skip
+            self._touch("fact", fact_id)
 
     # ------------------------------------------------------- quiet hours
 
@@ -2063,6 +2132,11 @@ class Store:
             args.extend([len(prefix), prefix])
         return [_item(r) for r in self._all(f"SELECT * FROM items WHERE {' AND '.join(where)}", args)]  # noqa: S608
 
+    def items_due(self, now: datetime) -> list[dict[str, Any]]:
+        """Items whose source asked to be composed again by now (`source.recheck_at`)."""
+        rows = self._all("SELECT * FROM items WHERE json_extract(source, '$.recheck_at') <= ?", (_iso(now),))
+        return [_item(r) for r in rows]
+
     def items_since(self, since: datetime) -> list[dict[str, Any]]:
         """Unresolved items, items in Needs you, and items resolved since `since` (for Home)."""
         rows = self._all("SELECT * FROM items WHERE resolved_at IS NULL OR needs = 1 OR resolved_at >= ?",
@@ -2088,6 +2162,7 @@ class Store:
         with self._tx() as conn:
             conn.execute(f"INSERT INTO items ({', '.join(self._ITEM_COLUMNS)}) VALUES ({marks})"  # noqa: S608
                          f" ON CONFLICT(id) DO UPDATE SET {updates}", values)  # fmt: skip
+            self._touch("item", record.get("id"))
 
     def set_item_fields(self, item_id: str, **fields: Any) -> None:
         """Columns that never change an item's revision (`as_of`, `push`)."""

@@ -77,7 +77,7 @@ Tests: `tests/test_panel.py`, `tests/test_panel_shell.py`,
 ## The item
 
 The record behind Home, History and the item page
-([items-and-pushes.md](items-and-pushes.md) owns the derivation rules).
+([items-and-pushes.md](items-and-pushes.md) owns how items are written).
 
 ```jsonc
 {

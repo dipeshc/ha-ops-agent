@@ -325,8 +325,10 @@ async def test_only_deprecations_within_two_releases_need_the_admin_and_push(tmp
     near = items["acme_sprinkler: deprecated, removed in 2030.4"]
     assert near["state"] == "waiting" and near["need"]["kind"] == "ack" and near["kicker"] == "Deprecation ahead"
     assert near["gist"] == "removed in 2030.4, 2 releases left"
-    far = items["acme_weather: deprecated, removed in 2030.9"]
-    assert far["state"] == "proposed" and not far["needs"] and far["gist"] == "removed in 2030.9, 7 releases left"
+    # The far one comes from the Core log: labelled as the log's claim in the title and the gist.
+    far = items["The Core log says acme_weather is removed in 2030.9"]
+    assert far["state"] == "proposed" and not far["needs"]
+    assert far["gist"] == "the Core log says removed in 2030.9, 7 releases left"
     undated = items["acme_weather: its repository is archived"]
     assert undated["state"] == "proposed" and undated["gist"] == "no removal date yet"
     await rig.deliver()
@@ -510,7 +512,11 @@ async def test_a_log_line_never_holds_an_update_back_escalates_or_pushes(tmp_pat
     assert log.removal == "2030.4"
     assert log not in rig.manager.removals()
     assert removal_block({"kind": "core", "latest": "2030.4.1"}, [log]) is None
-    item = rig.items()["acme_noise: deprecated, removed in 2030.4"]
+    item = rig.items()["The Core log says acme_noise is removed in 2030.4"]
+    assert item["gist"] == "the Core log says removed in 2030.4, 2 releases left"
+    assert {"label": "Source", "value": "Core log"}.items() <= next(
+        f for f in item["facts"] if f["label"] == "Source"
+    ).items()
     assert item["state"] == "proposed" and item["need"] is None and not item["needs"]
     # The log text is shown only as untrusted text under `agent`, never as a fact, the title or the gist.
     assert all("IGNORE" not in str(f["value"]) for f in item["facts"])

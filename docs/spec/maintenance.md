@@ -33,19 +33,32 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   says deprecated, removed or removal. Test
   `test_repairs_logs_and_notes_become_deprecations_with_their_removal`.
 - M3. **Core log** entries whose message says deprecated, will be removed,
-  no longer supported or removed in become deprecations; the domain comes
-  from `custom integration '<domain>'` in the message or the
-  `homeassistant.components.<d>` / `custom_components.<d>` logger; the
-  removal is the `YYYY.M` next to the removal words, if any. A log finding
+  no longer supported or removed in become deprecations. A log finding
   stays `LOG_STICKY` (7 days) after it was last seen, since the log empties
   on a restart. Any integration can write a log line, so a log finding is a
   quiet, low-priority item: only repairs and release notes
   (`AUTHORITATIVE`) escalate (M12), push (M13) or hold a Core update back
-  (M26), and the log text appears only under the item's `agent` field
-  ("The Core log says: …", source `Core log`) and fenced as evidence in
-  the plan prompt, never in a fact, the title, the gist or a need. Tests
-  `test_a_log_warning_lasts_a_week_after_it_was_last_seen`,
-  `test_a_log_line_never_holds_an_update_back_escalates_or_pushes`.
+  (M26). Exactly this log data reaches the item and the plan run:
+  - the **domain**, only as `[a-z0-9_]{1,64}` from `custom integration
+    '<domain>'` in the message or the `homeassistant.components.<d>` /
+    `custom_components.<d>` logger name: in the title, the Affected fact
+    and the daemon's plan steps (`about`);
+  - the **removal**, only as the digits `YYYY.M` next to the removal words:
+    in the title, the gist and the releases left;
+  - whether the logger or message names a **custom integration**: only the
+    choice of the daemon's plan-step wording and the Affected label;
+  - the **message text**, cleaned, redacted and cut at 600 characters:
+    only in the item's `agent` field ("The Core log says: …", source
+    `Core log`), fenced as `<evidence>` in the plan prompt, and in the
+    finding's evidence hash; never in a fact, the title, the gist, `about`,
+    a need or a push.
+  The title says the claim is the log's, "The Core log says <domain> is
+  removed in <YYYY.M>" (or "is deprecated"); the gist starts "the Core log
+  says" ("the Core log says removed in <YYYY.M>, <n> releases left", or
+  "the Core log names no removal date"), and the Source fact is `Core log`.
+  Tests `test_a_log_warning_lasts_a_week_after_it_was_last_seen`,
+  `test_a_log_line_never_holds_an_update_back_escalates_or_pushes`,
+  `test_only_deprecations_within_two_releases_need_the_admin_and_push`.
 - M4. **Release posts** of the installed Core minor, the two before it and
   every newer published one, newest first and at most `MAX_STEPS` (6) posts
   per scan (far behind, the newest win): backward-incompatible items, the developer-blog

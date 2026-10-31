@@ -781,6 +781,8 @@ class Deriver:
             if left is not None:
                 due = "due with the next Core update" if left == 0 else f"{left} release{'s' if left != 1 else ''} left"
                 gist = f"removed in {finding.removal}, {due}"
+            if finding.signal == "log":
+                gist = f"the Core log says {gist}" if left is not None else "the Core log names no removal date"
         elif variant == "replacement":
             gist = f"risk {finding.detail.get('risk', 'unknown')}; a plan, never automatic"
         else:

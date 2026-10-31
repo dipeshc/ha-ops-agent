@@ -13,8 +13,10 @@ never followed.
 - **Core log** deprecation warnings (`system_log/list`): "deprecated", "will be removed", with the
   integration from the logger name. The log empties on a restart, so a log finding stays for
   `LOG_STICKY` after it was last seen. Any integration can write a log line, so a log finding is a
-  quiet item: it never escalates, pushes or holds an update back (only `AUTHORITATIVE` signals do),
-  and its text is shown only under `agent` and fenced in the plan prompt.
+  quiet item: it never escalates, pushes or holds an update back (only `AUTHORITATIVE` signals do).
+  Its title and gist say the claim is the log's ("The Core log says ... removed in X"); only the domain
+  (an identifier) and the removal (digits) reach them, and the message text is shown only under
+  `agent` and fenced in the plan prompt.
 - **Release posts** of the installed Core minor, the two before it and every newer one
   (`evidence.EvidenceSource.posts`): backward-incompatible items, the developer-blog list and the
   farewell list, matched against the integrations, YAML features and dashboard cards in use. The
@@ -191,6 +193,10 @@ class Finding:
 
     def title(self) -> str:
         name = self.domain or "Core"
+        if self.signal == "log":
+            # Labelled as the log's claim: any integration can write a log line.
+            said = f"is removed in {self.removal}" if self.removal else "is deprecated"
+            return f"The Core log says {name} {said}"[:120]
         return f"{name}: {self.what}"[:120]
 
     def to_json(self) -> dict[str, Any]:
@@ -261,7 +267,7 @@ def from_logs(entries: Any, now: datetime) -> list[Finding]:
         domain = match.group(1) if match else None
         removal = removal_in(message)
         key = _key("log", domain, normalize(message)[:200])
-        what = f"deprecated, removed in {_version_text(removal)}" if removal else "deprecation warning in the log"
+        what = f"the Core log says removed in {_version_text(removal)}" if removal else "the Core log says deprecated"
         custom = logger.startswith("custom_components.") or "custom integration" in message
         steps = ([f"Update the custom integration {domain} (HACS): its maintainer has to change it. If no update "
                   "fixes it, tell the maintainer, or look for a replacement."] if custom else

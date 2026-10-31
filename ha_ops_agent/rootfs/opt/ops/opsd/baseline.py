@@ -77,32 +77,68 @@ def _custom_ok(info: dict[str, Any]) -> bool:
     return not (entities and info.get("unavailable", 0) >= entities)
 
 
+def _custom_counted(
+    snapshot: Snapshot,
+    domain: str,
+    info: dict[str, Any],
+    expected_unavailable: frozenset[str],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """`info` with `unavailable` counting only the entities that are news.
+
+    An entity in `expected_unavailable` never counts as down. With `now`, an
+    entity that is merely `unknown` and still inside the flap window (e.g. right
+    after a restart) does not count either. The entity total is unchanged.
+    """
+    ignored = 0
+    for entity_id, v in snapshot.unavailable.items():
+        if v["platform"] != domain:
+            continue
+        if entity_id in expected_unavailable:
+            ignored += 1
+            continue
+        if now is None or v.get("state") == "unavailable":
+            continue
+        if (age := hours_since(v.get("last_changed"), now)) is not None and age < FLAP_HOURS:
+            ignored += 1
+    return {**info, "unavailable": int(info.get("unavailable", 0)) - ignored}
+
+
 CRITICAL_ACK_MAX_DAYS = 3
 # The model's own snooze of a warning ( a prompt-injected triage must not
 # silence a warning for a month). Accepting and the admin's own snoozes are not capped.
 WARNING_SNOOZE_MAX_DAYS = 7
 
 
-def seed_exclusions(snapshot: Snapshot) -> dict[str, list[str]]:
-    """What the first run refuses to accept: anything that would be critical."""
+def seed_exclusions(snapshot: Snapshot, expected_unavailable: frozenset[str] = frozenset()) -> dict[str, list[str]]:
+    """What the first run refuses to accept: anything that would be critical.
+
+    An entity in `expected_unavailable` is never critical, so it is accepted.
+    """
     custom = set(snapshot.custom_integrations)
     return {
-        "custom_broken": sorted(d for d, i in snapshot.custom_integrations.items() if not _custom_ok(i)),
-        "custom_unavailable": sorted(e for e, v in snapshot.unavailable.items() if v["platform"] in custom),
+        "custom_broken": sorted(
+            d
+            for d, i in snapshot.custom_integrations.items()
+            if not _custom_ok(_custom_counted(snapshot, d, i, expected_unavailable))
+        ),
+        "custom_unavailable": sorted(
+            e for e, v in snapshot.unavailable.items() if v["platform"] in custom and e not in expected_unavailable
+        ),
         "custom_failed_entries": sorted(e for e, v in snapshot.failed_entries.items() if v.get("domain") in custom),
         "critical_repairs": sorted(k for k, v in snapshot.repairs.items() if v.get("severity") == "critical"),
         "assist_exposed": sorted(snapshot.assist_exposed or {}),
     }
 
 
-def seed(snapshot: Snapshot, now: datetime) -> Baseline:
+def seed(snapshot: Snapshot, now: datetime, *, expected_unavailable: frozenset[str] = frozenset()) -> Baseline:
     """Accept the current state (first run), except anything that would be critical.
 
     Custom integration outages, their failed entries and critical repairs stay
     out of the baseline so they are reported on the next run instead of being
-    silently accepted.
+    silently accepted. A custom entity in `expected_unavailable` is accepted.
     """
-    excluded = seed_exclusions(snapshot)
+    excluded = seed_exclusions(snapshot, expected_unavailable)
     return Baseline(
         created_at=now.isoformat(timespec="seconds"),
         unavailable=sorted(set(snapshot.unavailable) - set(excluded["custom_unavailable"])),
@@ -201,18 +237,7 @@ def diff(
 
     for domain, info in sorted(snapshot.custom_integrations.items()):
         was_ok = baseline.custom_ok.get(domain, True)
-        # Entities that are merely `unknown` and still inside the flap window
-        # (e.g. right after a restart) do not make the integration "broken" yet.
-        settling = sum(
-            1
-            for v in snapshot.unavailable.values()
-            if v["platform"] == domain
-            and v.get("state") != "unavailable"
-            and (age := hours_since(v.get("last_changed"), now)) is not None
-            and age < FLAP_HOURS
-        )
-        settled = {**info, "unavailable": int(info.get("unavailable", 0)) - settling}
-        if was_ok and not _custom_ok(settled):
+        if was_ok and not _custom_ok(_custom_counted(snapshot, domain, info, expected_unavailable, now)):
             items.append(
                 Item(
                     f"custom:{domain}",

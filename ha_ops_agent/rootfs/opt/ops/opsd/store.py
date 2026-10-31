@@ -42,7 +42,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from opsd.budget import ACCOUNT_BUSY, DEFAULT_RUN_SHARE, MIN_RUN_SECONDS, WINDOW, Caps, Period, Reservation
+from opsd.budget import DEFAULT_RUN_SHARE, MIN_RUN_SECONDS, WINDOW, Caps, Period, Reservation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1514,7 +1514,7 @@ class Store:
             scopes = self._scopes(conn, period, at)
             account = self._account(conn, at)
             for window, value in account.items():
-                if value is not None and value >= ACCOUNT_BUSY:
+                if value is not None and value >= caps.account_busy:
                     return f"account_busy:{window}"
             share = self._typical_share(conn, profile, "share_5h", DEFAULT_RUN_SHARE)
             share_7d = self._typical_share(conn, profile, "share_7d", DEFAULT_RUN_SHARE / 5)

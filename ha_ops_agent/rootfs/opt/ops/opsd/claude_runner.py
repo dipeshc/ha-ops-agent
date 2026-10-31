@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from opsd.config import CredentialKind
 from opsd.redact import Redactor
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,6 +29,9 @@ TOOLS = "Read,Grep,Glob,Bash"
 # Chat and investigation runs may also write proposal drafts (guard: only below the drafts directory).
 DRAFT_TOOLS = "Read,Grep,Glob,Bash,Write"
 PIPE_DRAIN_S = 30.0
+# Exactly one of these is exported. Claude Code ranks ANTHROPIC_API_KEY above CLAUDE_CODE_OAUTH_TOKEN and,
+# in `-p` mode, uses the key whenever it is set, so exporting both would bill the key.
+CREDENTIAL_ENV = {CredentialKind.SETUP_TOKEN: "CLAUDE_CODE_OAUTH_TOKEN", CredentialKind.API_KEY: "ANTHROPIC_API_KEY"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +55,8 @@ class RunConfig:
     tools: str = TOOLS
     # The house profile's documents and proposal rules for the guard hook (`GUARD_ENV` keys only).
     guard_env: dict[str, str] = field(default_factory=dict)
+    # Which environment variable carries the credential (`CREDENTIAL_ENV`); the secret itself is never here.
+    credential: CredentialKind = CredentialKind.SETUP_TOKEN
 
 
 @dataclass(slots=True)
@@ -218,14 +224,17 @@ def build_argv(cfg: RunConfig, prompt: str) -> list[str]:
     ]  # fmt: skip
 
 
-def build_env(base: dict[str, str], cfg: RunConfig, oauth_token: str) -> dict[str, str]:
-    """An allowlisted environment: the Supervisor token is never passed to Claude."""
+def build_env(base: dict[str, str], cfg: RunConfig, token: str) -> dict[str, str]:
+    """An allowlisted environment: the Supervisor token is never passed to Claude.
+
+    The credential goes in the one variable its kind names (`CREDENTIAL_ENV`), never in both.
+    """
     env = {k: base[k] for k in _ENV_PASSTHROUGH if k in base}
     env.update(
         {
             "HOME": str(cfg.home),
             "CLAUDE_CONFIG_DIR": str(cfg.config_dir),
-            "CLAUDE_CODE_OAUTH_TOKEN": oauth_token,
+            CREDENTIAL_ENV[cfg.credential]: token,
             "USE_BUILTIN_RIPGREP": "0",
             "DISABLE_UPDATES": "1",
             "DISABLE_AUTOUPDATER": "1",
@@ -377,7 +386,7 @@ async def run_claude(
     cfg: RunConfig,
     prompt: str,
     *,
-    oauth_token: str,
+    token: str,
     transcript_path: Path,
     redactor: Redactor,
     proc_dir: Path = Path("/proc"),
@@ -390,7 +399,7 @@ async def run_claude(
     binds socket callers to that process tree).
     """
     argv = build_argv(cfg, prompt)
-    env = build_env(dict(os.environ), cfg, oauth_token)
+    env = build_env(dict(os.environ), cfg, token)
     try:
         fresh_state(cfg.config_dir, cfg.home, cfg.run_as)
     except OSError as err:

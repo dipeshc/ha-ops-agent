@@ -209,7 +209,7 @@ class PanelHandlers:
         return {
             "status": status,
             "ai": {"on": control.get("ai_switch") == "on", "state": ai_state,
-                   "backoff_until": control.get("ai_backoff_until")},
+                   "backoff_until": control.get("ai_backoff_until"), "credential": d.credential_kind()},
             "usage": {k: view.get(k) for k in ("agent_share_5h_percent", "agent_share_7d_percent",
                                                "agent_share_5h_estimated", "agent_share_7d_estimated",
                                                "max_share_percent", "share_stop_percent", "account_5h_percent",

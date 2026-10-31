@@ -67,7 +67,7 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 | --- | --- | --- |
 | `core:down` | critical | Core state not running, or the API down. |
 | `entities:<platform>` | critical for a custom integration, else warning | Newly down entities not in the baseline or `health.expected_unavailable`; flips younger than 6 hours are skipped unless the platform is custom and the state is hard `unavailable`. |
-| `custom:<domain>` | critical | A custom integration that was ok in the baseline now has a failed entry or all entities down. An entity in `health.expected_unavailable` MUST NOT count as down here. **Currently violated:** `baseline.py:202-215` counts it (backlog `P1-expected-unavailable-custom-critical`). |
+| `custom:<domain>` | critical | A custom integration that was ok in the baseline now has a failed entry or all entities down. An entity in `health.expected_unavailable` MUST NOT count as down here (the entity total is unchanged; the snapshot still lists it as unavailable). Test `test_expected_unavailable_entities_do_not_break_a_custom_integration`. |
 | `entry:<id>` | critical for a custom domain, else warning | New failed config entry. |
 | `repair:<key>` | critical iff Home Assistant says critical, else warning | New repair. |
 | `supervisor:<issue>` | warning | New Supervisor issue; `no_current_backup` is dropped when a complete encrypted backup finished within 26 hours and is critical otherwise; unhealthy/unsupported reasons are warnings every run. |
@@ -99,10 +99,13 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   entities, failed entries, repairs, Supervisor issues, log fingerprints,
   pending update versions, boot and OOM state. It MUST NOT accept custom
   integration entities, custom-domain failed entries or critical repairs;
-  those are reported again until accepted in the panel. `custom_ok` starts
+  those are reported again until accepted in the panel. A custom
+  integration entity in `health.expected_unavailable` is accepted and does
+  not count toward a broken custom integration. `custom_ok` starts
   true for every custom domain; accepted exposures start empty. The run
   sends one push ("the agent is watching") that is urgent and safety-class
   iff something was not accepted. Tests `test_health_baseline.py:36-55`,
+  `test_the_seed_accepts_expected_unavailable_custom_entities`,
   `test_daemon.py` baseline tests.
 - H12. After every processed run the baseline advances: recovered entries
   drop out (a recurrence is new again), fingerprints keep their maximum

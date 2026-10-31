@@ -19,7 +19,7 @@ configuration:
     fields:
       token:
         name: Token
-        description: "From claude setup-token (subscription). Empty: AI is off."
+        description: "A setup token from claude setup-token (subscription), or an API key. Empty: AI is off."
       plan:
         name: Plan
         description: "Subscription tier, for estimating a run's share when Claude Code reports too coarsely. auto detects it, else pro."

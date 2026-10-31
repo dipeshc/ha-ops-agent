@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from opsd.claude_runner import (
+    CREDENTIAL_ENV,
     RunConfig,
     build_argv,
     build_env,
@@ -14,6 +15,7 @@ from opsd.claude_runner import (
     run_claude,
     tree_rss_mb,
 )
+from opsd.config import CredentialKind, credential_kind
 from opsd.redact import Redactor
 from tests.conftest import OPT
 
@@ -53,6 +55,64 @@ def test_env_never_carries_supervisor_token(tmp_path: Path) -> None:
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oat"
     assert env["PATH"].startswith("/opt/ops/bin:")
     assert env["DISABLE_UPDATES"] == "1"
+
+
+# Obviously fake credentials of each documented shape; neither is, or resembles, a real one.
+API_KEY = "sk-ant-api03-TEST-ONLY-NOT-REAL"
+SETUP_TOKEN = "sk-ant-oat01-TEST-ONLY-NOT-REAL"
+
+
+def test_the_credential_kind_is_read_from_its_documented_prefix() -> None:
+    assert credential_kind(API_KEY) is CredentialKind.API_KEY
+    assert credential_kind(f"  {API_KEY}\n") is CredentialKind.API_KEY
+    # A setup token shares the `sk-ant-` stem, so the stem alone must not make it a key.
+    for token in (SETUP_TOKEN, "sk-ant-oat-xyz", "oat-token-abcdef", "SK-ANT-API03-TEST-ONLY-NOT-REAL"):
+        assert credential_kind(token) is CredentialKind.SETUP_TOKEN, token
+    assert credential_kind("") is None and credential_kind("  ") is None
+
+
+@pytest.mark.parametrize(("kind", "secret"), [(CredentialKind.SETUP_TOKEN, SETUP_TOKEN),
+                                              (CredentialKind.API_KEY, API_KEY)])  # fmt: skip
+def test_the_environment_carries_exactly_one_credential(tmp_path: Path, kind: CredentialKind, secret: str) -> None:
+    # Leftovers in the daemon's own environment never reach the run.
+    base = {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "leftover-key", "CLAUDE_CODE_OAUTH_TOKEN": "leftover-token",
+            "ANTHROPIC_AUTH_TOKEN": "leftover-bearer"}  # fmt: skip
+    env = build_env(base, config(tmp_path, credential=kind), secret)
+    assert env[CREDENTIAL_ENV[kind]] == secret
+    others = {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"} - {CREDENTIAL_ENV[kind]}
+    assert not others & set(env)
+    assert [k for k, v in env.items() if v == secret] == [CREDENTIAL_ENV[kind]]
+
+
+async def test_an_api_key_run_exports_only_the_key(tmp_path: Path, meminfo: Path) -> None:
+    seen = tmp_path / "seen"
+    script = tmp_path / "fake-claude"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'echo "key=$ANTHROPIC_API_KEY oauth=${{CLAUDE_CODE_OAUTH_TOKEN-absent}}" > "{seen}"\n'
+        # A provider that echoed the key back must not get it into the transcript or the error.
+        'echo "{\\"type\\":\\"system\\",\\"note\\":\\"$ANTHROPIC_API_KEY\\"}"\n'
+        'echo "auth failed for $ANTHROPIC_API_KEY" >&2\n'
+        'echo \'{"type":"result","subtype":"success","result":"{}","num_turns":1}\'\n'
+    )
+    script.chmod(0o755)
+    cfg = config(tmp_path, str(script), credential=CredentialKind.API_KEY)
+    transcript = tmp_path / "t.gz"
+    result = await run_claude(cfg, "p", token=API_KEY, transcript_path=transcript, redactor=Redactor([API_KEY]),
+                              meminfo=meminfo)  # fmt: skip
+    assert result.status == "ok", result.error
+    assert seen.read_text().strip() == f"key={API_KEY} oauth=absent"
+    text = gzip.open(transcript, "rt").read()
+    assert API_KEY not in text and "TEST-ONLY" not in text and '"result"' in text
+    assert API_KEY not in repr(result) and API_KEY not in repr(cfg)
+    # Without a result event the stderr tail becomes the error: still masked.
+    failing = tmp_path / "fake-claude-fails"
+    failing.write_text('#!/bin/sh\necho "invalid x-api-key $ANTHROPIC_API_KEY" >&2\nexit 1\n')
+    failing.chmod(0o755)
+    result = await run_claude(config(tmp_path, str(failing), credential=CredentialKind.API_KEY), "p", token=API_KEY,
+                              transcript_path=transcript, redactor=Redactor([API_KEY]), meminfo=meminfo)  # fmt: skip
+    assert result.status != "ok" and "invalid x-api-key" in (result.error or "")
+    assert "TEST-ONLY" not in repr(result)
 
 
 def test_parse_final_json() -> None:
@@ -105,7 +165,7 @@ async def test_run_claude_success_and_redacted_transcript(tmp_path: Path, meminf
     transcript = tmp_path / "run" / "t.jsonl.gz"
     proc_dir = tmp_path / "proc"
     proc_dir.mkdir()
-    result = await run_claude(cfg, "p", oauth_token="t", transcript_path=transcript, redactor=Redactor(),
+    result = await run_claude(cfg, "p", token="t", transcript_path=transcript, redactor=Redactor(),
                               proc_dir=proc_dir, meminfo=meminfo)  # fmt: skip
     assert result.status == "ok" and result.cost_usd == 0.12 and result.structured is not None
     text = gzip.open(transcript, "rt").read()
@@ -118,7 +178,7 @@ async def test_memory_guard_kills_run(tmp_path: Path) -> None:
     cfg = config(tmp_path, fake_binary(tmp_path, "sleep"), poll_s=0.1)
     proc_dir = tmp_path / "proc"
     proc_dir.mkdir()
-    result = await run_claude(cfg, "p", oauth_token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor(),
+    result = await run_claude(cfg, "p", token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor(),
                               proc_dir=proc_dir, meminfo=low)  # fmt: skip
     assert result.status == "aborted_memory_guard"
 
@@ -127,7 +187,7 @@ async def test_timeout(tmp_path: Path, meminfo: Path) -> None:
     cfg = config(tmp_path, fake_binary(tmp_path, "sleep"), timeout_s=0.5)
     proc_dir = tmp_path / "proc"
     proc_dir.mkdir()
-    result = await run_claude(cfg, "p", oauth_token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor(),
+    result = await run_claude(cfg, "p", token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor(),
                               proc_dir=proc_dir, meminfo=meminfo)  # fmt: skip
     assert result.status == "timeout"
 
@@ -155,7 +215,7 @@ async def test_timeout_kills_whole_process_group(tmp_path: Path, meminfo: Path) 
     cfg = config(tmp_path, str(script), timeout_s=1.5)
     proc_dir = tmp_path / "proc"
     proc_dir.mkdir()
-    result = await run_claude(cfg, "p", oauth_token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor(),
+    result = await run_claude(cfg, "p", token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor(),
                               proc_dir=proc_dir, meminfo=meminfo)  # fmt: skip
     assert result.status == "timeout"
     child = int(pidfile.read_text())
@@ -173,7 +233,7 @@ async def test_timeout_kills_whole_process_group(tmp_path: Path, meminfo: Path) 
 
 async def test_missing_binary_is_an_error_not_a_crash(tmp_path: Path, meminfo: Path) -> None:
     cfg = config(tmp_path, str(tmp_path / "does-not-exist"))
-    result = await run_claude(cfg, "p", oauth_token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor(),
+    result = await run_claude(cfg, "p", token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor(),
                               meminfo=meminfo)  # fmt: skip
     assert result.status == "error"
 

@@ -48,7 +48,7 @@ from opsd.changepaths import SUPPRESS_PATH
 from opsd.changes import ChangeManager, ChangeRefused, LiveFiles, registry_entities
 from opsd.channels import BudgetClass, CompanionPush, Message
 from opsd.claude_runner import RunResult
-from opsd.config import Options, Paths, claude_token
+from opsd.config import Options, Paths, claude_token, credential_kind
 from opsd.conversation import clean_text, context_block
 from opsd.events import Dispatcher, Event, EventQueue, Priority, Schedule, TaskScheduler
 from opsd.evidence import EvidenceCache, EvidenceSource
@@ -201,7 +201,7 @@ def fallback_push(items: list[Item], now: datetime | None = None) -> Message | N
     )
 
 
-def baseline_summary(snapshot: Snapshot) -> tuple[str, bool]:
+def baseline_summary(snapshot: Snapshot, expected_unavailable: frozenset[str] = frozenset()) -> tuple[str, bool]:
     """Seed push text, and whether something critical was found (and not accepted)."""
     platforms: dict[str, int] = {}
     for info in snapshot.unavailable.values():
@@ -213,7 +213,7 @@ def baseline_summary(snapshot: Snapshot) -> tuple[str, bool]:
         f"{len(snapshot.repairs)} repairs; {len(snapshot.updates)} updates pending. "
         "Future checks alert only on changes."
     )
-    excluded = seed_exclusions(snapshot)
+    excluded = seed_exclusions(snapshot, expected_unavailable)
     problems = []
     if excluded["custom_broken"]:
         problems.append(f"custom integrations broken now: {', '.join(excluded['custom_broken'])}")
@@ -327,6 +327,7 @@ class Daemon:
                 send=self.send_now,
                 kill=self.runner.kill,
                 admin_user=lambda: self.inbound.admin.user_id if self.inbound.admin is not None else None,
+                api_key=lambda: self.runner.api_key,
             )
             self.runner._caps = self.usage.caps
             self.runner._after_run = self.usage.after_run
@@ -689,6 +690,11 @@ class Daemon:
         found = record.get("anomalies")
         return tuple(f"{record.get('profile')}: {a}" for a in found) if isinstance(found, list) else ()
 
+    def credential_kind(self) -> str | None:
+        """Which kind of provider credential is configured (`setup_token`, `api_key`), never the value."""
+        kind = credential_kind(claude_token(self.options, self.paths))
+        return None if kind is None else str(kind)
+
     def options_notice(self) -> dict[str, Any] | None:
         """What the panel says about the add-on options: refused values and the provider."""
         options = self.options
@@ -888,9 +894,10 @@ class Daemon:
 
         raw_baseline = read_json(self.paths.baseline_file, None)
         if raw_baseline is None:
-            baseline = seed(snapshot, now)
+            expected = frozenset(self.options.health.expected_unavailable)
+            baseline = seed(snapshot, now, expected_unavailable=expected)
             write_json_atomic(self.paths.baseline_file, baseline.to_json())
-            summary, critical = baseline_summary(snapshot)
+            summary, critical = baseline_summary(snapshot, expected)
             outcome = await self.send(
                 Message(
                     "Ops Agent is watching",

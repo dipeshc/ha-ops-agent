@@ -21,6 +21,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -514,8 +515,28 @@ class Options:
                           extra={"problem": problem})  # fmt: skip
 
 
+class CredentialKind(StrEnum):
+    """Which provider credential `claude.token` holds."""
+
+    SETUP_TOKEN = "setup_token"  # noqa: S105 - a kind label, not a secret
+    API_KEY = "api_key"
+
+
+# The provider documents its API keys as `sk-ant-api...`. A setup token (`claude setup-token`) shares the
+# `sk-ant-` stem (`sk-ant-oat...`), so the stem alone would take every setup token for a key.
+API_KEY_PREFIX = "sk-ant-api"
+
+
+def credential_kind(secret: str) -> CredentialKind | None:
+    """The kind of a credential by its documented prefix; None when there is none. Never logs the value."""
+    secret = secret.strip()
+    if not secret:
+        return None
+    return CredentialKind.API_KEY if secret.startswith(API_KEY_PREFIX) else CredentialKind.SETUP_TOKEN
+
+
 def claude_token(options: Options, paths: Paths) -> str:
-    """The subscription token: add-on option first, then a file in /data."""
+    """The provider credential (a setup token or an API key): add-on option first, then a file in /data."""
     if options.claude.token.strip():
         return options.claude.token.strip()
     try:

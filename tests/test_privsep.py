@@ -114,7 +114,7 @@ async def test_runner_passes_user_and_group(tmp_path: Path, monkeypatch: pytest.
     cfg = RunConfig(model="m", max_turns=1, budget_usd=0.1, system_prompt_file=OPT / "prompts/system-append.md",
                     result_schema_file=OPT / "prompts/triage-result.schema.json", config_dir=tmp_path / "c",
                     home=tmp_path / "c/home", cwd=tmp_path, run_as=(1001, 1002))  # fmt: skip
-    result = await run_claude(cfg, "p", oauth_token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor())
+    result = await run_claude(cfg, "p", token="t", transcript_path=tmp_path / "t.gz", redactor=Redactor())
     assert result.status == "error"
     assert captured["user"] == 1001 and captured["group"] == 1002 and captured["extra_groups"] == []
     env = captured["env"]

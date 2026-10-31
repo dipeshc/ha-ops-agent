@@ -22,7 +22,8 @@ Implementation: `opsd/diagnostics.py`. Tests: `tests/test_diagnostics.py`.
   `{available: false, error}`. Test `test_a_missing_store_is_reported_not_raised`.
 - D5. `health`: last check time and result, run status, Core down since and
   state, snapshot time, source errors (at most 20), open items as totals by
-  severity and kind, self-test, inbound state, AI state, updates option,
+  severity and kind, self-test, inbound state, AI state, the credential
+  kind (`ai_credential`: `setup_token`, `api_key` or null), updates option,
   paused and effective.
 - D6. Excluded by construction: entity ids, item keys, chat text, prompts,
   model output, tokens. Tests `test_secrets_and_house_names_never_leave`,

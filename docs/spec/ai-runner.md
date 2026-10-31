@@ -138,19 +138,31 @@ adding a module with the same `RunConfig -> RunResult` contract and a
 dispatch on `llm.provider`.
 
 - AP1. **Credential.** `claude.token`, else the file
-  `/data/secrets/claude_oauth_token`. The token is exported to the provider
-  process as `CLAUDE_CODE_OAUTH_TOKEN` and nowhere else; the 0.19.0 code
-  does not detect or handle an API key differently. Test
-  `test_options_parsing_and_token`.
-- AP1a. **API key (planned, not yet implemented; backlog
-  `P2-api-key-credential`).** `claude.token` MUST also accept a provider API
-  key. The runner detects a key by its `sk-ant-` prefix and exports it as
-  `ANTHROPIC_API_KEY` instead of `CLAUDE_CODE_OAUTH_TOKEN`; a setup token
-  keeps today's path. With a key there are no subscription usage windows:
-  the share rule ([budget.md](budget.md) B3) does not apply, the run caps
-  and `limits.run_max_usd` do, and `claude.plan` is ignored. The key is
-  never logged (the redactor already masks `sk-ant-` values) and the panel
-  reports which credential kind is in use without showing it.
+  `/data/secrets/claude_oauth_token`, holds either a Claude Code setup
+  token (`claude setup-token`, a subscription) or an Anthropic API key. It
+  is exported to the provider process in exactly one variable (AP1a) and
+  nowhere else. Tests `test_options_parsing_and_token`,
+  `test_the_credential_kind_is_read_from_its_documented_prefix`.
+- AP1a. **API key.** The daemon classifies the credential by the
+  provider's documented API key prefix `sk-ant-api`: a key is exported as
+  `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` is absent; anything
+  else is a setup token, exported as `CLAUDE_CODE_OAUTH_TOKEN` with
+  `ANTHROPIC_API_KEY` absent. The `sk-ant-` stem alone MUST NOT decide,
+  because setup tokens share it (`sk-ant-oat...`). Exactly one is ever set:
+  Claude Code ranks `ANTHROPIC_API_KEY` above `CLAUDE_CODE_OAUTH_TOKEN`
+  and, in `-p` mode, uses the key whenever it is present. With a key there
+  are no subscription usage windows: the share rule, the account-busy
+  yield and the user-class reserve ([budget.md](budget.md) B3, B5) do not
+  apply, the daily run caps, turn caps, run time and `limits.run_max_usd`
+  do, and `claude.plan` is ignored. The key is never logged, written to a
+  transcript, the diagnostics export or `api/state` (the redactor masks
+  `sk-ant-` values and every configured token); `api/state` `ai.credential`
+  and the diagnostics `health.ai_credential` report the kind
+  (`setup_token`, `api_key`, or null with none). Tests
+  `test_the_environment_carries_exactly_one_credential`,
+  `test_an_api_key_run_exports_only_the_key`,
+  `test_an_api_key_skips_the_share_rule_but_not_the_run_caps`,
+  `test_an_api_key_never_leaves_in_the_export_or_the_state`.
 - AP2. **Process.** `nice -n 10 claude -p <prompt> --output-format
   stream-json --verbose --model <m> --max-turns <n> --max-budget-usd <x>
   --permission-mode dontAsk --tools Read,Grep,Glob,Bash[,Write]
@@ -161,12 +173,15 @@ dispatch on `llm.provider`.
   `prctl` fallback), stdin closed. Test `test_run_claude_success_and_redacted_transcript`.
 - AP3. **Environment.** Only `PATH` (prefixed with `/opt/ops/bin`), `LANG`,
   `LC_ALL`, `TZ`, `HOME=/data/claude-ops/home`,
-  `CLAUDE_CONFIG_DIR=/data/claude-ops`, the token, `USE_BUILTIN_RIPGREP=0`,
+  `CLAUDE_CONFIG_DIR=/data/claude-ops`, the credential in its one variable
+  (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, AP1a), `USE_BUILTIN_RIPGREP=0`,
   `DISABLE_UPDATES=1`, `DISABLE_AUTOUPDATER=1`,
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and the guard's
   `OPS_READ_EXTRA`, `OPS_PROPOSAL_KINDS`, `OPS_FACTS_PATH`. The Supervisor
-  token is never passed. Tests `test_runner_passes_user_and_group`,
-  `test_claude_runner.py:50-56`.
+  token and the other provider credential variable (`ANTHROPIC_AUTH_TOKEN`)
+  are never passed. Tests
+  `test_runner_passes_user_and_group`,
+  `test_the_environment_carries_exactly_one_credential`.
 - AP4. **Managed settings** at `/etc/claude-code/managed-settings.json`
   (0644): managed permission rules and hooks only, default mode `dontAsk`,
   bypass disabled, allow `Read(//run/ops-claude/config/**)`,
@@ -178,7 +193,9 @@ dispatch on `llm.provider`.
 - AP6. **Output.** The `result` event decides the status (`ok`, `max_turns`,
   `budget`, `error`); the structured output, else the last top-level JSON
   object in the result text, is the result; tokens, cache reads, duration,
-  cost, turns and permission denials are recorded. Rate-limit events give
+  cost, turns and permission denials are read from it (the usage ledger
+  keeps no cost, [budget.md](budget.md) B7; the health check's history line
+  keeps its triage run's cost). Rate-limit events give
   the usage-window readings ([budget.md](budget.md)); a rejected last
   reading or a usage-limit message makes the status `usage_limited` with
   the reset time; system events may carry a plan hint. Without a result

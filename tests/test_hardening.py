@@ -172,7 +172,7 @@ async def test_a_run_leaves_no_state_and_still_gets_the_token(tmp_path: Path) ->
     cfg = config(tmp_path, str(script))
     cfg.config_dir.mkdir(parents=True)
     (cfg.config_dir / "old-history.jsonl").write_text("from an earlier run")
-    result = await run_claude(cfg, "p", oauth_token="sk-ant-oat01-token", transcript_path=tmp_path / "t.gz",
+    result = await run_claude(cfg, "p", token="sk-ant-oat01-token", transcript_path=tmp_path / "t.gz",
                               redactor=Redactor(), meminfo=_meminfo(tmp_path))  # fmt: skip
     assert result.status == "ok", result.error
     assert (tmp_path / "token-copy").read_text().strip() == "sk-ant-oat01-token"

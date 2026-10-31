@@ -202,7 +202,7 @@ def fallback_push(items: list[Item], now: datetime | None = None) -> Message | N
     )
 
 
-def baseline_summary(snapshot: Snapshot) -> tuple[str, bool]:
+def baseline_summary(snapshot: Snapshot, expected_unavailable: frozenset[str] = frozenset()) -> tuple[str, bool]:
     """Seed push text, and whether something critical was found (and not accepted)."""
     platforms: dict[str, int] = {}
     for info in snapshot.unavailable.values():
@@ -214,7 +214,7 @@ def baseline_summary(snapshot: Snapshot) -> tuple[str, bool]:
         f"{len(snapshot.repairs)} repairs; {len(snapshot.updates)} updates pending. "
         "Future checks alert only on changes."
     )
-    excluded = seed_exclusions(snapshot)
+    excluded = seed_exclusions(snapshot, expected_unavailable)
     problems = []
     if excluded["custom_broken"]:
         problems.append(f"custom integrations broken now: {', '.join(excluded['custom_broken'])}")
@@ -883,9 +883,10 @@ class Daemon:
 
         raw_baseline = read_json(self.paths.baseline_file, None)
         if raw_baseline is None:
-            baseline = seed(snapshot, now)
+            expected = frozenset(self.options.health.expected_unavailable)
+            baseline = seed(snapshot, now, expected_unavailable=expected)
             write_json_atomic(self.paths.baseline_file, baseline.to_json())
-            summary, critical = baseline_summary(snapshot)
+            summary, critical = baseline_summary(snapshot, expected)
             outcome = await self.send(
                 Message(
                     "Ops Agent is watching",

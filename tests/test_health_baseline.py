@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from opsd.baseline import Baseline, advance, apply_ack, diff, seed
+from opsd.baseline import Baseline, advance, apply_ack, diff, seed, seed_exclusions
 from opsd.config import Paths
 from opsd.health import (
     collect,
@@ -64,6 +64,47 @@ async def test_custom_integration_breaking_is_critical(fake_ha: FakeHA, paths: P
     assert items["entities:acme_solar"].severity == "critical"
     assert items["entities:acme_solar"].detail["count"] == 3
     assert items["custom:acme_solar"].severity == "critical"
+
+
+ACME_SOLAR = ("light.kitchen", "light.porch", "fan.bedroom")
+
+
+async def test_expected_unavailable_entities_do_not_break_a_custom_integration(
+    fake_ha: FakeHA, paths: Paths, meminfo: Path
+) -> None:
+    baseline = seed(await snap(fake_ha, paths, meminfo), NOW)
+    for entity in ACME_SOLAR:
+        fake_ha.set_unavailable(entity, hours_ago=8)
+    s = await snap(fake_ha, paths, meminfo)
+    assert diff(s, baseline, NOW, expected_unavailable=frozenset(ACME_SOLAR)) == []
+    # Naming only some: the rest no longer reach all entities, but each stays a critical entities item.
+    items = {i.key: i for i in diff(s, baseline, NOW, expected_unavailable=frozenset(ACME_SOLAR[:2]))}
+    assert "custom:acme_solar" not in items
+    assert items["entities:acme_solar"].severity == "critical"
+    assert items["entities:acme_solar"].detail["entities"] == ["fan.bedroom"]
+    # An expected entity of another integration does not change the count.
+    items = {i.key: i for i in diff(s, baseline, NOW, expected_unavailable=frozenset({"sensor.old_thing"}))}
+    assert items["custom:acme_solar"].severity == "critical"
+    # The snapshot itself still lists them as unavailable.
+    assert set(ACME_SOLAR) <= set(s.unavailable)
+
+
+async def test_the_seed_accepts_expected_unavailable_custom_entities(
+    fake_ha: FakeHA, paths: Paths, meminfo: Path
+) -> None:
+    for entity in ACME_SOLAR:
+        fake_ha.set_unavailable(entity, hours_ago=48)
+    s = await snap(fake_ha, paths, meminfo)
+    assert seed_exclusions(s)["custom_broken"] == ["acme_solar"]
+    expected = frozenset(ACME_SOLAR[:2])
+    excluded = seed_exclusions(s, expected)
+    assert excluded["custom_broken"] == [] and excluded["custom_unavailable"] == ["fan.bedroom"]
+    baseline = seed(s, NOW, expected_unavailable=expected)
+    assert {"light.kitchen", "light.porch"} <= set(baseline.unavailable)
+    assert "fan.bedroom" not in baseline.unavailable
+    assert [i.key for i in diff(s, baseline, NOW, expected_unavailable=expected)] == ["entities:acme_solar"]
+    everything = frozenset(ACME_SOLAR)
+    assert diff(s, seed(s, NOW, expected_unavailable=everything), NOW, expected_unavailable=everything) == []
 
 
 def add_zha_entity(fake: FakeHA) -> None:

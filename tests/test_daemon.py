@@ -253,6 +253,16 @@ async def test_seed_does_not_accept_broken_custom_integration(h: Harness) -> Non
     assert read_json(h.paths.baseline_file, {})["custom_ok"]["acme_solar"] is True
 
 
+async def test_seed_accepts_expected_unavailable_custom_entities(h: Harness) -> None:
+    entities = ["light.kitchen", "light.porch", "fan.bedroom"]
+    for entity in entities:
+        h.fake.set_unavailable(entity, hours_ago=48)
+    await h.daemon(health__expected_unavailable=entities).health_cycle("catch_up")
+    seed_push = h.pushes()[-1]
+    assert "NOT accepted" not in seed_push["message"]
+    assert set(entities) <= set(read_json(h.paths.baseline_file, {})["unavailable"])
+
+
 async def test_user_ack_from_panel_can_accept(h: Harness) -> None:
     d = h.daemon(claude__token="")
     await d.health_cycle("catch_up")

@@ -75,6 +75,7 @@ from typing import Any
 from opsd import proposals, updatefix
 from opsd.approvals import ApprovalError, Approvals, approvable, is_reboot
 from opsd.backups import wait_for_backup
+from opsd.baseline import honoured_expected
 from opsd.capabilities import Args
 from opsd.changes import ChangeRefused
 from opsd.channels import Message
@@ -574,6 +575,12 @@ class UpdateManager:
         except StoreError, sqlite3.Error:
             return 0.0
         return 0.0 if first is None else max(0.0, (now - first).total_seconds() / 86400)
+
+    def _expected(self) -> frozenset[str]:
+        """`health.expected_unavailable` without access hardware: a listed lock going down after an update is
+        still a regression (`baseline.honoured_expected`; the health point has no device class, so every listed
+        cover counts as access)."""
+        return honoured_expected(self.options.health.expected_unavailable)[0]
 
     def gate(self) -> str | None:
         """Why updates may not be installed right now, or None."""
@@ -1650,8 +1657,7 @@ class UpdateManager:
                 except ApiError, OSError, ValueError:
                     now_state = None
                 addons[slug] = (job.target.get("state_before"), str(now_state) if now_state else None)
-            result = compare(before, after, expected_unavailable=frozenset(self.options.health.expected_unavailable),
-                             addon_states=addons)  # fmt: skip
+            result = compare(before, after, expected_unavailable=self._expected(), addon_states=addons)
             elapsed = self._clock() - started
             if (result.healthy and elapsed >= SETTLE_MIN) or elapsed >= SETTLE_MAX:
                 return result, after if result.healthy else None
@@ -1863,7 +1869,7 @@ class UpdateManager:
             before = HealthPoint.from_json(run["before"])
             await self._wait_core_up()
             after = await self.ops.probe(self._custom_domains())
-            result = compare(before, after, expected_unavailable=frozenset(self.options.health.expected_unavailable))
+            result = compare(before, after, expected_unavailable=self._expected())
         reboot = (job.target.get("reboot") or {}) | {"confirmed_at": now.isoformat(timespec="seconds"),
                                                      "after_reboot": True, "boot_after": state.boot_timestamp,
                                                      "slot_after": state.boot}  # fmt: skip

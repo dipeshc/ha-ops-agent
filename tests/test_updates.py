@@ -1608,3 +1608,15 @@ async def test_a_held_core_update_without_a_fix_asks_and_a_rejected_fix_asks_aga
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
     assert rig.item(CORE, "2026.10.4")["state"] == "waiting" and rig.ops.installs() == []
+
+
+async def test_a_listed_lock_going_down_after_an_update_still_rolls_it_back(tmp_path: Path) -> None:
+    """health.expected_unavailable never silences access hardware, also in the verify after an install."""
+    rig = Rig(tmp_path, health__expected_unavailable=["lock.front_door", "light.garden"])
+    only_auto(rig, CARD)
+    rig.ops.unavailable_when[(CARD, "v1.16.13")] = ["lock.front_door", "light.garden"]
+    await rig.manager.run_window()
+    job = rig.jobs()[CARD]
+    assert job.state == "rolled_back" and any("lock.front_door" in r for r in job.regressions)
+    assert not any("light.garden" in r for r in job.regressions)  # an ordinary listed entity stays expected
+    rig.store.close()

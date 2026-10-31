@@ -61,7 +61,7 @@ configuration:
         description: Local HH:MM.
       expected_unavailable:
         name: Expected unavailable
-        description: Entity ids that never raise an item (normally-off devices). Locks, alarm panels and garage or gate covers are always reported.
+        description: Entity ids that never raise an item (normally-off devices). Locks, alarm panels, covers other than blinds and the like, and anything named like a door, gate or lock are always reported.
   updates:
     name: Updates
     description: The nightly update plan and automatic installs.

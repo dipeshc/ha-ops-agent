@@ -1017,7 +1017,7 @@ class Daemon:
 
     def _expected_unavailable(self, snapshot: Snapshot) -> frozenset[str]:
         """`health.expected_unavailable`, without anything that opens the house (one warning per entity)."""
-        expected, refused = honoured_expected(self.options.health.expected_unavailable, snapshot)
+        expected, refused = honoured_expected(self.options.health.expected_unavailable, snapshot.unavailable)
         for entity_id in sorted(set(refused) - self._expected_refused):
             _LOGGER.warning("health.expected_unavailable lists access hardware; it is still reported",
                             extra={"entity_id": entity_id})  # fmt: skip

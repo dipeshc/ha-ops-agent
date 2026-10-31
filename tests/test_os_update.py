@@ -171,6 +171,25 @@ async def test_a_host_that_does_not_reboot_leaves_it_installed_and_pending(os_ri
     assert rig.ops.reboots == 1  # the agent never reboots outside its approved run
 
 
+async def test_a_listed_lock_going_down_after_the_reboot_is_still_worse_health(tmp_path: Path) -> None:
+    """The confirmation after an outside reboot compares health without silencing a listed lock."""
+    rig = Rig(tmp_path, health__expected_unavailable=["lock.front_door"])
+    rig.ops.entities[OS] = entity("17.3", "17.4", 27, "Home Assistant Operating System")
+    rig.ops.registry.append({"entity_id": OS, "platform": "hassio", "unique_id": "home_assistant_os_version_latest"})
+    rig.ops.reboot_ignored = True
+    await approved_night(rig)
+    await rig.manager.run_window()
+    assert rig.jobs()[OS].state == "reboot_pending"
+    rig.ops.unavailable_when[(OS, "17.4")] = ["lock.front_door"]
+    rig.ops.reboot_after()
+    rig.now += timedelta(hours=3)
+    assert await rig.manager.reconcile() == ["Home Assistant Operating System 17.3 → 17.4: health worse"]
+    job = rig.jobs()[OS]
+    assert job.state == "rollback_failed" and any("lock.front_door" in r for r in job.regressions)
+    assert rig.manager.paused()
+    rig.store.close()
+
+
 async def test_no_reboot_after_the_window(os_rig: Rig) -> None:
     rig = os_rig
     await approved_night(rig)

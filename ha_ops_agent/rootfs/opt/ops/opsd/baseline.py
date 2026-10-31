@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from opsd.access import access_kind, named_like_access
+from opsd.access import opens_the_house
 from opsd.health import Snapshot, hours_since, parse_time
 
 FLAP_HOURS = 6.0
@@ -71,21 +71,19 @@ class Baseline:
         return active
 
 
-def opens_the_house(entity_id: str, info: Mapping[str, Any] | None = None) -> bool:
-    """A lock, an alarm panel, an access cover or anything named like access hardware (`opsd.access`)."""
-    attributes = {"device_class": (info or {}).get("device_class")}
-    return access_kind(entity_id, attributes) is not None or named_like_access(entity_id)
+def honoured_expected(listed: Iterable[str], unavailable: Mapping[str, Mapping[str, Any]] | None = None,
+                      ) -> tuple[frozenset[str], list[str]]:  # fmt: skip
+    """`health.expected_unavailable` as every check uses it, and the entries it ignores.
 
-
-def honoured_expected(listed: Iterable[str], snapshot: Snapshot) -> tuple[frozenset[str], list[str]]:
-    """`health.expected_unavailable` as the checks use it, and the entries they ignore.
-
-    What opens the house is never silenced: listed or not, a lock, an alarm panel or an access cover that is
-    down is reported as if it were not listed.
+    What opens the house is never silenced (`opsd.access.opens_the_house`): listed or not, a lock, an alarm
+    panel, a cover that is not positively a blind or the like, or anything whose id or names say access is
+    reported as if it were not listed. `unavailable` (a snapshot's) gives what is known of each down entity
+    (device class, names); without it, an entry is judged by its id, so every cover counts (fail closed).
     """
     kept, refused = set(), []
     for entity_id in listed:
-        if opens_the_house(entity_id, snapshot.unavailable.get(entity_id)):
+        info = (unavailable or {}).get(entity_id) or {}
+        if opens_the_house(entity_id, device_class=info.get("device_class"), names=info.get("names") or ()):
             refused.append(entity_id)
         else:
             kept.add(entity_id)

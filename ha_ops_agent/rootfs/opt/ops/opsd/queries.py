@@ -14,7 +14,7 @@ from typing import Any
 
 from opsd import __version__, githistory, privacy
 from opsd.api import LiveAPI
-from opsd.baseline import Baseline, diff
+from opsd.baseline import Baseline, diff, honoured_expected
 from opsd.capabilities import Args
 from opsd.health import collect, custom_domains, derive_custom_integrations, derive_entities
 from opsd.jsonstore import read_json, read_jsonl
@@ -71,7 +71,7 @@ def cmd_health(ctx: ExecContext, args: Args) -> Any:
                 snapshot,
                 Baseline.from_json(raw),
                 datetime.now(UTC),
-                expected_unavailable=frozenset(options.health.expected_unavailable),
+                expected_unavailable=honoured_expected(options.health.expected_unavailable, snapshot.unavailable)[0],
             )
         ]
     data = snapshot.to_json()

@@ -139,8 +139,17 @@ def derive_entities(
             unavailable[entity_id] = {
                 "state": st.get("state"),
                 "platform": platform,
-                # What decides whether a cover opens the house (`opsd.access`), when the state still says it.
+                # What decides whether it opens the house (`opsd.access`), when the state and registry say it.
                 "device_class": (st.get("attributes") or {}).get("device_class"),
+                "names": [
+                    n
+                    for n in (
+                        (st.get("attributes") or {}).get("friendly_name"),
+                        entry.get("name"),
+                        entry.get("original_name"),
+                    )
+                    if isinstance(n, str) and n
+                ][:3],
                 "config_entry_id": entry.get("config_entry_id"),
                 "last_changed": st.get("last_changed"),
             }

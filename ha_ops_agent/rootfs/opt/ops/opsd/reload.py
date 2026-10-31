@@ -35,7 +35,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
-from opsd.access import named_like_access
+from opsd.access import named_like_access, opens_by_kind
 from opsd.api import LiveAPI
 from opsd.capabilities import Args, CapabilityError
 from opsd.policy import NEVER_RELOAD_DOMAINS
@@ -59,8 +59,6 @@ NEVER_PREFIX = "integration.reload."
 # Never reloaded, even when allowlisted: the generic list in code (`policy.NEVER_RELOAD_DOMAINS`) plus the house
 # profile's additions (`reload.deny`, e.g. a forked integration that also switches other loads), which can only add.
 DENY_DOMAINS: frozenset[str] = NEVER_RELOAD_DOMAINS
-PROTECTED_ENTITY_DOMAINS = frozenset({"lock", "alarm_control_panel"})
-SAFE_COVER_CLASSES = frozenset({"blind", "shade", "curtain", "awning", "shutter"})
 NAMED_ACCESS_DOMAINS = frozenset({"switch", "button", "valve", "cover"})
 # Named access hardware (`opsd.access`): a room name alone is not, and a gadget's child lock is removed before
 # the check instead of blocking the whole integration.
@@ -158,12 +156,12 @@ def _protected(entities: Iterable[Mapping[str, Any]], states: Mapping[str, Mappi
     for entity in entities:
         entity_id = str(entity["entity_id"])
         kind = entity_id.partition(".")[0]
-        if kind in PROTECTED_ENTITY_DOMAINS:
-            return f"it provides {entity_id}"
         state = states.get(entity_id, {})
         raw_attributes = state.get("attributes")
         attributes: Mapping[str, Any] = raw_attributes if isinstance(raw_attributes, dict) else {}
-        if kind == "cover" and str(attributes.get("device_class")) not in SAFE_COVER_CLASSES:
+        if opens_by_kind(entity_id, attributes.get("device_class")):
+            if kind != "cover":
+                return f"it provides {entity_id}"
             return f"it provides {entity_id} (not positively a blind, shade, curtain, awning or shutter)"
         if kind in NAMED_ACCESS_DOMAINS:
             names = " ".join(

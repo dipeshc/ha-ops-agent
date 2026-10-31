@@ -139,7 +139,7 @@ to your home. The main options:
 | `notify.max_pushes_per_day` | `3` | Normal pushes per day. Safety pushes have their own small budget. |
 | `notify.quiet_start` / `quiet_end` | `22:30` / `07:00` | Non-urgent pushes wait until the end. Empty turns quiet hours off. |
 | `health.check_time` | `05:30` | Daily health check. |
-| `health.expected_unavailable` | `[]` | Entities that are normally unavailable and are not news. Locks, alarm panels and garage or gate covers are always reported. |
+| `health.expected_unavailable` | `[]` | Entities that are normally unavailable and are not news. Locks, alarm panels, covers other than blinds, shades, curtains, awnings and shutters, and anything named like a door, gate or lock are always reported. |
 | `updates.window` | `04:00` | Nightly update window. |
 | `updates.auto_install` | `off` | `on` installs soaked patches and minors (needs `agent.mode: act`). |
 | `updates.min_age_days` | `7` | Soak time for patches (7 minimum); minors wait twice as long. |

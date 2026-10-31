@@ -114,24 +114,38 @@ async def test_the_seed_accepts_expected_unavailable_custom_entities(
 
 
 async def test_access_hardware_is_never_expected_unavailable(fake_ha: FakeHA, paths: Paths, meminfo: Path) -> None:
-    from opsd.baseline import honoured_expected, opens_the_house
+    from opsd.access import opens_the_house
+    from opsd.baseline import honoured_expected
 
-    fake_ha.states.append({"entity_id": "cover.big", "state": "unavailable", "last_changed": iso_hours(8),
-                           "attributes": {"device_class": "garage"}})  # fmt: skip
-    fake_ha.registry.append({"entity_id": "cover.big", "platform": "acme_solar", "config_entry_id": "lut1"})
+    def down(entity_id: str, **attributes: str) -> None:
+        fake_ha.states.append({"entity_id": entity_id, "state": "unavailable", "last_changed": iso_hours(8),
+                               "attributes": attributes})  # fmt: skip
+        fake_ha.registry.append({"entity_id": entity_id, "platform": "acme_solar", "config_entry_id": "lut1"})
+
+    down("cover.big", device_class="garage")
+    down("cover.ratgdo_1")  # a plain id and no class: fail closed
+    down("cover.hall", device_class="door")
+    down("cover.living_blind", device_class="blind")
+    down("switch.relay_3", friendly_name="Front door release")  # only its friendly name says access
     s = await snap(fake_ha, paths, meminfo)
-    listed = ("lock.front_door", "alarm_control_panel.home", "cover.big", "cover.side_gate", "switch.garage_opener",
-              "light.porch", "switch.vacuum_child_lock")  # fmt: skip
-    kept, refused = honoured_expected(listed, s)
-    assert refused == ["alarm_control_panel.home", "cover.big", "cover.side_gate", "lock.front_door",
-                       "switch.garage_opener"]  # fmt: skip
-    assert kept == {"light.porch", "switch.vacuum_child_lock"}
-    assert opens_the_house("cover.big", s.unavailable["cover.big"]) and not opens_the_house("cover.living_blind")
-    # Listed or not, the garage door that is down is reported, critical on its custom integration.
+    listed = ("lock.front_door", "alarm_control_panel.home", "cover.big", "cover.ratgdo_1", "cover.hall",
+              "cover.living_blind", "switch.relay_3", "switch.garage_opener", "light.porch",
+              "switch.vacuum_child_lock")  # fmt: skip
+    kept, refused = honoured_expected(listed, s.unavailable)
+    assert refused == ["alarm_control_panel.home", "cover.big", "cover.hall", "cover.ratgdo_1", "lock.front_door",
+                       "switch.garage_opener", "switch.relay_3"]  # fmt: skip
+    assert kept == {"cover.living_blind", "light.porch", "switch.vacuum_child_lock"}
+    # Without what a snapshot knows (an update's health point), every cover counts: fail closed.
+    assert "cover.living_blind" not in honoured_expected(listed)[0]
+    assert opens_the_house("cover.side", device_class=None) and opens_the_house("cover.side", device_class="door")
+    assert not opens_the_house("cover.side", device_class="shade")
+    assert opens_the_house("switch.relay_3", names=["Garage opener"]) and not opens_the_house("switch.relay_3")
+    # Listed or not, a down garage door is reported, critical on its custom integration.
     baseline = seed(await snap(FakeHA(), paths, meminfo), NOW)
     items = {i.key: i for i in diff(s, baseline, NOW, expected_unavailable=kept)}
     assert items["entities:acme_solar"].severity == "critical"
-    assert items["entities:acme_solar"].detail["entities"] == ["cover.big"]
+    assert items["entities:acme_solar"].detail["entities"] == ["cover.big", "cover.hall", "cover.ratgdo_1",
+                                                               "switch.relay_3"]  # fmt: skip
 
 
 def iso_hours(hours: float) -> str:

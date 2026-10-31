@@ -147,6 +147,24 @@ def test_health_and_diff(
     assert "entities:acme_solar" in keys
 
 
+def test_health_diff_never_silences_a_listed_lock(
+    env: FakeClient, paths: Paths, capsys: pytest.CaptureFixture[str], fake_ha: FakeHA, meminfo: Path
+) -> None:
+    import asyncio
+
+    fake_ha.states.append({"entity_id": "lock.side_door", "state": "locked",
+                           "last_changed": "2026-01-01T00:00:00+00:00", "attributes": {}})  # fmt: skip
+    fake_ha.registry.append({"entity_id": "lock.side_door", "platform": "acme_solar", "config_entry_id": "lut1"})
+    write_json_atomic(paths.baseline_file, seed(asyncio.run(_snapshot(fake_ha, paths, meminfo)), NOW).to_json())
+    fake_ha.set_unavailable("lock.side_door", hours_ago=10)
+    fake_ha.set_unavailable("light.kitchen", hours_ago=10)
+    options = make_options(health__expected_unavailable=["lock.side_door", "light.kitchen"])
+    SERVER[0] = rpc.RpcServer(ExecEnv(paths=paths, options=options, client=env,
+                                      redactor=lambda: build_redactor(paths.secrets_yaml)))  # fmt: skip
+    items = {i["key"]: i for i in json.loads(run(capsys, "health", "--diff")[1])}
+    assert items["entities:acme_solar"]["detail"]["entities"] == ["lock.side_door"]
+
+
 def test_entities_integrations_entries(env: FakeClient, capsys: pytest.CaptureFixture[str]) -> None:
     out = json.loads(run(capsys, "entities")[1])
     assert out["unavailable_by_platform"] == {"zha": 1}

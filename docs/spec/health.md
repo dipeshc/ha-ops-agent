@@ -107,15 +107,26 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   iff something was not accepted. Tests `test_health_baseline.py:36-55`,
   `test_the_seed_accepts_expected_unavailable_custom_entities`,
   `test_daemon.py` baseline tests.
-- H11a. **Access hardware is never expected.** A lock, an alarm panel, an
-  access cover (device class `garage` or `gate`, or `garage` in its id) or
-  anything whose id matches the access-word list (`opsd.access`, the
-  same list as [reload.md](reload.md) L3) listed in `health.expected_unavailable` is ignored for
-  the `entities:` and `custom:` checks and the seed: it is reported as if
-  it were not listed, with the same severity. The daemon logs one warning
-  per such entry per start and starts normally. Tests
+- H11a. **Access hardware is never expected.** `health.expected_unavailable`
+  is read only through `baseline.honoured_expected`, which drops what opens
+  the house (`opsd.access.opens_the_house`, the same rule as
+  [reload.md](reload.md) L3): a lock or an alarm panel; a cover whose device
+  class is not `blind`, `shade`, `curtain`, `awning` or `shutter` (no class,
+  `door`, `garage`, `gate` or any other counts: fail closed); anything
+  whose id, friendly name or registry name matches the access-word list. A
+  dropped entry is reported as if it were not listed, with the same
+  severity, everywhere the list is read: the `entities:` and `custom:`
+  checks and the seed of the daily check, `opsctl health --diff`, the
+  health compare after an update install (a listed lock going down is a
+  regression and rolls the update back) and the compare after an OS update
+  is confirmed past a reboot. Where only an entity id is known (the
+  update compares), every cover counts. The daemon logs one warning per
+  such entry per start and starts normally. Tests
   `test_access_hardware_is_never_expected_unavailable`,
-  `test_a_listed_lock_is_still_reported_and_warned_about_once`.
+  `test_a_listed_lock_is_still_reported_and_warned_about_once`,
+  `test_health_diff_never_silences_a_listed_lock`,
+  `test_a_listed_lock_going_down_after_an_update_still_rolls_it_back`,
+  `test_a_listed_lock_going_down_after_the_reboot_is_still_worse_health`.
 - H12. After every processed run the baseline advances: recovered entries
   drop out (a recurrence is new again), fingerprints keep their maximum
   count and expire after 30 days, `custom_ok` becomes true when healthy and

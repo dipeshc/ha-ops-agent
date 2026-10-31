@@ -11,9 +11,14 @@ In use:
   integrations each line touches, and lines marked `(breaking-change)`). The update rule asks the
   admin when one of them names an integration this house uses (`opsd.updates`).
 
-Kept for the next release (proactive maintenance), not used by the update rule: the release-note
-parsing for add-ons, HACS and HAOS (`EvidenceSource.notes`) and the repository resolution
-(`EvidenceSource.repository`, `addon_candidates`).
+- Proactive maintenance (`opsd.maintenance`): the release posts of the recent and the newest Core
+  minors (`EvidenceSource.posts`: the same backward-incompatible, developer-blog and farewell items,
+  plus the post's headings and its new integrations), whether a custom integration's GitHub repository
+  is archived (`EvidenceSource.archived`), and which entity platforms a Core integration of a domain
+  provides (`EvidenceSource.core_platforms`, from the Core repository's file list).
+
+Kept, not used by the update rule: the release-note parsing for add-ons, HACS and HAOS
+(`EvidenceSource.notes`) and the repository resolution (`EvidenceSource.repository`, `addon_candidates`).
 
 Everything fetched is untrusted third-party text: only extracted, cleaned and length-limited fields
 are kept, never markup, and a model sees them fenced. Answers are cached in the store
@@ -50,6 +55,12 @@ CACHE_KEEP = timedelta(days=30)
 RELEASE_INDEX = "https://www.home-assistant.io/blog/categories/release-notes/"
 CORE_RELEASE = "https://api.github.com/repos/home-assistant/core/releases/tags/{tag}"
 REPO_API = "https://api.github.com/repos/{repo}"
+CORE_COMPONENT = "https://api.github.com/repos/home-assistant/core/contents/homeassistant/components/{domain}"
+_DOMAIN_RE = re.compile(r"[a-z0-9_]{1,64}")
+_POST_RE = re.compile(r'href="(/blog/\d{4}/\d{2}/\d{2}/release-(\d{4})(\d{1,2})/)"')
+_HEADING_RE = re.compile(r"<h[23][^>]*>(.*?)</h[23]>", re.DOTALL)
+_NEW_LI_RE = re.compile(r'<a href="/integrations/([a-z0-9_]+)/?">(.*?)</a>', re.DOTALL)
+MAX_HEADINGS = 40
 # GitHub answered "slow down" (403/429): no GitHub call until then, and the tracker counts as unavailable.
 BACKOFF_KEY = "evidence:github_backoff_until"
 BACKOFF = timedelta(minutes=30)
@@ -213,6 +224,25 @@ def parse_release_post(page: str, source: str) -> list[Change]:
     return changes
 
 
+def parse_post(page: str, source: str) -> dict[str, Any]:
+    """A release post for proactive maintenance: its changes (`parse_release_post`, fail-closed), its section
+    headings and the integrations it adds (cleaned, untrusted)."""
+    changes = parse_release_post(page, source)
+    headings = [plain(h, TITLE_CHARS) for h in _HEADING_RE.findall(page)]
+    added: list[dict[str, str]] = []
+    for domain, name in _NEW_LI_RE.findall(_section(page, "new-integrations")):
+        if all(a["domain"] != domain for a in added):
+            added.append({"domain": domain, "name": plain(name, TITLE_CHARS)})
+    return {"changes": [c.to_json() for c in changes], "headings": [h for h in headings if h][:MAX_HEADINGS],
+            "new": added[:40]}  # fmt: skip
+
+
+def published_minors(index_html: str) -> list[tuple[int, int]]:
+    """The Core minors whose release post the release-notes index lists, newest first."""
+    found = {(int(y), int(m)) for _, y, m in _POST_RE.findall(index_html) if 1 <= int(m) <= 12}
+    return sorted(found, reverse=True)
+
+
 def parse_github_body(body: str, source: str) -> tuple[list[Change], set[str]]:
     """A Core patch release body: the integrations it touches and its `(breaking-change)` lines."""
     touched: set[str] = set()
@@ -327,9 +357,11 @@ class EvidenceSource:
         self._fetch = fetch
         self._clock = clock
 
-    async def _get(self, url: str, parse: Callable[[str], Any], *, fresh: bool = False) -> Any:
-        """Parsed and cached on success only: a failed or unrecognised answer is fetched again next time."""
-        cached = None if fresh else self._cache.get(url)
+    async def _get(self, url: str, parse: Callable[[str], Any], *, fresh: bool = False, name: str = "") -> Any:
+        """Parsed and cached on success only: a failed or unrecognised answer is fetched again next time. `name`
+        keeps a second parse of the same page apart in the cache."""
+        key = f"{url}#{name}" if name else url
+        cached = None if fresh else self._cache.get(key)
         if cached is not None:
             return cached
         try:
@@ -340,7 +372,7 @@ class EvidenceSource:
             raise
         except (ValueError, KeyError, TypeError) as err:
             raise FetchError(f"unreadable answer from {urllib.parse.urlsplit(url).hostname}: {str(err)[:120]}") from err
-        self._cache.put(url, data)
+        self._cache.put(key, data)
         return data
 
     # ------------------------------------------------------------ Core
@@ -378,6 +410,76 @@ class EvidenceSource:
             evidence.available = False
             evidence.problems.append(str(err)[:200])
         return evidence
+
+    async def index(self, *, fresh: bool = False) -> str:
+        """The release-notes index (only its release-post links)."""
+        found = await self._get(RELEASE_INDEX, lambda text: {"html": _release_links(text)}, fresh=fresh)
+        return str(found.get("html") or "")
+
+    async def posts(self, minors: list[tuple[int, int]], index_html: str) -> tuple[list[dict[str, Any]], list[str]]:
+        """(each published post among `minors`: {version, url, changes, headings, new}; problems). A post that
+        could not be read or parsed is a problem, never a guess."""
+        found: list[dict[str, Any]] = []
+        problems: list[str] = []
+        for year, month in minors[:MAX_STEPS]:
+            url = release_post_url(index_html, (year, month))
+            if url is None:
+                continue
+
+            def parse(text: str, source: str = url) -> dict[str, Any]:
+                return parse_post(text, source)
+
+            try:
+                data = await self._get(url, parse, name="maintenance")
+            except FetchError as err:
+                problems.append(clean_text(str(err), 160))
+                continue
+            found.append({"version": f"{year}.{month}", "url": url, **data})
+        return found, problems
+
+    async def archived(self, repo: str) -> bool | None:
+        """Whether a GitHub repository is archived; None when it does not exist or cannot be asked now."""
+        if not _SAFE_REPO_RE.fullmatch(repo) or ".." in repo or self._backing_off():
+            return None
+
+        def parse(text: str) -> dict[str, Any]:
+            raw = json.loads(text)
+            if not isinstance(raw, dict) or not isinstance(raw.get("archived"), bool):
+                raise ValueError("no archived flag")
+            return {"archived": raw["archived"]}
+
+        try:
+            data = await self._get(REPO_API.format(repo=repo), parse, name="archived")
+        except FetchError as err:
+            self._note_failure(err)
+            return None
+        return bool(data.get("archived"))
+
+    async def core_platforms(self, domain: str) -> frozenset[str] | None:
+        """The entity platforms a Core integration of this domain provides (its `<platform>.py` files); None when
+        Core has no such integration. FetchError when GitHub cannot be asked now."""
+        if not _DOMAIN_RE.fullmatch(domain):
+            return None
+        if self._backing_off():
+            raise FetchError("GitHub asked to slow down; trying again later")
+
+        def parse(text: str) -> dict[str, Any]:
+            raw = json.loads(text)
+            if not isinstance(raw, list):
+                raise ValueError("not a directory listing")
+            names = [str(e.get("name")) for e in raw if isinstance(e, dict) and e.get("type") == "file"]
+            if "manifest.json" not in names:
+                raise ValueError("not an integration")
+            return {"files": sorted(n.removesuffix(".py") for n in names if n.endswith(".py"))[:200]}
+
+        try:
+            data = await self._get(CORE_COMPONENT.format(domain=domain), parse)
+        except FetchError as err:
+            if err.status == 404:
+                return None
+            self._note_failure(err)
+            raise
+        return frozenset(str(f) for f in data.get("files") or [])
 
     async def _core_patches(self, evidence: Evidence, year: int, month: int, patches: range) -> None:
         if len(patches) > MAX_STEPS:

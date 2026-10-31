@@ -158,7 +158,7 @@ wheels = [
 
 [[package]]
 name = "ha-ops-agent"
-version = "0.17.0"
+version = "0.18.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]

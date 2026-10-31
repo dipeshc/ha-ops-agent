@@ -7,7 +7,10 @@ At the update window (default 04:00 local) the daemon:
    AUTO candidate still asks when a version of it was held, when a repair
    names it (Core: one that breaks in the target version), or when Home
    Assistant's own notes list a breaking change for an integration this
-   house uses (`opsd.evidence`, read-only; unreadable notes ask too). A
+   house uses (`opsd.evidence`, read-only; unreadable notes ask too), or
+   when its version reaches the removal of something this install still uses
+   (`maintenance.removal_block`; the maintenance scan runs first when its
+   last one is older than a day). A
    capability-free AI `update_review` run then reads the candidates'
    release notes as fenced, untrusted data and can only hold an update back.
    For a Core update held by its notes or a repair, the same run may write
@@ -64,7 +67,7 @@ import contextlib
 import json
 import logging
 import sqlite3
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
@@ -81,6 +84,7 @@ from opsd.conversation import clean_text, fence
 from opsd.evidence import EvidenceSource
 from opsd.health import Snapshot, parse_time
 from opsd.live import Hub
+from opsd.maintenance import removal_block
 from opsd.policy import Bump, Decision, Tier, parse_version, same_version
 from opsd.profile import VersionGate
 from opsd.redact import Redactor
@@ -457,6 +461,8 @@ class UpdateManager:
         evidence: EvidenceSource | None = None,
         house_domains: Callable[[], Awaitable[frozenset[str] | None]] | None = None,
         propose_fix: ProposeFix | None = None,
+        removals: Callable[[], Iterable[Any]] | None = None,
+        before_plan: Callable[[], Awaitable[None]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         approvals: Approvals | None = None,
@@ -478,6 +484,10 @@ class UpdateManager:
         self._house_domains = house_domains
         # Records the config change a held Core update needs as a proposal (opsd.updatefix); None: never.
         self._propose_fix = propose_fix
+        # The unresolved deprecations with a removal version (`maintenance.MaintenanceManager.removals`), and the
+        # maintenance scan the deciding plans run first when it is stale.
+        self._removals = removals
+        self._before_plan = before_plan
         # `ActivityLog.record` (set by the daemon): plans, nights, escalations and approval outcomes.
         self.activity: Callable[..., Any] | None = None
         self._clock = clock
@@ -717,6 +727,11 @@ class UpdateManager:
         if trigger == "refresh" and not await self._wait_core_up():
             # Just after a reboot Core may still be starting; the next health check re-plans.
             return {"result": "failed"}
+        if trigger in ("window", "manual") and self._before_plan is not None:
+            try:
+                await self._before_plan()
+            except Exception:
+                _LOGGER.exception("maintenance scan before the plan failed")
         try:
             snapshot = await self._snapshot()
         except Exception as err:
@@ -785,6 +800,9 @@ class UpdateManager:
             block: tuple[str, dict[str, Any] | None] | None = None
             if found is not None:
                 block = found[0], {"domains": [found[1]], "notes": [found[0]]}
+            removes = self._removes(item)
+            if block is None and removes is not None:
+                block = removes, None
             if block is None and notes and item.get("kind") == "core":
                 domains = domains if domains is not None else await self._domains()
                 block = await self._core_breaks(item, domains)
@@ -806,6 +824,16 @@ class UpdateManager:
             # The review may write the config change only where a proposal can carry it (git on).
             held["needs_change"] = needs
         return held | ({"fix": record} if record is not None else {})
+
+    def _removes(self, item: Mapping[str, Any]) -> str | None:
+        """Why a Core candidate asks: it removes something this install still uses (`maintenance.removal_block`)."""
+        if self._removals is None:
+            return None
+        try:
+            return removal_block(item, self._removals())
+        except Exception as err:  # noqa: BLE001 - unreadable findings: the other rules still decide
+            _LOGGER.warning("maintenance findings unreadable", extra={"error": str(err)[:200]})
+            return None
 
     async def _domains(self) -> frozenset[str]:
         """The integrations this house uses (config entries and loaded components); empty when unreadable."""

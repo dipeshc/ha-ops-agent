@@ -65,6 +65,8 @@ _LINE = re.compile(r"[^\x00-\x1f\x7f]{1,300}")
 _PERSON = re.compile(r"[^\x00-\x1f\x7f<>]{1,64}")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}")
 _NOTES_BAD = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# A storage dashboard's url_path, as Home Assistant requires it (lower case, with a hyphen).
+DASHBOARD_PATH = re.compile(r"[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+")
 
 
 class ProfileError(ValueError):
@@ -136,6 +138,12 @@ class DocsProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class DashboardsProfile:
+    # Storage dashboards that something else writes (a generator, another tool): the agent never edits them.
+    generated: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
 class HouseProfile:
     """The parsed profile; the defaults are the generic agent (no profile file)."""
 
@@ -151,6 +159,7 @@ class HouseProfile:
     reload: ReloadProfile = field(default_factory=ReloadProfile)
     git: GitProfile = field(default_factory=GitProfile)
     docs: DocsProfile = field(default_factory=DocsProfile)
+    dashboards: DashboardsProfile = field(default_factory=DashboardsProfile)
 
     def overlay(self, name: str) -> bool:
         return name in self.overlays
@@ -280,7 +289,7 @@ def overlay_installed(name: str) -> bool:
 def parse(data: Any) -> HouseProfile:
     """The profile from parsed YAML. Raises ProfileError on anything outside the schema."""
     top = _mapping(data, "the profile", ("notify_service", "self_slug", "overlays", "house_notes", "health",
-                                         "updates", "reload", "git", "docs"))  # fmt: skip
+                                         "updates", "reload", "git", "docs", "dashboards"))  # fmt: skip
     overlays = _texts(top.get("overlays"), "overlays", re.compile("|".join(OVERLAYS)), "one of " + ", ".join(OVERLAYS))
     missing = [name for name in overlays if not overlay_installed(name)]
     if missing:
@@ -344,6 +353,10 @@ def parse(data: Any) -> HouseProfile:
         readable=readable,
     )
 
+    dashboards_raw = _mapping(top.get("dashboards"), "dashboards", ("generated",))
+    generated = _texts(dashboards_raw.get("generated"), "dashboards.generated", DASHBOARD_PATH,
+                       "dashboard url paths (lower case, with a hyphen)")  # fmt: skip
+
     notes = top.get("house_notes", "")
     if not isinstance(notes, str) or len(notes) > MAX_NOTES or _NOTES_BAD.search(notes):
         raise ProfileError(f"house_notes must be text of at most {MAX_NOTES} characters (no control characters)")
@@ -360,6 +373,7 @@ def parse(data: Any) -> HouseProfile:
         reload=ReloadProfile(domains=domains, deny=deny),
         git=git,
         docs=docs,
+        dashboards=DashboardsProfile(generated=frozenset(generated)),
     )  # fmt: skip
 
 

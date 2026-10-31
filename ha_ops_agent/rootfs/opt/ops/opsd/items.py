@@ -25,7 +25,8 @@ Derived items are recomputed by `ItemBook.sync` from the records that run
 the house's processes (update runs and jobs, approvals, change proposals,
 house facts, tasks, the health check's open items): the items are their
 one view, so a resolved process can never leave a stale "needs you" card.
-An item whose source disappears is resolved. A `follows` child (today: the
+An item whose source disappears is resolved. Maintenance items (`opsd.maintenance`) are derived
+from the stored findings, their plans and their dashboard plans. A `follows` child (today: the
 Supervisor's `reboot_required` issue, which follows the OS update that
 needs the reboot) waits on its parent and is done when the parent is done.
 Activity entries that belong to no process (a health check, a reload) are
@@ -50,7 +51,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
 
-from opsd.approvals import LIVE, approvable, is_change
+from opsd import dashboards
+from opsd import maintenance as maint
+from opsd.approvals import LIVE, approvable, dashboard_subject, is_change, is_dashboard
 from opsd.channels import BudgetClass, Message
 from opsd.conversation import clean_text
 from opsd.live import Hub
@@ -69,7 +72,8 @@ NEED_KINDS = ("approval", "confirm", "physical", "answer", "ack")
 ACTORS = ("you", "daemon", "agent")
 ITEM_ID_RE = re.compile(r"[a-z]-[0-9a-z]{1,40}")
 ACTION_RE = re.compile(r"[a-z_]{1,32}")
-_PREFIX = {"updates": "u", "window": "w", "change": "p", "fact": "p", "task": "r", "health": "c", "activity": "a"}
+_PREFIX = {"updates": "u", "window": "w", "change": "p", "fact": "p", "task": "r", "health": "c", "activity": "a",
+           "maint": "m"}  # fmt: skip
 KINDS = {"core": "Core update", "addon": "Add-on update", "hacs": "HACS update", "firmware": "Firmware update",
          "os": "Operating system update"}  # fmt: skip
 USUAL_S = {"core": 600, "addon": 240, "hacs": 120, "firmware": 600, "os": 900}
@@ -199,6 +203,8 @@ class Context:
     health_at: str | None = None
     health_items: list[dict[str, Any]] = field(default_factory=list)
     redact: Callable[[str], str] = lambda text: text
+    # Act mode: a dashboard plan can be applied (observe mode shows it without the action).
+    acting: bool = False
 
 
 def need(kind: str, text: str, primary: dict[str, Any], secondary: list[dict[str, Any]] | None = None, *,
@@ -244,6 +250,7 @@ class Deriver:
         self.facts()
         self.tasks()
         self.health()
+        self.maintenance()
         self.follows()
         return self.specs
 
@@ -283,7 +290,7 @@ class Deriver:
         by_subject: dict[str, UpdateJob] = {}
         for job in jobs:
             by_subject[f"{job.entity_id}@{job.to_version}"] = job
-        approvals = [a for a in store.approvals(limit=200) if not is_change(a)]
+        approvals = [a for a in store.approvals(limit=200) if not is_change(a) and not is_dashboard(a)]
         live: dict[str, dict[str, Any]] = {}
         decided: dict[str, dict[str, Any]] = {}
         for found in approvals:  # newest first
@@ -745,6 +752,118 @@ class Deriver:
                 spec.actions = [act("snooze", "Snooze 7 days"), act("accept", "Accept as normal", "text")]
             self.add(spec)
 
+    # ------------------------------------------------------------ maintenance
+
+    def maintenance(self) -> None:
+        store = self.store
+        scanned = maint.meta(store)
+        installed = str(scanned.get("installed") or "")
+        at = str(scanned.get("at") or "") or None
+        live = {a["subject"]: a for a in store.approvals(states=LIVE, limit=200) if is_dashboard(a)}
+        for finding in maint.load(store):
+            spec = self._maintenance(finding, installed, at, live)
+            if maint.hidden(store, finding):
+                # Hidden by the admin until its evidence changes: resolved, never in Needs you.
+                spec = Spec(key=spec.key, kind=spec.kind, title=spec.title, state="cancelled", kicker=spec.kicker,
+                            gist="hidden by you: not relevant here", facts=spec.facts, agent=spec.agent,
+                            source={"finding": finding.key}, actor="you", pushes=False)  # fmt: skip
+            self.add(spec)
+
+    def _maintenance(self, finding: maint.Finding, installed: str, at: str | None,
+                     live: Mapping[str, dict[str, Any]]) -> Spec:  # fmt: skip
+        """A finding's item: every word but `agent` (the plan run's text) is the daemon's."""
+        store, ctx = self.store, self.ctx
+        key = f"maint:{finding.key}"
+        left = finding.left(installed)
+        variant = finding.variant
+        if variant == "deprecation":
+            gist = "no removal date yet"
+            if left is not None:
+                due = "due with the next Core update" if left == 0 else f"{left} release{'s' if left != 1 else ''} left"
+                gist = f"removed in {finding.removal}, {due}"
+        elif variant == "replacement":
+            gist = f"risk {finding.detail.get('risk', 'unknown')}; a plan, never automatic"
+        else:
+            gist = "a suggestion"
+        spec = Spec(key=key, kind="maintenance", title=ctx.redact(clean_text(finding.title(), 120)), state="proposed",
+                    kicker=maint.VARIANTS[variant], gist=gist, created=at, as_of=at,
+                    source={"finding": finding.key}, pushes=False)  # fmt: skip
+        spec.about = " ".join(f"{n}. {clean_text(s, 300)}" for n, s in enumerate(finding.steps[:5], 1)) or None
+        facts = [("Affected", "; ".join(finding.affected[:8]))]
+        if finding.quote:
+            facts.append(("Home Assistant says" if finding.signal != "replacement" else "Evidence", finding.quote))
+        for label in ("parity", "impact"):
+            if finding.detail.get(label):
+                facts.append((label.capitalize(), str(finding.detail[label])))
+        if finding.sources:
+            facts.append(("Source", ", ".join(finding.sources[:3])))
+        spec.facts = [{"label": label, "value": ctx.redact(clean_text(value, 600)), "at": at} for label, value in facts]
+        plan = maint.plan_of(store, finding)
+        if plan is not None:
+            spec.agent = {"text": str(plan.get("plan") or ""), "sources": ["the findings above"], "not_read": [],
+                          "run_id": None}  # fmt: skip
+        if variant != "deprecation":
+            spec.actions = [act("dismiss", "Not relevant here", "text")]
+            return spec
+        proposal = maint.proposal_of(store, finding.key)
+        if proposal is not None:
+            spec.facts.append({"label": "Config change", "value": f"#{proposal['change']}: {proposal['state']}",
+                               "at": at})  # fmt: skip
+        result = maint.result_of(store, finding.key)
+        board = maint.dashboard_plan(store, finding.key)
+        bound = (board or {}).get("binding")
+        if result is not None and result.get("state") in ("restored", "escalated", "refused"):
+            token = f"result:{result.get('at')}"
+            if not acked(store, key, token):
+                spec.state, spec.gist = "failed", "the dashboard change was not made"
+                spec.need = need("ack", f"{clean_text(str(result.get('detail') or ''), 400)}.", act("ack", "OK"))
+                spec.source["ack"] = token
+                spec.since = str(result.get("at") or "") or None
+                spec.urgent = result.get("state") == "escalated"
+                spec.pushes = True
+                return spec
+        if isinstance(bound, Mapping):
+            url_path = str(bound.get("url_path"))
+            edit = dashboards.edit_of(bound)
+            words = edit.words() if edit is not None else "the planned edit"
+            lines = [f"Dashboard {url_path}: {words} ({bound.get('changes')} change(s))"]
+            lines += [f"~ {clean_text(str(p), 160)}" for p in list(bound.get("paths") or [])[:40]]
+            spec.change = {"diff": "\n".join(lines), "files": [f"dashboard {url_path}"],
+                           "shown": [str(bound.get("after"))]}  # fmt: skip
+            spec.source["dashboard"] = dict(bound)
+            approval = live.get(dashboard_subject(finding.key))
+            if approval is not None and approval["state"] == "approved":
+                spec.state, spec.gist = "running", f"approved; saving dashboard {url_path}"
+                spec.actor, spec.event = "you", "Approved by you"
+                spec.source["approval"] = approval["id"]
+                return spec
+            if not ctx.acting:
+                spec.gist = f"{gist}; a dashboard change is planned (applies in agent.mode: act)"
+                return spec
+            text = (f"Change dashboard {url_path}: {words}. Approve and the daemon backs up the dashboard's JSON, "
+                    "saves the change, reads it back and restores the backup if anything differs.")  # fmt: skip
+            spec.state, spec.gist = "waiting", "a dashboard change waits for your approval"
+            spec.need = need("approval", text, act("apply_dashboard", "Apply to the dashboard"),
+                             [act("reject", "Reject", "text")])  # fmt: skip
+            spec.since, spec.pushes = at, True
+            return spec
+        if result is not None and result.get("state") == "applied":
+            spec.gist = "dashboard saved; the next scan confirms it is resolved"
+            return spec
+        if proposal is not None and proposal["state"] in ("open", "applying"):
+            spec.gist = f"{gist}; config change #{proposal['change']} waits for you"
+            return spec
+        spec.actions = [act("dismiss", "Not relevant here", "text")]
+        if left is not None and left <= maint.ESCALATE_RELEASES:
+            token = f"left:{finding.removal}:{left}"
+            if not acked(store, key, token):
+                text = (f"{finding.title()}: {gist}. Nothing here changes it by itself; the plan below says what to "
+                        "do. OK hides this until one release closer.")  # fmt: skip
+                spec.state, spec.need, spec.actions = "waiting", need("ack", text, act("ack", "OK")), []
+                spec.source["ack"] = token
+                spec.since, spec.pushes = at, True
+        return spec
+
     def follows(self) -> None:
         """Health items that an OS update explains follow it, so they never linger as a separate card.
 
@@ -955,6 +1074,8 @@ class ItemBook:
         prefix = key.split(":", 1)[0]
         if prefix == "health":
             state, gist = "done", "cleared: not reported by the latest health check"
+        elif prefix == "maint":
+            state, gist = "done", "resolved: the latest maintenance scan no longer finds it"
         elif prefix == "updates":
             entity, _, version = key.removeprefix("updates:").rpartition("@")
             offered = (plan or {}).get(entity)
@@ -1119,16 +1240,23 @@ class ItemBook:
     # -------------------------------------------------------------------- Home
 
     def home(self) -> dict[str, list[dict[str, Any]]]:
-        """Needs you (oldest first), In progress and Coming up (by `at`), Today (resolved today, newest first)."""
+        """Needs you (oldest first), In progress and Coming up (by `at`), Suggestions (maintenance replacements and
+        suggestions), Today (resolved today, newest first)."""
         tz = self._tz()
         local = self._clock().astimezone(tz)
         midnight = datetime.combine(local.date(), time(0, 0), tz).astimezone(UTC)
-        needs, running, coming, today = [], [], [], []
+        needs, running, coming, suggestions, today = [], [], [], [], []
         for record in self.store.items_since(midnight):
             if record["needs"]:
                 needs.append(record)
             elif record["state"] == "running":
                 running.append(record)
+            elif (
+                record["kind"] == "maintenance"
+                and record["state"] == "proposed"
+                and record.get("kicker") in (maint.VARIANTS["replacement"], maint.VARIANTS["suggestion"])
+            ):
+                suggestions.append(record)
             elif record["state"] in ("proposed", "scheduled"):
                 coming.append(record)
             elif record["state"] in TERMINAL and not record["quiet"]:
@@ -1138,5 +1266,6 @@ class ItemBook:
         needs.sort(key=lambda r: (str(r.get("needs_since") or r["at"]), r["id"]))
         running.sort(key=lambda r: (str(r["at"]), r["id"]))
         coming.sort(key=lambda r: (str(r["at"]), r["id"]))
+        suggestions.sort(key=lambda r: (str(r["at"]), r["id"]))
         today.sort(key=lambda r: (str(r["at"]), r["id"]), reverse=True)
-        return {"needs": needs, "running": running, "coming": coming, "today": today}
+        return {"needs": needs, "running": running, "coming": coming, "suggestions": suggestions, "today": today}

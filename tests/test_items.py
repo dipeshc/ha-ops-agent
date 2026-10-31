@@ -84,7 +84,7 @@ async def test_migration_17_backfills_items_and_nothing_old_needs_you(tmp_path: 
     path = tmp_path / "ops.db"
     v16_store(path)
     store = Store.open(path)
-    assert store.schema_version() == SCHEMA_VERSION == 17
+    assert store.schema_version() == SCHEMA_VERSION == 18
     # Every earlier activity entry is a resolved item with one event, linked from its row.
     activity = store.activity()
     assert len(activity) == 3 and all(a["item"] == f"a-{a['id']}" for a in activity)

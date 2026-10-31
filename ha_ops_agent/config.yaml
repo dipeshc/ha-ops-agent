@@ -1,5 +1,5 @@
 name: HA Ops Agent
-version: "0.17.0"
+version: "0.18.0"
 slug: ha_ops_agent
 description: >-
   Unattended maintenance for Home Assistant: a daily health check, AI triage

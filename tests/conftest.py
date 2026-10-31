@@ -123,6 +123,9 @@ class FakeHA:
         self.vacuums: dict[str, dict[str, Any]] = {}
         self.areas: list[dict[str, Any]] = []
         self.ws_fields: list[tuple[str, dict[str, Any]]] = []
+        # Storage dashboards by url_path (lovelace/...): none unless a test adds one.
+        self.lovelace: dict[str, Any] = {}
+        self.components: list[str] = ["zha", "acme_solar", "sensor.acme_solar"]
 
     async def ws(self, msg_type: str, **fields: Any) -> Any:
         self.calls.append(("ws", msg_type))
@@ -134,6 +137,8 @@ class FakeHA:
             return {"entity_id": fields["entity_id"], "platform": "acme_vacuum", "options": vacuum["options"]}
         if msg_type == "vacuum/get_segments":
             return {"segments": self.vacuums[fields["entity_id"]]["segments"]}
+        if msg_type.startswith("lovelace/"):
+            return self._lovelace(msg_type, fields)
         return {
             "config/entity_registry/list": self.registry,
             "config_entries/get": self.entries,
@@ -143,11 +148,31 @@ class FakeHA:
             "backup/info": self.backup_info,
         }[msg_type]
 
+    def _lovelace(self, msg_type: str, fields: dict[str, Any]) -> Any:
+        from opsd import selfguard
+
+        # The dashboard commands go through the real self-guard, as on a live websocket.
+        selfguard.check_ws(msg_type, fields)
+        if msg_type == "lovelace/dashboards/list":
+            return [{"url_path": k, "title": k, "mode": "storage"} for k in self.lovelace]
+        if msg_type == "lovelace/resources":
+            return []
+        if msg_type == "lovelace/config":
+            if fields.get("url_path") not in self.lovelace:
+                raise RuntimeError("config_not_found")
+            return json.loads(json.dumps(self.lovelace[fields["url_path"]]))
+        if msg_type == "lovelace/config/save":
+            self.lovelace[fields["url_path"]] = json.loads(json.dumps(fields["config"]))
+            return None
+        raise KeyError(msg_type)
+
     async def core_post(self, path: str) -> Any:
         self.calls.append(("core_post", path))
         return {"require_restart": False}
 
     async def core_rest(self, path: str) -> Any:
+        if path == "/config":
+            return {"components": self.components}
         assert path == "/states"
         if self.core_state != "running":
             raise RuntimeError("core down")

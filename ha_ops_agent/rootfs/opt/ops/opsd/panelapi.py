@@ -556,6 +556,8 @@ class PanelHandlers:
             shown = [str(x) for x in (found.get("change") or {}).get("shown") or []]
             approval = await d.changes.request(change_id, "apply" if action == "apply" else "revert", user, shown)
             return await self._run("approve_change", {"approval": approval["id"]}, user)
+        if key.startswith("maint:"):
+            return await self._act_maintenance(found, action, user)
         if key.startswith("fact:") and action == "dismiss":
             done = self._store.decide_fact(int(source.get("fact") or 0), "rejected", now=now)
             self._d.hub.publish("facts", None, {})
@@ -600,6 +602,25 @@ class PanelHandlers:
         approval = updates.approvals.request(item, plan_run=run, user=user, when=when)
         proposals.settle(self._store, entity, now=datetime.now(UTC), detail="approval requested in the panel")
         return await self._run("approve_update", {"approval": approval["id"]}, user)
+
+    async def _act_maintenance(self, found: Mapping[str, Any], action: str, user: str) -> Result:
+        """A maintenance item: hide it, reject its dashboard plan, or approve that plan (the daemon re-checks it)."""
+        d = self._d
+        manager = d.maintenance
+        finding = str((found.get("source") or {}).get("finding") or "")
+        if manager is None or not finding:
+            return 503, {"error": "store_unavailable"}
+        if action == "dismiss":
+            done = manager.hide(finding)
+        elif action == "reject":
+            done = manager.reject_dashboard(finding)
+        elif action == "apply_dashboard":
+            shown = [str(x) for x in (found.get("change") or {}).get("shown") or []]
+            approval = await d.request_dashboard(finding, user, shown)
+            return await self._run("approve_dashboard", {"approval": approval["id"]}, user)
+        else:
+            done = False
+        return (200, {}) if done else (409, {"error": "not_available", "message": "Not open any more."})
 
     def _withdraw(self, found: Mapping[str, Any], user: str) -> Result:
         """Withdraw the approval an item holds (always safe, one step)."""

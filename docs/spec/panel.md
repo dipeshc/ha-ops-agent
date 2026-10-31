@@ -83,7 +83,7 @@ The record behind Home, History and the item page
 {
   "id": "u-7f3a91c2",                 // URL-safe handle, [a-z]-[0-9a-z]{1,40}
   "key": "updates:update.home_assistant_operating_system@17.1",
-  "kind": "update",                   // update | reminder | investigation | proposal | check | backup | reload | window
+  "kind": "update",                   // update | reminder | investigation | proposal | check | backup | reload | window | maintenance
   "kicker": "Operating system update",// optional subtype label; the panel falls back to a label for `kind`
   "ref": "#18",                       // optional short reference shown beside the kicker
   "title": "Home Assistant OS 17.0 → 17.1",
@@ -97,7 +97,7 @@ The record behind Home, History and the item page
   "created_at": "2026-01-11T04:00:00Z", "updated_at": "2026-01-15T04:12:00Z",
 
   "need": {                           // non-null only while the item is in Needs you
-    "kind": "approval",               // approval | confirm | physical | answer | ack (0.17.0 produces approval and ack)
+    "kind": "approval",               // approval | confirm | physical | answer | ack (0.18.0 produces approval and ack)
     "text": "17.1 is installed and waiting for one reboot. …",  // what happens, when, cost, what cannot be undone
     "primary": { "id": "reboot_window", "label": "Reboot tonight at 04:00" },
     "secondary": [ { "id": "reject", "label": "Reject", "style": "text" } ],
@@ -111,7 +111,7 @@ The record behind Home, History and the item page
   "facts": [ { "label": "Supervisor", "value": "OS 17.0 running, 17.1 pending reboot", "at": "2026-01-15T09:41:00Z" } ],
   "agent": { "text": "Nothing went wrong: …", "sources": ["Supervisor OS info", "host log 04:00–04:15"],
              "not_read": [], "run_id": "r-…" },  // or null; the only model-written field
-  "change": { "diff": "@@ … @@\n+ …", "files": ["docs/facts.md"], "shown": ["<sha256>"] },  // proposals only
+  "change": { "diff": "@@ … @@\n+ …", "files": ["docs/facts.md"], "shown": ["<sha256>"] },  // proposals and dashboard plans only
   "footnote": "Approval 6f3a · bound to OS 17.0 → 17.1, plan #18 · used once",
   "events": [                         // detail responses only, oldest first
     { "at": "2026-01-11T04:00:00Z", "actor": "daemon", "text": "Proposed: 17.1 needs your approval", "revision": 1 }
@@ -135,7 +135,21 @@ The record behind Home, History and the item page
 | `waiting`, or `failed` with a need | Needs you | Needs you / Failed |
 | `running` | In progress | Running |
 | `proposed`, `scheduled` | Coming up | Proposed / Scheduled |
+| `proposed` maintenance replacement candidates and suggestions | Suggestions | Proposed |
 | `done`, `failed`, `cancelled`, `expired` resolved today (house time) | Today | Done / Failed / Cancelled / Expired |
+
+- N20. **Maintenance items** ([maintenance.md](maintenance.md)) have kind
+  `maintenance`, key `maint:<finding>` and kicker `Deprecation ahead`,
+  `Replacement candidate` or `Suggestion`; `about` holds the daemon's
+  numbered plan steps and `agent` the plan run's text. A dashboard plan
+  fills `change` with the changed card paths as `diff`, `files` as
+  `["dashboard <url_path>"]` and `shown` as the SHA-256 of the dashboard
+  JSON after the edit; in act mode it waits with an `approval` need,
+  primary `apply_dashboard` ("Apply to the dashboard"), secondary
+  `reject`. An escalated deprecation or a failed dashboard change waits
+  with an `ack` need (`ack`); an open finding offers `dismiss` ("Not
+  relevant here"). Test
+  `test_the_panel_applies_an_approved_dashboard_plan_end_to_end`.
 
 ## Routes
 
@@ -163,7 +177,7 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
 {
   "as_of": "…",
   "needs_count": 2,                   // == sections.needs.length; also the nav badge
-  "sections": { "needs": [Item], "running": [Item], "coming": [Item], "today": [Item] },
+  "sections": { "needs": [Item], "running": [Item], "coming": [Item], "suggestions": [Item], "today": [Item] },
   "calm": "Checked at 05:30, nothing new since the baseline. …",  // the All-quiet text; null when needs is not empty
   "strip": [ { "label": "Health", "value": "checked 05:30, nothing new" },
              { "label": "Backup", "value": "03:59, encrypted" },
@@ -209,11 +223,15 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
   item's hash ([approvals.md](approvals.md)). Every action is audited as
   `item.act` with the item id, action, revision and the admin's user id;
   the high-impact kinds (approve_update, approve_reboot, approve_change,
-  updates_on, ai_on) also audit `panel.<kind>` with their outcome. Actions
-  in 0.17.0: `ack`, `resume_updates`, `withdraw`, update `approve`,
-  `approve_now`, `reject`, `reboot_window`, change `apply`, `reject`,
-  `revert`, fact `dismiss`, health `accept`, `snooze`, task `cancel`,
-  `stop`. Test `test_approve_then_withdraw_binds_each_action_to_its_revision`.
+  approve_dashboard, updates_on, ai_on) also audit `panel.<kind>` with
+  their outcome. Actions in 0.18.0: `ack`, `resume_updates`, `withdraw`,
+  update `approve`, `approve_now`, `reject`, `reboot_window`, change
+  `apply`, `reject`, `revert`, fact `dismiss`, health `accept`, `snooze`,
+  task `cancel`, `stop`, maintenance `dismiss` (hide the finding until its
+  evidence changes), `reject` (drop the dashboard plan) and
+  `apply_dashboard` (request the dashboard approval for the shown `change`
+  and confirm it in the same request, as `approve_dashboard`; see
+  [maintenance.md](maintenance.md) M21). Test `test_approve_then_withdraw_binds_each_action_to_its_revision`.
 
 Not served (404): `api/tasks`, `api/changes`, `api/facts`, `api/activity`,
 `api/ack`, `api/approvals*`, `api/updates/plan|holds/clear|skip|notes`,
@@ -232,7 +250,7 @@ Not served (404): `api/tasks`, `api/changes`, `api/facts`, `api/activity`,
   `thread`, `item {id, revision, state, needs_count}` whenever an item
   changes (the panel refetches the open views and ignores revisions older
   than the one it holds), `tasks`, `updates`, `changes`, `facts`,
-  `activity`. Tests `test_sse_streams_a_turn_from_queued_to_reply`,
+  `activity`, `maintenance` (after a scan or a dashboard change). Tests `test_sse_streams_a_turn_from_queued_to_reply`,
   `test_live_connections_are_capped_and_freed`, `test_sse_resume_and_gap`,
   `test_sse_rechecks_the_admin_even_while_events_flow`, `test_long_poll_returns_the_same_events`.
 - N18. The page shows the freshness pill green while pings arrive, amber

@@ -577,5 +577,6 @@ def test_no_capability_argument_can_carry_a_self_slug_into_a_url(tmp_path: Path)
     assert reachable <= reviewed, f"new mutating capability needs a self-target review: {reachable - reviewed}"
     internal = {c.name for c in CAPABILITIES.values() if c.enabled and c.internal}
     # change.autofix: paths through changepaths.allowed_path (self_path) or configuration.yaml only.
+    # dashboard.save: one lovelace/config/save inside selfguard.approved_dashboard_write (a dashboard, never the agent).
     assert internal <= {"change.apply", "change.revert", "change.autofix", "backup.create",
-                        "update.install", "update.rollback"}  # fmt: skip
+                        "update.install", "update.rollback", "dashboard.save"}  # fmt: skip

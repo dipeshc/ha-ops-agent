@@ -1,6 +1,6 @@
 """The panel's front end: CSP-compatible, text-only rendering of daemon and model text, size, and the item views.
 
-The contract it renders is docs/panel-api.md. The renderers run under node against a minimal DOM that records how
+The contract it renders is docs/spec/panel.md. The renderers run under node against a minimal DOM that records how
 every node was made, so a string from the API can only ever become a text node.
 """
 

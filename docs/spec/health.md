@@ -4,7 +4,8 @@ The daily check compares the system with an accepted baseline. Nothing new
 means no AI run and no push. The daemon decides severities; the AI only
 reads and comments.
 
-Implementation: `opsd/health.py` (collection), `opsd/baseline.py` (baseline,
+Implementation: `opsd/health.py` (collection), `opsd/access.py`
+(`access_kind`, shared with reloads and dashboard edits), `opsd/baseline.py` (baseline,
 diff, acks), `opsd/triage.py` (prompt and result), `opsd/fingerprint.py`,
 `opsd/queries.py`, the health cycle in `opsd/daemon.py`. Tests:
 `tests/test_health_baseline.py`, `tests/test_daemon.py`,

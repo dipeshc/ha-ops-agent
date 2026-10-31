@@ -4,7 +4,9 @@ The one change to Home Assistant the AI may request outside an approval is
 a reload of an allowlisted integration. It is bounded in code: never
 anything that opens the house, once per domain per 10 minutes, a few a day.
 
-Implementation: `opsd/reload.py`, `opsd/policy.py` `NEVER_RELOAD_DOMAINS`,
+Implementation: `opsd/reload.py`, `opsd/access.py` (the access-word
+classification it shares with the health check and dashboard edits),
+`opsd/policy.py` `NEVER_RELOAD_DOMAINS`,
 the `integration.reload` row in `opsd/capabilities.py`. Tests:
 `tests/test_reload.py`, `tests/test_profile.py` (never-list),
 `tests/test_selfguard.py` `test_garage_and_access_are_never_reloaded`,

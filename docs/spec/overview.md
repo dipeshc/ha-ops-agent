@@ -23,7 +23,7 @@ harm.
 | AI runner and provider | [ai-runner.md](ai-runner.md) | `runner.py`, `runctx.py`, `claude_runner.py`, `guard.py`, `prompts/` |
 | Capabilities and opsctl | [capabilities.md](capabilities.md) | `capabilities.py`, `policy.py`, `rpc.py`, `opsctl.py`, `effects.py` |
 | Integration reloads | [reload.md](reload.md) | `reload.py` |
-| Selfguard | [selfguard.md](selfguard.md) | `selfguard.py` |
+| Selfguard | [selfguard.md](selfguard.md) | `selfguard.py`, `access.py` (what opens the house, shared by health, reloads and dashboard edits) |
 | Privilege separation | [privsep.md](privsep.md) | `privsep.py`, `selftest.py`, `init-ops.sh` |
 | Usage budget and kill switch | [budget.md](budget.md) | `budget.py`, `usage.py`, `aicontrol.py` |
 | Storage | [storage.md](storage.md) | `store.py`, `jsonstore.py`, `state.py`, `lock.py`, `logs.py` |

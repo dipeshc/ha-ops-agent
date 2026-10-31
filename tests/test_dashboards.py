@@ -208,8 +208,33 @@ def test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover() -> None
         ]
     }
     assert not touches_protected(board, EDIT) and binding("0123456789abcdef", BOARD, board, EDIT) is not None
-    # Not a prefix match inside another entity id.
-    assert not touches_protected({"cards": [{"type": "custom:acme-gauge", "entity": "sensor.unlock.x"}]}, EDIT)
+    # Not a prefix match inside another word, and a gadget's child lock opens nothing.
+    for harmless in ("sensor.clock_offset", "switch.example_purifier_child_lock", "sensor.blocked_requests"):
+        assert not touches_protected({"cards": [{"type": "custom:acme-gauge", "entity": harmless}]}, EDIT), harmless
+
+
+@pytest.mark.parametrize("card", [
+    # Any domain, when the id is named like access hardware (the shared `opsd.access` words).
+    {"entity": "script.open_garage_door"},
+    {"entity": "switch.example_gate_opener"},
+    {"entity": "button.front_door_unlock"},
+    {"entities": [{"entity": "sensor.acme_power"}, "binary_sensor.example_entrance"]},
+    {"tap_action": {"action": "perform-action", "perform_action": "script.turn_on",
+                    "target": {"entity_id": "script.example_unlock"}}},
+    # Filters for an access domain (auto-entities style), as a string or a list.
+    {"filter": {"include": [{"domain": "lock"}]}},
+    {"filter": {"include": [{"domain": ["light", "cover"]}]}},
+    {"filter": {"include": [{"domain": "Alarm_Control_Panel"}]}},
+    # Targets the agent cannot resolve to entities fail closed.
+    {"tap_action": {"action": "perform-action", "target": {"device_id": "0123abcd"}}},
+    {"hold_action": {"action": "perform-action", "target": {"area_id": "garage"}}},
+    {"tap_action": {"action": "perform-action", "target": {"label_id": "doors"}}},
+    {"tap_action": {"action": "perform-action", "target": {"floor_id": "ground"}}},
+])  # fmt: skip
+def test_a_card_that_names_filters_or_targets_access_hardware_is_protected(card: dict[str, Any]) -> None:
+    nested = {"views": [{"cards": [{"type": "vertical-stack", "cards": [{"type": "custom:acme-gauge"} | card]}]}]}
+    assert touches_protected(nested, EDIT)
+    assert binding("0123456789abcdef", BOARD, nested, EDIT) is None
 
 
 async def test_a_card_that_names_a_lock_after_the_approval_is_never_written(store: Store, tmp_path: Path) -> None:
@@ -398,3 +423,10 @@ async def test_confirmation_needs_the_admin_who_asked_and_an_unchanged_dashboard
     assert dw.approvals.confirm_dashboard(found["id"], user=ADMIN, binding_now=moved) == "void"
     # An update approval path never accepts a dashboard approval.
     assert dw.approvals.confirm(found["id"], user=ADMIN, current=None) in ("refused", "unknown")
+
+
+def test_the_health_check_reloads_and_dashboard_edits_share_one_access_classification() -> None:
+    from opsd import access, dashboards, health, reload
+
+    assert dashboards.named_like_access is access.named_like_access is reload.named_like_access
+    assert health.access_kind is access.access_kind

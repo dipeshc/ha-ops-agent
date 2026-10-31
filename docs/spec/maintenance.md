@@ -167,17 +167,25 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   `image`, `content`, `navigation_path`, `action`, `service`,
   `service_data`, `perform_action`, `data`, `target`, `entity`,
   `entities`, `card`, `cards`, `visibility` or `conditions`
-  (`DENY_OPTIONS`), or when
-  a card it targets, or a card nested in one, names a `lock.`,
-  `alarm_control_panel.` or `cover.` entity (`touches_protected`, checked
-  again at execution: such a card voids the approval and nothing is
-  written). The item shows the
+  (`DENY_OPTIONS`), or when a card it targets, or a card nested in one, is
+  protected (`touches_protected`, checked again at execution: such a card
+  voids the approval and nothing is written). A card is protected when,
+  anywhere in it (keys and values, templates included): an entity id has
+  the domain `lock`, `alarm_control_panel` or `cover`, or is named like
+  access hardware in any domain (`script.`, `switch.`, `button.` and the
+  rest) by the shared classification `opsd/access.py` `named_like_access`
+  that the reload never-list uses ([reload.md](reload.md)); a `domain:`
+  filter names one of those three domains (as text or in a list); or any
+  service target uses `device_id`, `area_id`, `floor_id` or `label_id`,
+  which the agent cannot resolve to entities, so it fails closed. The item shows the
   changed paths as its diff and waits for approval in act mode; in observe
   mode it shows the plan without the action. Tests
   `test_a_dashboard_plan_waits_for_approval_and_never_targets_another_dashboard`,
   `test_a_dashboard_not_named_by_the_finding_is_never_planned`,
   `test_parse_edit_refuses_anything_off_the_narrow_shape`,
   `test_an_edit_never_touches_a_card_that_names_a_lock_alarm_or_cover`,
+  `test_a_card_that_names_filters_or_targets_access_hardware_is_protected`,
+  `test_the_health_check_reloads_and_dashboard_edits_share_one_access_classification`,
   `test_a_card_that_names_a_lock_after_the_approval_is_never_written`.
 - M19. **Integration replacement** is always a plan the admin carries out;
   the daemon never removes or adds an integration.
@@ -251,10 +259,12 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 
 ## Invariants
 
-- M27. Locks, the alarm and garage doors are never operated; the plan
-  prompt forbids edits that touch them, the proposal path cannot reach
-  them, and a dashboard edit never touches a card that names a lock, alarm
-  or cover entity (M18).
+- M27. Locks, the alarm, garage doors, gates and anything else that opens
+  the house are never operated; the plan prompt forbids edits that touch
+  them, the proposal path cannot reach them, and a dashboard edit never
+  touches a protected card (M18): one that names a lock, alarm or cover
+  entity or any entity named like access hardware, filters for those
+  domains, or targets a device, area, floor or label.
 - M28. The daemon executes, the AI proposes; no maintenance path changes
   the agent itself, the Supervisor or the host; the hard gates (update
   rule, self-guard, approvals) are unchanged except for the additions above.

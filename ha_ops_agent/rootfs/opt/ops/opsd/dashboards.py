@@ -11,8 +11,9 @@ moves. A new type must be one of `DISPLAY_CARD_TYPES`, built-in cards without a 
 never `button`, `tile`, `picture-elements`, `entity-button`, `iframe`, `markdown` or a `custom:` card); a
 rename never goes from or to an option in `DENY_OPTIONS` (actions, navigation, services and their
 targets, URLs and content, the card's entities, nested cards, visibility and conditions); and an edit
-never touches a card that names a lock, alarm or cover entity (`touches_protected`). Anything else is
-refused, and the plan stays text only.
+never touches a card that, anywhere inside it, names a lock, alarm or cover entity or any entity named
+like access hardware (`opsd.access`), filters for one of those domains, or targets a device, area,
+floor or label (`touches_protected`). Anything else is refused, and the plan stays text only.
 `DashboardWriter.execute`, in this order:
 
 1. the approval is a dashboard approval, approved and unexpired; `dashboard.save` is not tightened to
@@ -43,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from opsd import selfguard
+from opsd.access import named_like_access
 from opsd.approvals import Approvals
 from opsd.capabilities import CAPABILITIES, Args, CapabilityError
 from opsd.config import Options
@@ -71,8 +73,11 @@ DENY_OPTIONS = frozenset({
     "service_data", "perform_action", "data", "target", "entity", "entities", "card", "cards", "visibility",
     "conditions",
 })  # fmt: skip
-# Cards naming one of these are never edited (locks, the alarm, doors and covers).
-PROTECTED_ENTITY_RE = re.compile(r"(?<![a-z0-9_])(?:lock|alarm_control_panel|cover)\.[a-z0-9_]+")
+# A card is never edited when anything in it names, filters for or could target access hardware.
+PROTECTED_DOMAINS = frozenset({"lock", "alarm_control_panel", "cover"})
+# Service targets the agent cannot resolve to entities: a card that uses one fails closed.
+UNRESOLVED_TARGET_KEYS = frozenset({"device_id", "area_id", "floor_id", "label_id"})
+ENTITY_ID_RE = re.compile(r"(?<![a-z0-9_.])([a-z_][a-z0-9_]{0,40})\.([a-z0-9_]{1,128})(?![a-z0-9_])")
 MAX_DASHBOARDS = 20
 MAX_BACKUPS = 10
 MAX_PATHS = 40
@@ -186,18 +191,37 @@ def apply_edit(config: Any, edit: Edit) -> tuple[Any, list[str]]:
     return walk(config, "", None), changed
 
 
+def _access_entity(text: str) -> bool:
+    """Whether a text holds an entity id of an access domain, or one named like access hardware (any domain:
+    a `script.open_garage`, `switch.gate_opener` or `button.front_door_unlock` counts)."""
+    for match in ENTITY_ID_RE.finditer(text):
+        if match.group(1) in PROTECTED_DOMAINS or named_like_access(match.group(0)):
+            return True
+    return False
+
+
 def _names_protected(node: Any) -> bool:
     if isinstance(node, str):
-        return PROTECTED_ENTITY_RE.search(node) is not None
+        return _access_entity(node)
     if isinstance(node, Mapping):
-        return any(_names_protected(k) or _names_protected(v) for k, v in node.items())
+        for key, child in node.items():
+            name = str(key)
+            if name in UNRESOLVED_TARGET_KEYS or _access_entity(name) or _names_protected(child):
+                return True
+            # An auto-entities style filter (`domain: lock`, or a list of domains).
+            domains = child if isinstance(child, list) else [child]
+            if name == "domain" and any(isinstance(d, str) and d.strip().lower() in PROTECTED_DOMAINS for d in domains):
+                return True
+        return False
     if isinstance(node, list):
         return any(_names_protected(child) for child in node)
     return False
 
 
 def touches_protected(config: Any, edit: Edit) -> bool:
-    """Whether a card the edit targets (or a card nested in it) names a lock, alarm or cover entity."""
+    """Whether a card the edit targets (or a card nested in it) names an access entity (`opsd.access`: locks,
+    alarms, covers, or an id named like access hardware in any domain), filters for an access domain, or uses a
+    service target the agent cannot resolve (`device_id`, `area_id`, `floor_id`, `label_id`)."""
     return any(container in CARD_KEYS and node.get("type") == edit.card_type and _names_protected(node)
                for container, node in _walk(config))  # fmt: skip
 

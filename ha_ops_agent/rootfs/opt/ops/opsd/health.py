@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from opsd import policy
+from opsd.access import access_kind
 from opsd.config import Options, Paths
 from opsd.fingerprint import fingerprint, normalize
 from opsd.safegit import git_argv, git_env
@@ -41,9 +42,6 @@ UNKNOWN_MEANINGFUL_DOMAINS = frozenset(
      "valve", "alarm_control_panel", "media_player", "siren"}
 )  # fmt: skip
 FAILED_ENTRY_STATES = frozenset({"setup_error", "setup_retry", "migration_error", "failed_unload"})
-# Covers that open the house (with locks and alarm panels, see `access_kind`). None may be
-# exposed to Assist (invariant 3).
-ACCESS_COVER_CLASSES = frozenset({"garage", "gate"})
 ASSIST = "conversation"
 LOG_LEVELS_TRACKED = frozenset({"ERROR", "CRITICAL"})
 _OOM_RE = re.compile(r"Out of memory: Killed process \d+ \(([^)]+)\)")
@@ -329,18 +327,6 @@ def derive_memory(meminfo: str) -> dict[str, Any]:
         "swap_used_mb": swap_used // 1024,
         "swap_used_pct": round(100 * swap_used / swap_total, 1) if swap_total else 0.0,
     }
-
-
-def access_kind(entity_id: str, attributes: dict[str, Any]) -> str | None:
-    """`lock`, `alarm` or `garage` for an entity that opens the house, else None."""
-    domain = entity_id.split(".", 1)[0]
-    if domain == "lock":
-        return "lock"
-    if domain == "alarm_control_panel":
-        return "alarm"
-    if domain == "cover" and (attributes.get("device_class") in ACCESS_COVER_CLASSES or "garage" in entity_id):
-        return "garage"
-    return None
 
 
 def derive_assist_exposure(exposure: Any, states: Iterable[dict[str, Any]]) -> dict[str, str]:

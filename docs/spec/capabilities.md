@@ -99,9 +99,10 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   tier APPROVE, effect `{MUTATE_HA}`, origin agent-self only, in no run
   profile's grant. The daemon saves one storage dashboard only through
   `dashboards.DashboardWriter.execute`, applying only the narrow edit of
-  [maintenance.md](maintenance.md) M18 (never to a card that names a lock,
-  alarm or cover entity), to a dashboard Home Assistant lists in `storage`
-  mode at the request and at execution, after consuming the admin's
+  [maintenance.md](maintenance.md) M18 (never to a protected card: one
+  that names, filters for or could target access hardware), to a
+  dashboard Home Assistant lists in `storage` mode at the request and at
+  execution, after consuming the admin's
   dashboard approval, in act mode, and refuses when `capabilities.never`
   names `dashboard.save`; `capabilities.require_approval` cannot loosen
   it. The save itself passes the self-guard only inside its approved scope

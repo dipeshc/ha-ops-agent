@@ -34,6 +34,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from opsd.access import named_like_access
 from opsd.api import LiveAPI
 from opsd.capabilities import Args, CapabilityError
 from opsd.jsonstore import read_json, write_json_atomic
@@ -61,13 +62,8 @@ DENY_DOMAINS: frozenset[str] = NEVER_RELOAD_DOMAINS
 PROTECTED_ENTITY_DOMAINS = frozenset({"lock", "alarm_control_panel"})
 SAFE_COVER_CLASSES = frozenset({"blind", "shade", "curtain", "awning", "shutter"})
 NAMED_ACCESS_DOMAINS = frozenset({"switch", "button", "valve", "cover"})
-ACCESS_WORD = re.compile(
-    r"(?:^|[_\s.\-])(garage[_\s.\-]?doors?|opener|openers|gate|gates|door|doors|lock|locks|unlock|entry|entrance)(?:[_\s.\-]|$)"
-)
-# A room name alone ("garage" camera switches) is not an access control; the words are the access hardware.
-# Device-local "locks" that disable a gadget's own buttons (a vacuum's or purifier's child lock) open
-# nothing, so they are removed before the access-word check instead of blocking the whole integration.
-BENIGN_LOCK = re.compile(r"(?:child|key|control|panel|keypad)[_\s.\-]?locks?")
+# Named access hardware (`opsd.access`): a room name alone is not, and a gadget's child lock is removed before
+# the check instead of blocking the whole integration.
 BUSY_VACUUM_STATES = frozenset({"cleaning", "returning", "paused"})
 
 # One reload decision at a time; domains being reloaded right now.
@@ -175,7 +171,7 @@ def _protected(entities: Iterable[Mapping[str, Any]], states: Mapping[str, Mappi
                 for x in (entity_id, entity.get("name"), entity.get("original_name"), attributes.get("friendly_name"))
                 if x
             )
-            if ACCESS_WORD.search(BENIGN_LOCK.sub(" ", names)):
+            if named_like_access(names):
                 return f"it provides {entity_id} (named like an access control)"
     return None
 

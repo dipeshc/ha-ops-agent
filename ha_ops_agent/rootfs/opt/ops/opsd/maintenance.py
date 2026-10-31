@@ -667,13 +667,15 @@ class MaintenanceManager:
         found = sorted(found, key=lambda f: (f.variant != "deprecation", f.left(installed) is None,
                                              f.left(installed) or 0, f.key))[:MAX_FINDINGS]  # fmt: skip
         stamp = now.astimezone(UTC).isoformat(timespec="seconds")
-        self.store.kv_set(FINDINGS_KEY, json.dumps([f.to_json() for f in found]), now=now)
-        self.store.kv_set(META_KEY, json.dumps({
-            "at": stamp, "full_at": stamp if full else full_at, "installed": installed, "newest": newest,
-            "trigger": trigger, "problems": problems[:10], "inventory": inv.to_json() | {"yaml": len(inv.yaml)},
-        }), now=now)  # fmt: skip
-        self._refresh_dashboard_plans(found, gathered.configs, now)
-        self._prune({f.key for f in found}, now)
+        # One transaction: the scan's items are written once, from its whole result.
+        with self.store.atomic():
+            self.store.kv_set(FINDINGS_KEY, json.dumps([f.to_json() for f in found]), now=now)
+            self.store.kv_set(META_KEY, json.dumps({
+                "at": stamp, "full_at": stamp if full else full_at, "installed": installed, "newest": newest,
+                "trigger": trigger, "problems": problems[:10], "inventory": inv.to_json() | {"yaml": len(inv.yaml)},
+            }), now=now)  # fmt: skip
+            self._refresh_dashboard_plans(found, gathered.configs, now)
+            self._prune({f.key for f in found}, now)
         planned = await self._plans(found, gathered, now)
         self._publish()
         return {"result": "ok", "findings": len(found), "planned": planned, "full": full, "problems": problems[:5]}

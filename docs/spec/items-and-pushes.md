@@ -48,7 +48,10 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   also that finding's item,
   a change, a fact or a task its own item, a dashboard approval or the
   maintenance state the maintenance items. The health check's save of its
-  open items writes the health items in one transaction. An item and its
+  open items writes the health items in one transaction, and a maintenance
+  scan writes its findings, its metadata and the records it blanks in one,
+  so its items are composed once from its whole result (test
+  `test_a_scan_writes_its_items_once`). An item and its
   source therefore never disagree, even after a crash. A failure to compose
   or write one item is logged and blocks neither the source's write nor the
   other items. Tests `test_an_item_is_written_in_its_sources_transaction`,

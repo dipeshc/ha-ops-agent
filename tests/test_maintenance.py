@@ -368,6 +368,24 @@ async def test_a_findings_config_change_moves_its_item(tmp_path: Path) -> None:
     assert item["state"] == "waiting" and any(f["value"] == f"#{change['id']}: rejected" for f in item["facts"])
 
 
+async def test_a_scan_writes_its_items_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = Rig(tmp_path)
+    await rig.scan()
+    rig.issues = []  # one finding goes: its plan and result are blanked by the same scan
+    calls: list[int] = []
+    real = rig.book._maintenance
+
+    def counted(composer: Any) -> None:
+        calls.append(1)
+        real(composer)
+
+    monkeypatch.setattr(rig.book, "_maintenance", counted)
+    rig.now += timedelta(hours=1)
+    await rig.scan()
+    assert calls == [1]
+    assert rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]["state"] == "done"
+
+
 async def test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     await rig.scan()

@@ -77,8 +77,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   passes and forgets a recheck its source did not renew (a resolved item
   carries none), then decides the pushes time made due (N1). The add-on options
   are a source too: at each start the daemon recomposes the update items
-  and nights (the gate and the window) and the maintenance items (act
-  mode). Tests `test_the_items_engine_asks_only_once_remote_access_stays_down`,
+  and nights (the gate and the window), the maintenance items (act mode)
+  and the health items (from `open-items.json`, so one that was watching
+  under 0.18, which had no `recheck_at`, asks on time). Tests `test_the_items_engine_asks_only_once_remote_access_stays_down`,
   `test_a_rejected_update_asks_again_once_the_week_is_over`,
   `test_a_cleared_watch_is_not_composed_again`.
 - I6. Update items: AUTO and not held is `scheduled` (or `proposed` while a

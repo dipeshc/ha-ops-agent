@@ -1171,13 +1171,15 @@ class ItemBook:
         return self.flush() if self.on_change is None else []
 
     def recompose(self) -> list[dict[str, Any]]:
-        """At start: the items that read the add-on options (the update gate and window, act mode)."""
+        """At start: the items that read the add-on options (the update gate and window, act mode), and the
+        health items, so one that was watching under an earlier version gets its recheck (`recheck_at`)."""
         with self.store.atomic():
             composer = self._composer()
             self._safely("updates", partial(self._updates, composer, None))
             for run in self.store.recent_update_runs(limit=30):
                 self._safely(f"window:{run['id']}", partial(self._window, composer, int(run["id"])))
             self._safely("maint", partial(self._maintenance, composer))
+            self._safely("health", partial(self._health, composer))
         return self.flush() if self.on_change is None else []
 
     def tick(self) -> list[dict[str, Any]]:

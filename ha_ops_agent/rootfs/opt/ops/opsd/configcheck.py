@@ -874,6 +874,15 @@ _STEERED_KEYS = frozenset({"action", "service", "service_template", "entity_id",
                            "floor_id", "label_id", "data_template"})  # fmt: skip
 
 
+def has_template(text: str) -> bool:
+    """Whether a file holds a template anywhere (best effort: an unreadable file counts as holding one)."""
+    try:
+        data = _lenient(text)
+    except ValueError:
+        return True
+    return _has_template(data)
+
+
 def steered_by_template(text: str) -> bool | None:
     """Whether an existing YAML file picks an action or its target with a template (None: unreadable).
 

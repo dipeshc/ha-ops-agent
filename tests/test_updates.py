@@ -1818,3 +1818,34 @@ def test_a_macro_changes_only_when_no_file_picks_an_action_with_a_template(w: An
     commit_files(w, {"automations/steered.yaml": "alias: [unclosed\n"})
     with pytest.raises(ChangeRefused, match="could not be parsed"):
         propose_fix(w, [{"path": macro, "old": "ok", "new": "done"}])
+
+
+def test_a_macro_change_counts_any_templated_file_that_does_more(w: Any) -> None:  # noqa: F811
+    """A file that does more than a proposal may and holds any template (a condition, a trigger) can be steered."""
+    from opsd.changes import ChangeRefused
+
+    macro = "custom_templates/status.jinja"
+    commit_files(w, {macro: "{% macro status() %}ok{% endmacro %}\n"})
+    commit_files(w, {"automations/heat.yaml": "alias: Heat\ncondition:\n  - condition: template\n"
+                                             "    value_template: \"{{ is_state('sensor.fridge', 'on') }}\"\n"
+                                             "action:\n  - action: switch.turn_on\n    target:\n"
+                                             "      entity_id: switch.heater\n"})  # fmt: skip
+    with pytest.raises(ChangeRefused, match=r"automations/heat\.yaml does more than a proposal may and uses templates"):
+        propose_fix(w, [{"path": macro, "old": "ok", "new": "done"}])
+
+
+def test_the_macro_scan_never_follows_links_or_opens_special_files(tmp_path: Path) -> None:
+    import os
+
+    from opsd.updatefix import macro_consumer
+
+    (tmp_path / "automations").mkdir()
+    (tmp_path / "automations" / "a.yaml").write_text("alias: A\naction: []\n")
+    assert macro_consumer(tmp_path) is None
+    os.mkfifo(tmp_path / "automations" / "pipe.yaml")
+    assert macro_consumer(tmp_path) == "automations/pipe.yaml could not be checked"  # never blocks on the FIFO
+    (tmp_path / "automations" / "pipe.yaml").unlink()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.yaml"
+    outside.write_text('alias: X\naction:\n  - action: "{{ x }}"\n')
+    (tmp_path / "automations" / "link.yaml").symlink_to(outside)
+    assert macro_consumer(tmp_path) == "automations/link.yaml could not be checked"

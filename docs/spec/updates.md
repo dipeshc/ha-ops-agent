@@ -217,12 +217,19 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   literal allowed actions, literal targets in the entity registry, no
   templated `action`, `service`, `entity_id` or `target`, no device, area,
   event or scene keys. A macro (`.jinja`) changes only when no `*.yaml` in
-  the config directory (hidden directories and `secrets.yaml` skipped, links
-  not followed) picks an action or its target with a template, and every
-  one of them parses (fail closed). The same rules apply to a maintenance
-  YAML migration ([maintenance.md](maintenance.md) M17). Tests
+  the config directory picks an action or its target with a template, or
+  does more than a proposal may ([proposals.md](proposals.md) C5) while
+  holding any template (conditions and triggers included), and every one
+  of them parses (fail closed). The scan skips hidden directories and
+  `secrets.yaml`, walks at most 20 000 directory entries and 3000 YAML
+  files, opens each file without following a link, and reads only a
+  regular file of at most 1 MiB; anything else refuses the macro change.
+  The same rules apply to a maintenance YAML migration
+  ([maintenance.md](maintenance.md) M17). Tests
   `test_an_updates_configuration_change_is_checked_like_a_proposal`,
-  `test_a_macro_changes_only_when_no_file_picks_an_action_with_a_template`.
+  `test_a_macro_changes_only_when_no_file_picks_an_action_with_a_template`,
+  `test_a_macro_change_counts_any_templated_file_that_does_more`,
+  `test_the_macro_scan_never_follows_links_or_opens_special_files`.
   The update then waits for change `#N`: open or applying waits
   quietly, applied lets it go ahead (re-reviewed), rejected asks again.
   Nothing is applied automatically; the admin applies the proposal on its

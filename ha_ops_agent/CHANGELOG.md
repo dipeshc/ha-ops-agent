@@ -77,7 +77,8 @@ Updates and approvals:
   `update.install`.
 - An update's config fix passes the proposal call allowlist (no templated
   action, service, entity id or target), a template macro changes only
-  when no YAML picks an action or target with a template, and a Core
+  when no YAML picks an action or target with a template or does more
+  than a proposal may while using any template, and a Core
   update that may need a config change is reviewed in a run of its own
   over Home Assistant's notes only.
 - With `updates.review: false`, `updates.hold_if_unreviewed` (default on)

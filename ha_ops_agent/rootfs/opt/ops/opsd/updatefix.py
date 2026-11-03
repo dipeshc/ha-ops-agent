@@ -13,6 +13,7 @@ anything; the admin can always approve the update itself instead.
 
 import os
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,6 +34,8 @@ MAX_FILES = 3
 MAX_EDIT_CHARS = 2000
 # The YAML files read to decide whether a macro may change (`macro_consumer`).
 SCAN_MAX_FILES = 3000
+# Directory entries (files and directories, any name) the scan walks at most.
+SCAN_MAX_ENTRIES = 20000
 SCAN_MAX_BYTES = 1 << 20
 _SUBJECT_RE = re.compile(r"[a-z0-9 ():._-]{1,70}")
 
@@ -95,35 +98,60 @@ def apply_edits(repo: Repo, edits: list[Edit]) -> list[FileChange]:
     return [FileChange(path, text.encode()) for path, text in sorted(texts.items())]
 
 
-def macro_consumer(root: Path) -> str | None:
-    """Why a macro may not change (None: it may): some YAML file in the config directory picks an action or its
-    target with a template, which a macro can feed, or the files could not all be read (fail closed).
+def macro_consumer(root: Path, *, admin_notify: str = "") -> str | None:
+    """Why a macro may not change (None: it may): some YAML file in the config directory could be steered by it,
+    or the files could not all be read (fail closed).
 
-    Walks every `*.yaml` below `root` without following links, skipping hidden directories and `secrets.yaml`.
+    A file steers on a macro when it picks an action or its target with a template, or when it does more than a
+    proposal may (`configcheck.does_more`: a lock, switch or script call, devices, tags, ...) and holds any
+    template at all, conditions and triggers included. Walks every `*.yaml` below `root` without following links,
+    skipping hidden directories and `secrets.yaml`, at most `SCAN_MAX_ENTRIES` directory entries; each file is
+    opened without following a link, must be a regular file and is read up to `SCAN_MAX_BYTES`.
     """
-    seen = 0
+    entries = files = 0
     for top, dirs, names in os.walk(root, followlinks=False):
+        entries += len(dirs) + len(names)
+        if entries > SCAN_MAX_ENTRIES:
+            return "too many files to check"
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for name in sorted(names):
             if not name.endswith(".yaml") or name == "secrets.yaml":
                 continue
-            seen += 1
+            files += 1
             path = Path(top) / name
             relative = path.relative_to(root).as_posix()
-            if seen > SCAN_MAX_FILES:
+            if files > SCAN_MAX_FILES:
                 return "too many YAML files to check"
-            try:
-                if path.is_symlink() or path.stat().st_size > SCAN_MAX_BYTES:
-                    return f"{relative} could not be checked"
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                return f"{relative} could not be read"
+            text = _read_scanned(path)
+            if text is None:
+                return f"{relative} could not be checked"
             steered = configcheck.steered_by_template(text)
             if steered is None:
                 return f"{relative} could not be parsed"
             if steered:
                 return f"{relative} chooses an action or its target with a template"
+            if configcheck.does_more(text, admin_notify=admin_notify) is not None and configcheck.has_template(text):
+                return f"{relative} does more than a proposal may and uses templates"
     return None
+
+
+def _read_scanned(path: Path) -> str | None:
+    """A scanned file's text: never through a link, a regular file only, at most `SCAN_MAX_BYTES` (else None)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = os.read(fd, SCAN_MAX_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > SCAN_MAX_BYTES:
+        return None
+    return data.decode("utf-8", errors="replace")
 
 
 def propose(store: Store, repo: Repo, options: Options, *, item: Mapping[str, Any], why: str, edits: list[Edit],

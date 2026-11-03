@@ -1,5 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -140,12 +141,13 @@ async def test_access_hardware_is_never_expected_unavailable(fake_ha: FakeHA, pa
     assert opens_the_house("cover.side", device_class=None) and opens_the_house("cover.side", device_class="door")
     assert not opens_the_house("cover.side", device_class="shade")
     assert opens_the_house("switch.relay_3", names=["Garage opener"]) and not opens_the_house("switch.relay_3")
-    # Listed or not, a down garage door is reported, critical on its custom integration.
+    # Listed or not, a down garage door is reported: each piece of access hardware is its own critical item.
     baseline = seed(await snap(FakeHA(), paths, meminfo), NOW)
     items = {i.key: i for i in diff(s, baseline, NOW, expected_unavailable=kept)}
-    assert items["entities:acme_solar"].severity == "critical"
-    assert items["entities:acme_solar"].detail["entities"] == ["cover.big", "cover.hall", "cover.ratgdo_1",
-                                                               "switch.relay_3"]  # fmt: skip
+    access = sorted(k for k in items if k.startswith("access:"))
+    assert access == ["access:cover.big", "access:cover.hall", "access:cover.ratgdo_1", "access:switch.relay_3"]
+    assert all(items[k].severity == "critical" for k in access)
+    assert "entities:acme_solar" not in items
 
 
 def iso_hours(hours: float) -> str:
@@ -279,8 +281,17 @@ async def test_expected_unavailable_never_alerts(fake_ha: FakeHA, paths: Paths, 
     baseline = seed(await snap(fake_ha, paths, meminfo), NOW)
     fake_ha.set_unavailable("lock.front_door", hours_ago=30)
     s = await snap(fake_ha, paths, meminfo)
-    assert any(i.key == "entities:august" for i in diff(s, baseline, NOW))
-    assert diff(s, baseline, NOW, expected_unavailable=frozenset({"lock.front_door"})) == []
+    assert any(i.key == "access:lock.front_door" for i in diff(s, baseline, NOW))
+    # Access hardware is never silenced by the list, even when a caller passes it unfiltered.
+    assert [i.key for i in diff(s, baseline, NOW, expected_unavailable=frozenset({"lock.front_door"}))] == [
+        "access:lock.front_door"]  # fmt: skip
+    fake_ha.states.append({"entity_id": "sensor.acme_rain", "state": "1", "last_changed": "2026-01-01T00:00:00+00:00",
+                           "attributes": {}})  # fmt: skip
+    fake_ha.registry.append({"entity_id": "sensor.acme_rain", "platform": "august"})
+    fake_ha.set_unavailable("sensor.acme_rain", hours_ago=30)
+    s = await snap(fake_ha, paths, meminfo)
+    listed = frozenset({"sensor.acme_rain"})
+    assert [i.key for i in diff(s, baseline, NOW, expected_unavailable=listed)] == ["access:lock.front_door"]
 
 
 def test_is_down_semantics() -> None:
@@ -368,3 +379,72 @@ async def test_config_check_timeout_is_unknown_not_invalid(fake_ha: FakeHA, path
     s = await snap(fake_ha, paths, meminfo)
     assert s.config_check["ok"] is None and "timed out" in s.config_check["error"]
     assert "config:invalid" not in {i.key for i in diff(s, baseline, NOW)}
+
+
+def _snap(unavailable: dict[str, dict[str, Any]]) -> Any:
+    from opsd.health import Snapshot
+
+    return Snapshot(taken_at=NOW.isoformat(), unavailable=unavailable,
+                    backups={"newest_complete_age_h": 1, "newest_any_age_h": 1})  # fmt: skip
+
+
+def _down(entity_id: str, platform: str, **extra: Any) -> dict[str, Any]:
+    return {entity_id: {"platform": platform, "state": "unavailable", "last_changed": iso_hours(12), **extra}}
+
+
+def test_an_integration_ack_never_hides_access_hardware() -> None:
+    baseline = Baseline(created_at=NOW.isoformat())
+    first = _snap(_down("sensor.side_battery", "acme_locks"))
+    [item] = [i for i in diff(first, baseline, NOW) if i.key.startswith("entities:")]
+    assert item.severity == "warning"
+    # The agent's accept of the integration's warning folds only that entity.
+    baseline = apply_ack(baseline, item, reason="flaky", days=30, accept=True, now=NOW)
+    later = _snap({**_down("sensor.side_battery", "acme_locks"), **_down("lock.side_entrance", "acme_locks")})
+    items = {i.key: i for i in diff(later, baseline, NOW + timedelta(days=1))}
+    assert list(items) == ["access:lock.side_entrance"] and items["access:lock.side_entrance"].severity == "critical"
+    # The agent can snooze it for the critical limit only, and never accept it.
+    access = items["access:lock.side_entrance"]
+    agent = apply_ack(Baseline.from_json(baseline.to_json()), access, reason="x", days=30, accept=True, now=NOW)
+    assert agent.acks[access.key]["accepted"] is False and agent.accepted_access == []
+    assert [i.key for i in diff(later, agent, NOW + timedelta(days=4))] == ["access:lock.side_entrance"]
+    # The admin's accept holds until it recovers; going down again is reported again.
+    admin = apply_ack(Baseline.from_json(baseline.to_json()), access, reason="x", days=30, accept=True, now=NOW,
+                      by="user")  # fmt: skip
+    assert admin.accepted_access == ["lock.side_entrance"]
+    assert diff(later, admin, NOW + timedelta(days=31)) == []
+    recovered = advance(admin, first, NOW + timedelta(days=31))
+    assert recovered.accepted_access == []
+    assert [i.key for i in diff(later, recovered, NOW + timedelta(days=32))] == ["access:lock.side_entrance"]
+
+
+def test_the_first_run_never_accepts_access_hardware_that_is_down() -> None:
+    snapshot = _snap({**_down("lock.side_entrance", "acme_locks"),
+                      **_down("switch.relay_9", "acme_io", names=["Gate opener"]),
+                      **_down("sensor.porch_lux", "acme_io")})  # fmt: skip
+    baseline = seed(snapshot, NOW)
+    assert baseline.unavailable == ["sensor.porch_lux"]
+    assert seed_exclusions(snapshot)["access_unavailable"] == ["lock.side_entrance", "switch.relay_9"]
+    assert [i.key for i in diff(snapshot, baseline, NOW)] == ["access:lock.side_entrance", "access:switch.relay_9"]
+    # A baseline written before access hardware had its own item does not silence it either.
+    baseline.unavailable = sorted(snapshot.unavailable)
+    assert [i.key for i in diff(snapshot, baseline, NOW)] == ["access:lock.side_entrance", "access:switch.relay_9"]
+
+
+def test_assist_exposure_covers_everything_that_opens_the_house() -> None:
+    exposure = {"exposed_entities": {
+        "cover.front_door": {"conversation": True},
+        "cover.driveway": {"conversation": True},
+        "cover.lounge_blind": {"conversation": True},
+        "switch.gate_opener": {"conversation": True},
+        "button.garage_door_open": {"conversation": True},
+        "switch.relay_4": {"conversation": True},
+        "switch.vacuum_child_lock": {"conversation": True},
+        "light.porch": {"conversation": True},
+    }}  # fmt: skip
+    states = [{"entity_id": "cover.front_door", "attributes": {"device_class": "door"}},
+              {"entity_id": "cover.driveway", "attributes": {}},
+              {"entity_id": "cover.lounge_blind", "attributes": {"device_class": "blind"}}]  # fmt: skip
+    registry = [{"entity_id": "switch.relay_4", "name": "Side entrance release"}]
+    assert derive_assist_exposure(exposure, states, registry) == {
+        "button.garage_door_open": "access", "cover.driveway": "cover", "cover.front_door": "cover",
+        "switch.gate_opener": "access", "switch.relay_4": "access"}  # fmt: skip

@@ -277,9 +277,9 @@ async def test_a_listed_lock_is_still_reported_and_warned_about_once(
     d = h.daemon(health__expected_unavailable=listed)
     outcome = await d.health_cycle("daily")
     await d.health_cycle("daily")
-    [item] = [i for i in d.open_items() if i.key == "entities:acme_solar"]
+    [item] = [i for i in d.open_items() if i.key == "access:lock.side_door"]
     assert item.severity == "critical" and item.detail["entities"] == ["lock.side_door"]
-    assert "entities:acme_solar" in outcome.record["item_keys"]
+    assert "access:lock.side_door" in outcome.record["item_keys"]
     warned = [r for r in caplog.records if "expected_unavailable lists access hardware" in r.getMessage()]
     assert len(warned) == 1  # once per start, not every check
 
@@ -296,6 +296,22 @@ async def test_user_ack_from_panel_can_accept(h: Harness) -> None:
     assert "light.kitchen" in baseline["unavailable"] and baseline["acks"]["entities:acme_solar"]["by"] == "user"
     outcome = await d.health_cycle("daily")
     assert outcome.result == "ok"
+
+
+async def test_access_hardware_is_its_own_critical_item_the_agent_cannot_accept(h: Harness) -> None:
+    h.fake.states.append({"entity_id": "lock.side_door", "state": "locked", "last_changed": "2026-01-01T00:00:00+00:00",
+                          "attributes": {}})  # fmt: skip
+    h.fake.registry.append({"entity_id": "lock.side_door", "platform": "acme_solar", "config_entry_id": "lut1"})
+    await h.daemon().health_cycle("catch_up")
+    h.fake.set_unavailable("lock.side_door", hours_ago=8)
+    h.in_run_requests = [{"verb": "ack", "args": {"key": "access:lock.side_door", "days": 30, "accept": True}}]
+    h.claude_reply = {"result": "ok", "summary": "lock battery"}
+    await h.daemon().health_cycle("daily")
+    assert "accept refused" in h.in_run_responses[0]["output"]
+    assert h.pushes()[-1]["title"] == "Ops Agent: critical"
+    ack = read_json(h.paths.baseline_file, {})["acks"]["access:lock.side_door"]
+    assert ack["accepted"] is False and ack["by"] == "claude"
+    assert "lock.side_door" not in read_json(h.paths.baseline_file, {}).get("accepted_access", [])
 
 
 async def test_run_cap(h: Harness) -> None:

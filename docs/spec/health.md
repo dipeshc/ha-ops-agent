@@ -5,7 +5,7 @@ means no AI run and no push. The daemon decides severities; the AI only
 reads and comments.
 
 Implementation: `opsd/health.py` (collection), `opsd/access.py`
-(`access_kind`, shared with reloads and dashboard edits), `opsd/baseline.py` (baseline,
+(`opens_the_house`, shared with reloads and dashboard edits), `opsd/baseline.py` (baseline,
 diff, acks), `opsd/triage.py` (prompt and result), `opsd/fingerprint.py`,
 `opsd/queries.py`, the health cycle in `opsd/daemon.py`. Tests:
 `tests/test_health_baseline.py`, `tests/test_daemon.py`,
@@ -49,10 +49,13 @@ diff, acks), `opsd/triage.py` (prompt and result), `opsd/fingerprint.py`,
   only, fingerprinted by logger and normalised message (12 hex characters).
 - H8. A backup is "complete" when it holds the config, the database and
   every installed add-on; the Core backup manager is preferred, the
-  Supervisor list is the fallback. Access entities are `lock.*`,
-  `alarm_control_panel.*` and covers with device class garage or gate (or
-  "garage" in the id); they are "exposed" when Assist exposure lists them
-  with `conversation: true`; a malformed answer makes exposure unknown.
+  Supervisor list is the fallback. Access hardware is what opens the house
+  (`opsd.access.opens_the_house`, the rule of H11a and [reload.md](reload.md)
+  L3): a lock, an alarm panel, a cover that is not positively a blind, shade,
+  curtain, awning or shutter, or anything whose id, friendly name or registry
+  names say access. It is "exposed" when Assist exposure lists it with
+  `conversation: true`; a malformed answer makes exposure unknown. Test
+  `test_assist_exposure_covers_everything_that_opens_the_house`.
 - H9. A config check (Supervisor `POST /core/check`, 180 seconds) runs in the
   daily cycle only (not for `opsctl health`). A timeout leaves `ok` unknown;
   an answered failure sets it false.
@@ -61,19 +64,20 @@ diff, acks), `opsd/triage.py` (prompt and result), `opsd/fingerprint.py`,
 
 Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 `entry:<id>`, `repair:<key>`, `supervisor:<issue>`, `log:<fp>`,
-`update:<entity>@<latest>`, `assist:<entity>`, ...).
+`update:<entity>@<latest>`, `assist:<entity>`, `access:<entity>`, ...).
 
 | Item | Severity | Rule |
 | --- | --- | --- |
 | `core:down` | critical | Core state not running, or the API down. |
-| `entities:<platform>` | critical for a custom integration, else warning | Newly down entities not in the baseline or `health.expected_unavailable`; flips younger than 6 hours are skipped unless the platform is custom and the state is hard `unavailable`. |
+| `entities:<platform>` | critical for a custom integration, else warning | Newly down entities not in the baseline or `health.expected_unavailable`; flips younger than 6 hours are skipped unless the platform is custom and the state is hard `unavailable`. Access hardware (H8) is never part of it. |
+| `access:<entity>` | critical | A piece of access hardware (H8) that is down and that the admin has not accepted as down; one item per entity, the same flap rule as `entities:`. The baseline's `unavailable` list never silences it, so an ack or accept of an integration's item cannot hide a lock or alarm panel that goes down later. Test `test_an_integration_ack_never_hides_access_hardware`. |
 | `custom:<domain>` | critical | A custom integration that was ok in the baseline now has a failed entry or all entities down. An entity in `health.expected_unavailable` MUST NOT count here, neither as down nor in the entity total, so the integration is still broken when every other entity is down (the snapshot still lists it as unavailable). Test `test_expected_unavailable_entities_do_not_break_a_custom_integration`. |
 | `entry:<id>` | critical for a custom domain, else warning | New failed config entry. |
 | `repair:<key>` | critical iff Home Assistant says critical, else warning | New repair. |
 | `supervisor:<issue>` | warning | New Supervisor issue; `no_current_backup` is dropped when a complete encrypted backup finished within 26 hours and is critical otherwise; unhealthy/unsupported reasons are warnings every run. |
 | `log:<fp>`, `log:<fp>:growth` | warning | Unseen fingerprint; or a count at least 10 times the baseline. |
 | `update:<entity>@<latest>` | info | Once per version. |
-| `assist:<entity>` | critical | An access entity exposed to Assist and not accepted; `assist:check_failed` is a warning. |
+| `assist:<entity>` | critical | Access hardware (H8) exposed to Assist and not accepted; `assist:check_failed` is a warning. |
 | `backup:complete_stale`, `backup:stale`, `backup:unprotected` | warning | No complete backup or older than 168 hours; any backup older than 26 hours; unencrypted backups exist. |
 | `disk:low` | warning | Free space under 15 %. |
 | `memory:low`, `memory:swap` | critical, warning | Available memory under 600 MB; swap use over 50 %. |
@@ -98,14 +102,16 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 - H11. The first run seeds the baseline with the current unavailable
   entities, failed entries, repairs, Supervisor issues, log fingerprints,
   pending update versions, boot and OOM state. It MUST NOT accept custom
-  integration entities, custom-domain failed entries or critical repairs;
-  those are reported again until accepted in the panel. A custom
+  integration entities, access hardware that is down (H8), custom-domain
+  failed entries or critical repairs; those are reported again until
+  accepted in the panel. A custom
   integration entity in `health.expected_unavailable` is accepted and does
   not count toward a broken custom integration (as in `custom:<domain>`). `custom_ok` starts
   true for every custom domain; accepted exposures start empty. The run
   sends one push ("the agent is watching") that is urgent and safety-class
   iff something was not accepted. Tests `test_health_baseline.py:36-55`,
   `test_the_seed_accepts_expected_unavailable_custom_entities`,
+  `test_the_first_run_never_accepts_access_hardware_that_is_down`,
   `test_daemon.py` baseline tests.
 - H11a. **Access hardware is never expected.** `health.expected_unavailable`
   is read only through `baseline.honoured_expected`, which drops what opens
@@ -130,16 +136,19 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 - H12. After every processed run the baseline advances: recovered entries
   drop out (a recurrence is new again), fingerprints keep their maximum
   count and expire after 30 days, `custom_ok` becomes true when healthy and
-  is never set false by advancing, accepted exposures are intersected with
-  the current ones, expired acks are removed.
+  is never set false by advancing, accepted exposures and accepted access
+  hardware are intersected with the current ones (access hardware that
+  recovers and goes down again is reported again), expired acks are removed.
 - H13. Acks: days are clamped to 1..30. A critical item acked by anyone but
   the admin is a snooze of at most 3 days, never an accept; a warning snooze
   by the AI is at most 7 days. The panel's `accept` (30 days) and `snooze`
   (7 days) act as the admin and are the only way to accept a critical item;
-  accept folds the item into the baseline by kind. The AI's acks (`baseline.ack`)
+  accept folds the item into the baseline by kind (an `access:` item into the
+  accepted access hardware, until it recovers). The AI's acks (`baseline.ack`)
   are applied after the run, only for keys handed to that run, and survive a
   failed run. Tests `test_health_baseline.py:123-153`,
-  `test_daemon.py:498-538`.
+  `test_daemon.py:498-538`,
+  `test_access_hardware_is_its_own_critical_item_the_agent_cannot_accept`.
 
 ## Triage
 

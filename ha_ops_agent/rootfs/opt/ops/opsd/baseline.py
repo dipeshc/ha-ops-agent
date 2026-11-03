@@ -53,6 +53,8 @@ class Baseline:
     acks: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Per vacuum, the fingerprint of the room drift already reported (each drift is reported once).
     vacuum_rooms_seen: dict[str, str] = field(default_factory=dict)
+    # Access hardware the admin accepted as down (panel only). `unavailable` never silences access hardware.
+    accepted_access: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -88,6 +90,16 @@ def honoured_expected(listed: Iterable[str], unavailable: Mapping[str, Mapping[s
         else:
             kept.add(entity_id)
     return frozenset(kept), sorted(refused)
+
+
+def is_access(entity_id: str, info: Mapping[str, Any]) -> bool:
+    """Whether a down entity (a snapshot's `unavailable` entry) opens the house (`opsd.access.opens_the_house`)."""
+    return opens_the_house(entity_id, device_class=info.get("device_class"), names=info.get("names") or ())
+
+
+def access_down(snapshot: Snapshot) -> list[str]:
+    """The down entities that open the house: each is its own critical `access:<entity_id>` item."""
+    return sorted(e for e, v in snapshot.unavailable.items() if is_access(e, v))
 
 
 def _custom_ok(info: dict[str, Any]) -> bool:
@@ -150,20 +162,23 @@ def seed_exclusions(snapshot: Snapshot, expected_unavailable: frozenset[str] = f
         "custom_failed_entries": sorted(e for e, v in snapshot.failed_entries.items() if v.get("domain") in custom),
         "critical_repairs": sorted(k for k, v in snapshot.repairs.items() if v.get("severity") == "critical"),
         "assist_exposed": sorted(snapshot.assist_exposed or {}),
+        "access_unavailable": access_down(snapshot),
     }
 
 
 def seed(snapshot: Snapshot, now: datetime, *, expected_unavailable: frozenset[str] = frozenset()) -> Baseline:
     """Accept the current state (first run), except anything that would be critical.
 
-    Custom integration outages, their failed entries and critical repairs stay
+    Custom integration outages, their failed entries, critical repairs and access hardware that is down stay
     out of the baseline so they are reported on the next run instead of being
     silently accepted. A custom entity in `expected_unavailable` is accepted.
     """
     excluded = seed_exclusions(snapshot, expected_unavailable)
     return Baseline(
         created_at=now.isoformat(timespec="seconds"),
-        unavailable=sorted(set(snapshot.unavailable) - set(excluded["custom_unavailable"])),
+        unavailable=sorted(
+            set(snapshot.unavailable) - set(excluded["custom_unavailable"]) - set(excluded["access_unavailable"])
+        ),
         failed_entries=sorted(set(snapshot.failed_entries) - set(excluded["custom_failed_entries"])),
         repairs=sorted(set(snapshot.repairs) - set(excluded["critical_repairs"])),
         resolution=sorted(snapshot.resolution.get("issues", [])),
@@ -233,10 +248,14 @@ def diff(
     # Newly unavailable entities, grouped per integration. Recent flips are
     # skipped so a device rebooting during the check does not count, except
     # for custom integrations, where even a partial fresh outage is critical.
+    # Access hardware is never grouped: each one is its own critical item, so an ack of an integration's item
+    # cannot hide a lock or alarm panel going down later, and only the admin's own accept silences it.
     new_by_platform: dict[str, list[str]] = {}
+    new_access: list[tuple[str, dict[str, Any]]] = []
     known = set(baseline.unavailable) | expected_unavailable
     for entity_id, info in snapshot.unavailable.items():
-        if entity_id in known:
+        access = is_access(entity_id, info)
+        if entity_id in (set(baseline.accepted_access) if access else known):
             continue
         age = hours_since(info.get("last_changed"), now)
         # Only a hard `unavailable` on a custom integration skips the flap filter;
@@ -244,7 +263,21 @@ def diff(
         bypass = info["platform"] in custom and info.get("state") == "unavailable"
         if not bypass and age is not None and age < FLAP_HOURS:
             continue
+        if access:
+            new_access.append((entity_id, info))
+            continue
         new_by_platform.setdefault(info["platform"], []).append(entity_id)
+    for entity_id, info in sorted(new_access):
+        items.append(
+            Item(
+                f"access:{entity_id}",
+                "access",
+                "critical",
+                f"{entity_id} (access hardware, {info['platform']}) is {info.get('state') or 'unavailable'}",
+                {"entity_id": entity_id, "entities": [entity_id], "platform": info["platform"],
+                 "state": info.get("state")},
+            )
+        )  # fmt: skip
     for platform, entities in sorted(new_by_platform.items()):
         is_custom = platform in custom
         items.append(
@@ -571,6 +604,8 @@ def advance(baseline: Baseline, snapshot: Snapshot, now: datetime) -> Baseline:
         acks={k: v for k, v in baseline.acks.items() if k in baseline.active_acks(now)},
         # A drift that resolves drops out, so a later one is reported again.
         vacuum_rooms_seen=vacuum_rooms_seen(baseline, snapshot),
+        # Access hardware that recovers drops out, so going down again is reported again.
+        accepted_access=sorted(set(baseline.accepted_access) & set(snapshot.unavailable)),
     )
 
 
@@ -607,6 +642,8 @@ def apply_ack(
     match item.kind:
         case "entities":
             baseline.unavailable = sorted(set(baseline.unavailable) | set(item.detail.get("entities", [])))
+        case "access" if item.detail.get("entity_id"):
+            baseline.accepted_access = sorted({*baseline.accepted_access, str(item.detail["entity_id"])})
         case "config_entry":
             baseline.failed_entries = sorted({*baseline.failed_entries, item.key.removeprefix("entry:")})
         case "repair":

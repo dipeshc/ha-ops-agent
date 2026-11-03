@@ -227,6 +227,8 @@ def baseline_summary(snapshot: Snapshot, expected_unavailable: frozenset[str] = 
         problems.append(f"critical repairs: {', '.join(excluded['critical_repairs'])}")
     if excluded["assist_exposed"]:
         problems.append(f"exposed to Assist: {', '.join(excluded['assist_exposed'])}")
+    if excluded["access_unavailable"]:
+        problems.append(f"access hardware unavailable: {', '.join(excluded['access_unavailable'])}")
     if problems:
         text += " NOT accepted, will be re-reported: " + "; ".join(problems) + "."
     return text, bool(problems)

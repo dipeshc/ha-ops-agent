@@ -162,7 +162,7 @@ def test_health_diff_never_silences_a_listed_lock(
     SERVER[0] = rpc.RpcServer(ExecEnv(paths=paths, options=options, client=env,
                                       redactor=lambda: build_redactor(paths.secrets_yaml)))  # fmt: skip
     items = {i["key"]: i for i in json.loads(run(capsys, "health", "--diff")[1])}
-    assert items["entities:acme_solar"]["detail"]["entities"] == ["lock.side_door"]
+    assert items["access:lock.side_door"]["detail"]["entities"] == ["lock.side_door"]
 
 
 def test_entities_integrations_entries(env: FakeClient, capsys: pytest.CaptureFixture[str]) -> None:

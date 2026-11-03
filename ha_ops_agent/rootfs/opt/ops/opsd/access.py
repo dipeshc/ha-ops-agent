@@ -16,7 +16,8 @@ PROTECTED_DOMAINS = frozenset({"lock", "alarm_control_panel"})
 # treated as one that might (fail closed). Reloads and the health check share this rule.
 SAFE_COVER_CLASSES = frozenset({"blind", "shade", "curtain", "awning", "shutter"})
 
-# Covers that open the house (with locks and alarm panels, see `access_kind`). None may be exposed to Assist.
+# Covers `access_kind` names `garage` (with locks and alarm panels). What may not be exposed to Assist is wider:
+# everything `opens_the_house` counts.
 ACCESS_COVER_CLASSES = frozenset({"garage", "gate"})
 ACCESS_WORD = re.compile(
     r"(?:^|[_\s.\-])(garage[_\s.\-]?doors?|opener|openers|gate|gates|door|doors|lock|locks|unlock|entry|entrance)(?:[_\s.\-]|$)"

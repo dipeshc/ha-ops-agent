@@ -40,8 +40,9 @@ These hold at every stage; each has tests named in the owning document.
   carries out, or refuses.
 - INV2. **Locks, alarms and anything that opens the house are off limits.**
   No capability operates them; a reload never targets an integration that
-  provides one ([reload.md](reload.md)); exposure of one to Assist is a
-  critical health item ([health.md](health.md)).
+  provides one ([reload.md](reload.md)); exposure of one to Assist, and one
+  going down, are critical health items that only the admin can accept
+  ([health.md](health.md) H8, `access:<entity>`).
 - INV3. **The agent never changes itself, the Supervisor or the host**,
   except the operating-system update and reboot the admin approved, through
   a single-use flow ([selfguard.md](selfguard.md)).

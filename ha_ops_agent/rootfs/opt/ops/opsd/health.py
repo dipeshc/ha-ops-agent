@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from opsd import policy
-from opsd.access import access_kind
+from opsd.access import access_kind, opens_the_house
 from opsd.config import Options, Paths
 from opsd.fingerprint import fingerprint, normalize
 from opsd.safegit import git_argv, git_env
@@ -340,8 +340,14 @@ def derive_memory(meminfo: str) -> dict[str, Any]:
     }
 
 
-def derive_assist_exposure(exposure: Any, states: Iterable[dict[str, Any]]) -> dict[str, str]:
-    """Access entities exposed to Assist, from `homeassistant/expose_entity/list`.
+def derive_assist_exposure(exposure: Any, states: Iterable[dict[str, Any]],
+                           registry: Iterable[dict[str, Any]] = ()) -> dict[str, str]:  # fmt: skip
+    """Entities that open the house exposed to Assist, from `homeassistant/expose_entity/list`.
+
+    "Opens the house" is `opsd.access.opens_the_house`, the rule reloads and the expected list use: a lock, an
+    alarm panel, any cover that is not positively a blind or the like (a cover without a device class counts),
+    or anything whose id, friendly name or registry names say access hardware. The value is the kind (`lock`,
+    `alarm`, `garage`, `cover`, or `access` for one only its names identify).
 
     Expected shape `{"exposed_entities": {entity_id: {"conversation": bool, ...}}}`
     (to verify live). Raises ValueError on anything else so a format change
@@ -350,13 +356,19 @@ def derive_assist_exposure(exposure: Any, states: Iterable[dict[str, Any]]) -> d
     if not isinstance(exposure, dict) or not isinstance(exposure.get("exposed_entities"), dict):
         raise ValueError("unexpected expose_entity/list result")
     attributes = {s.get("entity_id", ""): s.get("attributes") or {} for s in states}
+    reg = {e["entity_id"]: e for e in registry if isinstance(e, dict) and "entity_id" in e}
     found: dict[str, str] = {}
     for entity_id, assistants in exposure["exposed_entities"].items():
         if not isinstance(entity_id, str) or not isinstance(assistants, dict) or assistants.get(ASSIST) is not True:
             continue
-        kind = access_kind(entity_id, attributes.get(entity_id, {}))
-        if kind is not None:
-            found[entity_id] = kind
+        attrs = attributes.get(entity_id, {})
+        entry = reg.get(entity_id, {})
+        names = [n for n in (attrs.get("friendly_name"), entry.get("name"), entry.get("original_name"))
+                 if isinstance(n, str) and n]  # fmt: skip
+        if not opens_the_house(entity_id, device_class=attrs.get("device_class"), names=names):
+            continue
+        kind = access_kind(entity_id, attrs)
+        found[entity_id] = kind or ("cover" if entity_id.startswith("cover.") else "access")
     return dict(sorted(found.items()))
 
 
@@ -595,7 +607,7 @@ async def collect(
     )
     exposure = await guarded("assist_exposure", None, api.ws("homeassistant/expose_entity/list"))
     try:
-        snap.assist_exposed = None if exposure is None else derive_assist_exposure(exposure, states)
+        snap.assist_exposed = None if exposure is None else derive_assist_exposure(exposure, states, registry)
     except ValueError as err:
         snap.errors.append(f"assist_exposure: {err}")
         snap.assist_exposed = None

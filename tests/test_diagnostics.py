@@ -82,7 +82,7 @@ async def test_an_api_key_never_leaves_in_the_export_or_the_state(
     state = PanelHandlers(d).state()
     assert out["options"]["claude"]["token"] == "set" and out["health"]["ai_credential"] == "api_key"
     assert state["ai"]["credential"] == "api_key"
-    assert state["usage"]["share_stop_percent"] is None and state["usage"]["run_time_5h_cap_s"] is None
+    assert state["usage"]["run_time_7d_cap_s"] is None and state["usage"]["run_time_5h_cap_s"] is None
     for text in (json.dumps(out), json.dumps(state, allow_nan=False), caplog.text):
         assert key not in text and "TEST-ONLY" not in text
     for run_dir in d.paths.runs_dir.iterdir():

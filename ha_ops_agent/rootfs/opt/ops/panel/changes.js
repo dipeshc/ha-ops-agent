@@ -60,7 +60,7 @@ const say = (key, text) => { S.note[key] = text; P.render(); };
 function system() {
   const st = S.state || {}, sys = S.sys || {}, o = (sys.ops || {}).status || {}, up = sys.updates || {}, c = up.control || {};
   const hp = (sys.ops || {}).profile || {};
-  const b = up.backup || {}, bl = b.last || {}, u = st.usage || {}, cap = u.max_share_percent || 5, today = u.today || {};
+  const b = up.backup || {}, bl = b.last || {}, u = st.usage || {}, today = u.today || {};
   const z = P.tz(), at = (iso) => (iso ? `${P.when(iso, z)}` : "");
   const rules = sys.rules ? sys.rules.rules : null, held = st.held || {};
   const out = [
@@ -75,9 +75,11 @@ function system() {
     ]),
     section("Budget", null, [
       ...(st.ai && st.ai.credential === "api_key"
-        ? [kv("Credential", "API key: no subscription windows, run caps and the per-run cost cap apply")]
-        : [kv("5-hour share", `${P.share(u.agent_share_5h_percent, u.agent_share_5h_estimated)} of ${cap}%`),
-           kv("7-day share", `${P.share(u.agent_share_7d_percent, u.agent_share_7d_estimated)} of ${cap}%`)]),
+        ? [kv("Credential", "API key: no subscription windows, run caps and the cost caps apply")]
+        : [kv("Run time, 7 days", `${P.minutes(u.run_time_7d_s)} of ${P.minutes(u.run_time_7d_cap_s)} min`),
+           kv("Run time, 5 hours", `${P.minutes(u.run_time_5h_s)} of ${P.minutes(u.run_time_5h_cap_s)} min`),
+           u.account_7d_percent != null ? kv("Account, 7 days", `${u.account_7d_percent} %`) : null]),
+      u.daily_max_usd ? kv("Cost today", `$${(u.cost_today_usd || 0).toFixed(2)} of $${Number(u.daily_max_usd).toFixed(2)}`) : null,
       kv("Runs today", `${today.runs || 0}`),
       kv("Chat messages today", `${(st.chat || {}).used || 0} of ${(st.chat || {}).cap || "–"}`),
       kv("Tokens today", P.fmtN(today.tokens)),
@@ -165,11 +167,12 @@ async function toggleUpdates(ev) {
 const { els } = P;
 const MAX = 2000, WARN_AT = 1800;
 const CARD = {
-  ai_disabled: ["AI is off", "power"], share_cap: ["Agent share used for this window", "clock"],
+  ai_disabled: ["AI is off", "power"], share_cap: ["Run-time budget used for this window", "clock"],
   run_cap_reached: ["Run limit reached", "clock"], usage_limited: ["AI usage limit", "clock"],
   account_busy: ["Subscription busy", "clock"], skipped_busy: ["Agent busy", "clock"],
   chat_cap: ["Chat limit reached", "clock"], busy: ["Not sent", "alert"], interrupted: ["Interrupted", "alert"], error: ["Run failed", "alert"],
-  investigation: ["Investigation", "search"], share_reserve: ["Saving budget for monitoring", "clock"], proposal: ["Approval requested", "alert"],
+  investigation: ["Investigation", "search"], share_reserve: ["Saving budget for monitoring", "clock"], cost_cap: ["Daily cost cap reached", "clock"],
+  proposal: ["Approval requested", "alert"],
 };
 function chat(content, banners) {
   let v = els.thread;

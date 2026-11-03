@@ -4,11 +4,11 @@ A refused or failed chat turn gets one `system` turn (a card) in its thread
 instead of silence. The text is fixed per reason and filled only with times
 and numbers computed by the daemon; nothing in a card comes from the model.
 
-Automatic retry (on by default): after a usage limit, a usage or
-share cap, the account yielding, or a slot timeout, the admin's message is
+Automatic retry (on by default): after a usage limit, a run or
+run-time cap, the account yielding, or a slot timeout, the admin's message is
 retried at the earliest time the block can lift (or on a backoff of 15 min
 doubling to 8 h), unless the admin turns it off on the card. A retry is a
-normal run: every cap, the kill switch and the share rule are checked
+normal run: every cap, the kill switch and the run-time budget are checked
 again. After `len(RETRY_BACKOFF)` attempts, or when relief is further than
 `RETRY_HORIZON` from the first refusal, it gives up and says so.
 """
@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
 AUTO_RETRY = frozenset({"usage_limited", "share_cap", "run_cap_reached", "account_busy", "skipped_busy",
-                        "share_reserve"})  # fmt: skip
+                        "share_reserve", "cost_cap"})  # fmt: skip
 RETRY_BACKOFF: tuple[timedelta, ...] = tuple(timedelta(minutes=15 * 2**n) for n in range(6))
 RETRY_HORIZON = timedelta(hours=24)
 RETRY_MARGIN = timedelta(seconds=30)
@@ -27,9 +27,10 @@ _DETAIL_RE = re.compile(r"[a-z0-9_]{1,40}")
 
 _TEXT: dict[str, str] = {
     "ai_disabled": "AI is off, so nothing runs until it is turned back on. Your message is saved.",
-    "share_cap": "The agent has used its share of the {window} subscription window.",
-    "share_reserve": "Saving budget for monitoring: chat has used half of the agent's {window} share, and the rest"
-    " is kept for health checks and update reviews.",
+    "share_cap": "The agent has used its {window} run-time budget.",
+    "share_reserve": "Saving budget for monitoring: chat has used half of the agent's {window} run-time budget, and"
+    " the rest is kept for health checks and update reviews.",
+    "cost_cap": "Today's AI cost cap is reached.",
     "run_cap_reached": "Today's limit for chat runs is reached.",
     "usage_limited": "The AI provider reported a usage limit, so the agent is backing off.",
     "account_busy": "Your AI subscription is near its limit from other use, so the agent yields.",

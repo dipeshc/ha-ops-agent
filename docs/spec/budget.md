@@ -1,11 +1,12 @@
 # The AI usage budget and the kill switch
 
-The AI is bounded by daily run caps, per-run turn and cost caps, a share of
-the account's usage windows, a memory guard and a kill switch. None of
-these touches the deterministic checks, pushes or updates.
+The AI is bounded by daily run caps, per-run turn and cost caps, one
+rolling run-time budget, an optional daily cost cap, a memory guard and a
+kill switch. None of these touches the deterministic checks, pushes or
+updates.
 
 Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
-`opsd/store.py` (`reserve_run`, `finish_run`, `usage`). Tests:
+`opsd/store.py` (`reserve_run`, `finish_run`, `add_cost`, `usage`). Tests:
 `tests/test_usage.py`, `tests/test_usage_estimates.py`, `tests/test_runner.py`.
 
 ## Caps
@@ -17,57 +18,74 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
 - B2. Per-run turn and cost caps come from the profile table in
   [ai-runner.md](ai-runner.md); the cost cap is passed to the provider on
   every run.
-- B3. **Share rule.** `usage.max_share_percent` (default 5, clamped 0.5..25)
-  is the agent's share of each account usage window; `share_stop` is 80 %
-  of it. A run is refused when the agent's 5-hour share plus the profile's
-  typical share (mean of its last 5 measured runs, default 0.5 %) exceeds
-  `share_stop` (`share_cap:five_hour`), likewise for the 7-day window
-  (default typical 0.1 %, `share_cap:seven_day`), when the account's own
-  utilisation in the last hour is at least 90 % (`account_busy:<window>`),
-  or when the time reservation falls under 60 seconds
-  (`share_cap:run_time`). Tests `test_usage.py:46-53,121-143`.
+- B3. **Run-time budget.** `B = plan hours x 3600 x
+  usage.max_share_percent / 100` seconds of AI run time per rolling 7 days,
+  and `B / 5` per rolling 5 hours (`usage.max_share_percent` default 5,
+  clamped 0.5..25). It is the agent's own wall-clock run time, labelled as
+  such; it is not a measured share of the subscription. Every run stops at
+  80 % of each window's budget: a run is refused when less than 60 seconds
+  of it is left (`share_cap:five_hour`, `share_cap:seven_day`, the window
+  with less left), and otherwise the run's reserved time (its timeout) is
+  trimmed to what is left. A run is also refused when the account's own
+  measured utilisation in the last hour is at least 90 % of either window
+  (`account_busy:<window>`). Tests `test_each_cap_refuses`,
+  `test_a_reservation_is_trimmed_to_the_budget_left_and_user_runs_stop_at_half`.
   **Exemption:** with a provider API key ([ai-runner.md](ai-runner.md)
-  AP1a) there are no subscription windows, so none of B3, B4 or B5
-  applies: no `share_cap:*`, `account_busy:*` or `share_reserve:*`
-  refusal, and the run time is the profile's reserve (R3). B1, B2 and the
-  per-run cost cap still apply. Test
+  AP1a) there are no subscription windows, so neither B3 nor B5 applies:
+  no `share_cap:*`, `account_busy:*` or `share_reserve:*` refusal, and the
+  run time is the profile's reserve (R3). B1, B2, B3a and the per-run cost
+  cap still apply. Test
   `test_an_api_key_skips_the_share_rule_but_not_the_run_caps`.
-- B4. Plan tiers for the time estimate: `claude.plan` `pro` 40, `max5` 140,
-  `max20` 240 hours a week (low-end estimates); the 5-hour window is 20 %
-  of the week; `auto` uses the provider's plan hint, else `pro`. Week
-  seconds are `hours x 3600 x share`. Tests `test_usage.py:56-61`,
-  `test_usage_estimates.py:32-40`.
-- B5. User-class runs (chat, investigate, summary) are refused with
-  `share_reserve:<window>` once either window's share reaches half of
-  `share_stop`, so agent-class runs (triage, followup, update review) keep
-  a reserve. Test `test_full_chat.py:489-515`.
+- B3a. **Daily cost cap.** `limits.daily_max_usd` (default unset or 0: no
+  cap) bounds the reported cost of the day's runs (`total_cost_usd`, kept
+  as a `kv` daily counter in millionths of a USD). A run's cost cap is
+  trimmed to what is left of it, and a run is refused (`cost_cap:day`) when
+  less than 0.05 USD is left; it applies with any credential. Unset, the
+  worst case is bounded only by B1 and B2: about 50 runs a day at their
+  per-run caps (6 triage x `run_max_usd`, 20 chat x 0.5, 6
+  investigations x 1.0, 6 summaries x 0.2, 3 follow-ups x 0.5, 2 update
+  reviews x 0.5 and 3 maintenance plans x 0.5), 30.2 USD a day with
+  the defaults (plus whatever a last turn adds past a per-run cap), and
+  more when `run_max_usd` is raised. Test
+  `test_the_daily_cost_cap_trims_each_run_and_refuses_when_spent`.
+- B4. Plan tiers: `claude.plan` `pro` 40, `max5` 140, `max20` 240 hours
+  a week (low-end estimates); `auto` is `pro` (the provider reports no
+  tier in its output). Tests `test_usage.py:56-61`.
+- B5. User-class runs (chat, investigate, summary) stop at half of each
+  window's budget (refusal `share_reserve:<window>`, and their reserved
+  time is trimmed to that line), so agent-class runs (triage, followup,
+  update review, maintenance plan) keep a reserve. Test
+  `test_full_chat.py:489-515`.
 
 ## Measurement
 
-- B6. A run's share is the difference between the last and first
-  utilisation readings of the provider's rate-limit events. Every reading
-  is a percent (the provider reports whole percents: 1 is 1 % of the
-  window); a value over 100 counts as 100, and a negative or non-finite
-  value is no reading. The account utilisation that B3's `account_busy` compares is the last
-  reading as a percent too. When both
-  readings exist and did not move, the share is estimated as the run's
-  duration over the window and flagged `share_estimated`. Tests
+- B6. A run is charged its run time: its `duration_s` when it finished,
+  its reservation while it runs. The account utilisation that B3's
+  `account_busy` compares is the last reading of the provider's rate-limit
+  events, read as a percent (a value over 100 counts as 100, and a
+  negative or non-finite value is no reading). The "claude run finished"
+  log line carries each window's reading exactly as reported, so the unit
+  can be checked against the account's own figures. Tests
   `test_utilisation_parsing`, `test_utilisation_is_always_read_as_percent`,
-  `test_usage_estimates.py:32-65`.
+  `test_a_run_is_charged_its_run_time_whatever_the_utilisation_says`.
 - B7. **Reservation.** One transaction inserts the `runs` row with reserved
-  turns, seconds and share before the provider starts; `finish_run`
-  replaces them with actuals; an aborted run with no tokens keeps a quarter
-  of the reservation; a run the daemon lost (crash) is closed as
-  `interrupted` at its full reservation. The ledger records no cost: the
-  per-run cost cap goes to the provider (B2) and no limit reads a cost.
+  turns and seconds before the provider starts; `finish_run` replaces them
+  with actuals; an aborted run with no tokens keeps a quarter of the
+  reservation; a run the daemon lost (crash) is closed as `interrupted` at
+  its full reservation. The `runs` columns `reserved_share`, `share_5h`,
+  `share_7d` and `share_estimated` are kept unused (no schema change). A
+  finished run's reported cost is added to the day's cost counter (B3a).
   Tests `test_usage.py:84-96,146-151`,
   `test_failed_run_charges_its_reservation_and_one_slot`.
 - B8. Exposure: `sensor.ops_agent_ai` (state `enabled`, `ai_disabled` or
-  `usage_limited`; attributes plan, caps, shares, run time, today's totals,
-  per-profile counts, last run), `sensor.ops_agent_runs_today`, `GET
-  api/usage` and the `usage` block of `GET api/state`. With an API key the
-  plan, `share_stop_percent` and the run-time caps are null. Test
-  `test_usage.py:324-334`.
+  `usage_limited`; attributes `run_time_5h_s`, `run_time_5h_cap_s`,
+  `run_time_7d_s`, `run_time_7d_cap_s` (the caps are the 80 % stop lines
+  of B3), `account_5h_percent`, `account_7d_percent` (null when not
+  measured in the last hour), `cost_today_usd`, `daily_max_usd`, today's
+  totals, per-profile counts, last run), `sensor.ops_agent_runs_today` and
+  the `usage` block of `GET api/state`. With an API key the run-time caps
+  are null. Tests `test_sensors_are_graphable`,
+  `test_an_api_key_shows_no_window_caps`.
 
 ## What is skipped when exhausted
 

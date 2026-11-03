@@ -26,16 +26,7 @@ from pathlib import Path
 from opsd import claude_runner, privsep
 from opsd.aicontrol import AiControl
 from opsd.baseline import Item
-from opsd.budget import (
-    RUNS_PER_DAY,
-    USER_SHARE_RESERVE,
-    Caps,
-    Period,
-    Reservation,
-    run_share,
-    share_inconclusive,
-    utilisation,
-)
+from opsd.budget import RUNS_PER_DAY, WINDOWS, Caps, Period, Reservation, utilisation
 from opsd.capabilities import CAPABILITIES, capability_table
 from opsd.changepaths import GLOBS, ProposalRules
 from opsd.channels import BudgetClass
@@ -60,7 +51,7 @@ GUARD_ANOMALY_KEY = "guard.anomaly"
 GUARD_ANOMALY_DAYS = 7
 # Statuses that mean a cap or control refused the run before it started.
 BLOCKED_STATUSES = frozenset({"run_cap_reached", "ai_disabled", "usage_limited", "share_cap", "account_busy",
-                              "share_reserve"})  # fmt: skip
+                              "share_reserve", "cost_cap"})  # fmt: skip
 # Never reached the AI: nothing to charge.
 NOT_STARTED = frozenset({"export_failed", "setup_failed"})
 
@@ -464,17 +455,17 @@ class AgentRunner:
         return self._user_reserve(profile, now)
 
     def _user_reserve(self, profile: Profile, now: datetime) -> RunResult | None:
-        """User-class runs leave the upper half of each window's share to monitoring runs."""
+        """User-class runs stop at half of each window's run-time budget, leaving the rest to monitoring runs."""
         if profile.budget_class is not BudgetClass.USER or self.store is None:
             return None
         try:
             usage = self.store.usage(self._period(now), at=now)
-            ceiling = USER_SHARE_RESERVE * self._caps().share_stop
+            caps = self._caps()
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.error("usage unavailable; user run refused", extra={"error": str(err)[:200]})
             return RunResult(status="store_unavailable", error="store_unavailable")
-        for window, used in (("five_hour", usage["window"]["share_5h"]), ("seven_day", usage["week"]["share_7d"])):
-            if float(used) >= ceiling:
+        for window, scope in zip(WINDOWS, ("window", "week"), strict=True):
+            if float(usage[scope]["seconds"]) >= caps.stop(window, user=True):
                 _LOGGER.info("user run held back for monitoring", extra={"profile": profile.name, "window": window})
                 return RunResult(status="share_reserve", error=f"share_reserve:{window}")
         return None
@@ -620,7 +611,7 @@ class AgentRunner:
             model=settings.model,
             max_turns=reservation.turns,
             budget_usd=max(0.01, reservation.budget_usd),
-            # The reserved run time is a hard limit, so a run cannot overrun its share.
+            # The reserved run time is a hard limit, so a run cannot overrun the run-time budget.
             timeout_s=min(20 * 60.0, reservation.seconds),
             system_prompt_file=prompt_file,
             result_schema_file=self.paths.prompts_dir / profile.schema_file,
@@ -674,25 +665,18 @@ class AgentRunner:
         if self.store is None:
             return
         aborted = result.status != "ok" and result.tokens_in + result.tokens_out == 0
-        shares: dict[str, float | None] = {}
-        estimated = False
-        for window in ("five_hour", "seven_day"):
-            if share_inconclusive(result.rate_first, result.rate_last, window):
-                # Below the reported resolution: use the run-time estimate, flagged as such.
-                shares[window] = self._caps().estimated_share(result.duration_s, window)
-                estimated = True
-            else:
-                shares[window] = run_share(result.rate_first, result.rate_last, window)
         try:
             self.store.finish_run(
                 context.run_id, status=result.status, at=datetime.now(UTC), turns=result.turns,
                 tokens_in=result.tokens_in, tokens_out=result.tokens_out, tokens_cache_read=result.tokens_cache_read,
                 duration_s=result.duration_s, model=model,
                 charge_reservation=aborted and result.status not in NOT_STARTED,
-                share_5h=shares["five_hour"], share_7d=shares["seven_day"], share_estimated=estimated,
                 acct_5h=utilisation(result.rate_last, "five_hour"),
                 acct_7d=utilisation(result.rate_last, "seven_day"),
             )  # fmt: skip
+            if result.cost_usd > 0:
+                # The day the run started: its reservation was checked against that day's cost cap.
+                self.store.add_cost(self._period(context.started_at).day, result.cost_usd)
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.error("run accounting failed; the reservation stands", extra={"error": str(err)[:200]})
 

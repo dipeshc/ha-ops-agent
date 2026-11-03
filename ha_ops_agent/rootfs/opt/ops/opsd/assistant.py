@@ -554,7 +554,7 @@ class Assistant:
                 return self.store.window_frees_at(at=now, span=timedelta(days=7))
             if reason in ("share_cap", "share_reserve"):
                 return self.store.window_frees_at(at=now)
-            if reason == "run_cap_reached":
+            if reason in ("run_cap_reached", "cost_cap"):
                 return self._midnight(now)
         except (StoreError, sqlite3.Error, ValueError) as err:
             _LOGGER.warning("no reset time for refusal", extra={"reason": reason, "error": str(err)[:200]})

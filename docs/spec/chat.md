@@ -31,8 +31,8 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
 - T4. `client_id` (`[A-Za-z0-9_-]{8,64}`) makes a send idempotent per
   thread; a push reply derives it from the action id.
 - T5. A blocked or failed run never goes silent: a `refused` or `failed`
-  system card with daemon-written text. Refusals for usage limits, share
-  caps, run caps, a busy account, a busy slot or the reserve auto-retry
+  system card with daemon-written text. Refusals for usage limits, run-time
+  caps, run caps, the daily cost cap, a busy account, a busy slot or the reserve auto-retry
   with a 15-minute backoff doubling up to 6 times, giving up when relief is
   more than 24 hours away; the admin may switch auto-retry off and on per
   card (re-enabling never extends the horizon). Manual retries are capped

@@ -31,6 +31,7 @@ executor checks before acting.
 import contextlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import stat
@@ -43,7 +44,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from opsd.budget import DEFAULT_RUN_SHARE, MIN_RUN_SECONDS, WINDOW, Caps, Period, Reservation
+from opsd.budget import MIN_RUN_SECONDS, MIN_RUN_USD, WINDOW, WINDOWS, Caps, Period, Reservation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -396,6 +397,9 @@ RELOAD_KEY = "reload.last"
 _RELOADS_FILE = "reloads.json"
 _MAX_IMPORT_BYTES = 65536
 COUNT_KEY = "count:"
+# Today's reported AI cost, in millionths of a USD (`limits.daily_max_usd`).
+COST_COUNTER = "ai_cost_musd"
+USD_UNITS = 1_000_000
 HELD_KEY = "push.held:"
 ACTION_KEY = "push.action:"
 MAIN_THREAD_KEY = "chat.main_thread"
@@ -1540,12 +1544,12 @@ class Store:
 
     # --------------------------------------------------------- run ledger
 
-    # A running run counts its reservation; a finished one its real figures.
+    # A running run counts its reservation; a finished one its real figures. The `reserved_share`, `share_5h`,
+    # `share_7d` and `share_estimated` columns of `runs` are no longer read or written (0.20.0 measures run time
+    # only); they stay so the schema does not change.
     _USAGE_SQL = (
         "SELECT COUNT(*), SUM(COALESCE(turns, reserved_turns)), SUM(COALESCE(tokens, reserved_tokens)),"
-        " SUM(tokens_cache_read), SUM(COALESCE(seconds, reserved_seconds)),"
-        " SUM(COALESCE(share_5h, reserved_share)), SUM(COALESCE(share_7d, reserved_share)),"
-        " SUM(CASE WHEN acct_5h IS NOT NULL THEN share_5h ELSE 0 END), SUM(share_estimated) FROM runs WHERE "
+        " SUM(tokens_cache_read), SUM(COALESCE(seconds, reserved_seconds)) FROM runs WHERE "
     )
 
     def _usage(self, conn: sqlite3.Connection, clause: str, args: tuple[Any, ...]) -> dict[str, float]:
@@ -1556,21 +1560,7 @@ class Store:
             "tokens": int(row[2] or 0),
             "cache_read": int(row[3] or 0),
             "seconds": round(float(row[4] or 0.0), 1),
-            "share_5h": float(row[5] or 0.0),
-            "share_7d": float(row[6] or 0.0),
-            # Only shares the provider actually reported (not reservations or estimates).
-            "measured_share_5h": float(row[7] or 0.0),
-            # Runs whose share is a run-time estimate (below the reported resolution).
-            "estimated_runs": int(row[8] or 0),
         }
-
-    def _typical_share(self, conn: sqlite3.Connection, profile: str, column: str, default: float) -> float:
-        """Mean measured share of the profile's last five runs (the next run's reservation)."""
-        rows = conn.execute(
-            f"SELECT {column} FROM runs WHERE profile = ? AND {column} IS NOT NULL ORDER BY started_at DESC LIMIT 5",  # noqa: S608
-            (profile,),
-        ).fetchall()
-        return sum(float(r[0]) for r in rows) / len(rows) if rows else default
 
     def _account(self, conn: sqlite3.Connection, at: datetime) -> dict[str, float | None]:
         """The account's latest measured utilisation, if from the last hour."""
@@ -1603,41 +1593,62 @@ class Store:
     ) -> Reservation | str:
         """Atomically reserve a run's usage: the reservation, or the cap that refused it.
 
-        Checked in one transaction, so concurrent runs cannot both squeeze into
-        the last slot: yielding when the account itself is busy, the agent's
-        share of the 5-hour and 7-day windows, run time per window (the
-        fallback), and the profile's daily run cap. `budget_usd` is the cost cap passed to the provider; the
-        ledger does not record cost.
+        Checked in one transaction, so concurrent runs cannot both squeeze into the last slot: yielding when
+        the account itself is busy, the run-time budget of the 5-hour and 7-day windows (stopping at 80 % of
+        it, half for user-class runs), the profile's daily run cap and the optional daily cost cap. The
+        reserved run time (the run's timeout) is trimmed to what is left of the budget, and `budget_usd` (the
+        cost cap passed to the provider) to what is left of the daily cost cap.
         """
         with self._tx() as conn:
-            scopes = self._scopes(conn, period, at)
+            scopes = {"five_hour": self._usage(conn, "started_at >= ?", (_iso(at - WINDOW),)),
+                      "seven_day": self._usage(conn, "started_at >= ?", (_iso(at - timedelta(days=7)),))}  # fmt: skip
             account = self._account(conn, at)
             for window, value in account.items():
                 if value is not None and value >= caps.account_busy:
                     return f"account_busy:{window}"
-            share = self._typical_share(conn, profile, "share_5h", DEFAULT_RUN_SHARE)
-            share_7d = self._typical_share(conn, profile, "share_7d", DEFAULT_RUN_SHARE / 5)
-            if scopes["window"]["share_5h"] + share > caps.share_stop:
-                return "share_cap:five_hour"
-            if scopes["week"]["share_7d"] + share_7d > caps.share_stop:
-                return "share_cap:seven_day"
-            seconds = min(
-                caps.seconds_for(profile),
-                caps.window_seconds - scopes["window"]["seconds"],
-                caps.week_seconds - scopes["week"]["seconds"],
-            )
+            user = budget_class == "user"
+            left = {w: caps.stop(w, user=user) - scopes[w]["seconds"] for w in WINDOWS}
+            seconds = min(caps.seconds_for(profile), *left.values())
             if seconds < MIN_RUN_SECONDS:
-                return "share_cap:run_time"
+                window = min(WINDOWS, key=lambda w: left[w])
+                return f"{'share_reserve' if user else 'share_cap'}:{window}"
             mine = self._usage(conn, "day = ? AND profile = ?", (period.day, profile))
             if mine["runs"] >= caps.runs_for(profile):
                 return f"run_cap_reached:{profile}"
+            if caps.daily_usd is not None:
+                spent = self._count(conn, period.day, COST_COUNTER) / USD_UNITS
+                budget_usd = min(budget_usd, caps.daily_usd - spent)
+                if budget_usd < MIN_RUN_USD:
+                    return "cost_cap:day"
             conn.execute(
                 "INSERT INTO runs (run_id, profile, class, day, week, month, started_at, reserved_turns,"
-                " reserved_tokens, reserved_seconds, reserved_share) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " reserved_tokens, reserved_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (run_id, profile, budget_class, period.day, period.week, period.month, _iso(at), max_turns, 0,
-                 seconds, max(share, share_7d)),
+                 seconds),
             )  # fmt: skip
             return Reservation(turns=max_turns, budget_usd=budget_usd, seconds=seconds)
+
+    def add_cost(self, day: str, cost_usd: float) -> float:
+        """Add a finished run's reported cost to today's total (`limits.daily_max_usd`); the new total in USD."""
+        units = max(0, round(cost_usd * USD_UNITS)) if math.isfinite(cost_usd) else 0
+        with self._tx() as conn:
+            total = self._count(conn, day, COST_COUNTER) + units
+            conn.execute("INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE"
+                         " SET value = excluded.value, updated_at = excluded.updated_at",
+                         (f"{COUNT_KEY}{day}:{COST_COUNTER}", str(total), f"{day}T00:00:00+00:00"))  # fmt: skip
+        return total / USD_UNITS
+
+    def cost_today(self, day: str) -> float:
+        """The reported cost of the day's finished runs, in USD."""
+        return self.count(day, COST_COUNTER) / USD_UNITS
+
+    @staticmethod
+    def _count(conn: sqlite3.Connection, day: str, name: str) -> int:
+        row = conn.execute("SELECT value FROM kv WHERE key = ?", (f"{COUNT_KEY}{day}:{name}",)).fetchone()
+        try:
+            return int(row[0] or 0) if row else 0
+        except ValueError:
+            return 0
 
     def finish_run(
         self,
@@ -1652,11 +1663,8 @@ class Store:
         duration_s: float,
         model: str,
         charge_reservation: bool = False,
-        share_5h: float | None = None,
-        share_7d: float | None = None,
         acct_5h: float | None = None,
         acct_7d: float | None = None,
-        share_estimated: bool = False,
     ) -> None:
         """Replace the reservation by the real figures (or keep a quarter of it, for aborted runs that report
         nothing)."""
@@ -1665,21 +1673,17 @@ class Store:
                 conn.execute(
                     "UPDATE runs SET status = ?, ended_at = ?, turns = MAX(reserved_turns / 4, ?),"
                     " tokens = MAX(reserved_tokens / 4, ?), duration_s = ?, model = ?,"
-                    " seconds = MAX(reserved_seconds / 4, ?), share_5h = COALESCE(?, reserved_share),"
-                    " share_7d = COALESCE(?, reserved_share), acct_5h = ?, acct_7d = ?, share_estimated = ?"
-                    " WHERE run_id = ?",
-                    (status, _iso(at), turns, tokens_in + tokens_out, duration_s, model[:60], duration_s, share_5h,
-                     share_7d, acct_5h, acct_7d, int(share_estimated), run_id),
+                    " seconds = MAX(reserved_seconds / 4, ?), acct_5h = ?, acct_7d = ? WHERE run_id = ?",
+                    (status, _iso(at), turns, tokens_in + tokens_out, duration_s, model[:60], duration_s, acct_5h,
+                     acct_7d, run_id),
                 )  # fmt: skip
                 return
             conn.execute(
                 "UPDATE runs SET status = ?, ended_at = ?, turns = ?, tokens = ?, tokens_in = ?, tokens_out = ?,"
-                " tokens_cache_read = ?, duration_s = ?, model = ?, seconds = ?,"
-                " share_5h = COALESCE(?, reserved_share), share_7d = COALESCE(?, reserved_share), acct_5h = ?,"
-                " acct_7d = ?, share_estimated = ? WHERE run_id = ?",
+                " tokens_cache_read = ?, duration_s = ?, model = ?, seconds = ?, acct_5h = ?, acct_7d = ?"
+                " WHERE run_id = ?",
                 (status, _iso(at), turns, tokens_in + tokens_out, tokens_in, tokens_out, tokens_cache_read,
-                 duration_s, model[:60], duration_s, share_5h, share_7d, acct_5h, acct_7d, int(share_estimated),
-                 run_id),
+                 duration_s, model[:60], duration_s, acct_5h, acct_7d, run_id),
             )  # fmt: skip
 
     def close_stale_runs(self, *, at: datetime) -> int:
@@ -1687,8 +1691,7 @@ class Store:
         with self._tx() as conn:
             return conn.execute(
                 "UPDATE runs SET status = 'interrupted', ended_at = ?, turns = reserved_turns,"
-                " tokens = reserved_tokens, seconds = reserved_seconds, share_5h = reserved_share,"
-                " share_7d = reserved_share WHERE status = 'running'",
+                " tokens = reserved_tokens, seconds = reserved_seconds WHERE status = 'running'",
                 (_iso(at),),
             ).rowcount
 
@@ -1705,12 +1708,6 @@ class Store:
             scopes["account"] = self._account(conn, at)
         scopes["last_run"] = dict(last) if last else None
         return scopes
-
-    def run_shares(self, *, since: datetime) -> list[tuple[datetime, float, float]]:
-        """`(started_at, share_5h, share_7d)` per run since `since` (measured, else the reservation)."""
-        rows = self._all("SELECT started_at, COALESCE(share_5h, reserved_share), COALESCE(share_7d, reserved_share)"
-                         " FROM runs WHERE started_at >= ? ORDER BY started_at", (_iso(since),))  # fmt: skip
-        return [(datetime.fromisoformat(r[0]), float(r[1] or 0.0), float(r[2] or 0.0)) for r in rows]
 
     def window_frees_at(self, *, at: datetime, span: timedelta = WINDOW) -> datetime | None:
         """When the oldest run in the rolling window ages out (a cap's earliest possible relief)."""

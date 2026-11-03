@@ -249,7 +249,7 @@ class LlmOptions:
 @dataclass(frozen=True, slots=True)
 class ClaudeOptions:
     token: str = field(default="", repr=False, metadata=_SECRET)
-    # Subscription tier for the run-time share estimate: auto (detect, else pro), pro, max5, max20.
+    # Subscription tier that sizes the run-time budget: auto (pro, the smallest), pro, max5, max20.
     plan: str = field(default="auto", metadata=_one_of("auto", "pro", "max5", "max20"))
     model_standard: str = field(default="claude-sonnet-5-5", metadata=_MODEL)
     # Empty: `model_standard`.
@@ -312,7 +312,7 @@ class CapabilityOptions:
 
 @dataclass(frozen=True, slots=True)
 class UsageOptions:
-    # The most the agent may use of any subscription window (5-hour, 7-day), in percent.
+    # The agent's run-time budget per 7 days, in percent of the plan's weekly hours (a fifth of it per 5 hours).
     max_share_percent: float = field(default=5.0, metadata=_range(0.5, 25))
 
 
@@ -322,6 +322,8 @@ class LimitsOptions:
 
     run_max_turns: int = field(default=30, metadata=_range(5, 100))
     run_max_usd: float = field(default=1.5, metadata=_range(0.1, 20))
+    # The most today's runs may cost (their reported `total_cost_usd`); 0 (the default) is no daily cap.
+    daily_max_usd: float = field(default=0.0, metadata=_range(0, 1000))
     log_level: str = field(default="info", metadata=_one_of("debug", "info", "warning", "error"))
     git_push: bool = True
 

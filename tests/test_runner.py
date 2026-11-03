@@ -130,7 +130,7 @@ async def test_an_api_key_run_gets_the_key_and_skips_the_user_reserve(
 
     def busy(period: Any, *, at: datetime) -> dict[str, Any]:
         figures = original(period, at=at)
-        figures["window"]["share_5h"] = 0.039  # far past the user-class reserve of a subscription
+        figures["window"]["seconds"] = 5000.0  # far past the user-class reserve of a subscription
         return figures
 
     monkeypatch.setattr(s.store, "usage", busy)

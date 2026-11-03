@@ -349,7 +349,7 @@ const S = {
 try { S.drafts = JSON.parse(sessionStorage.getItem("ops.drafts") || "{}") || {}; } catch (e) { S.drafts = {}; }
 let els = {};
 const wide = matchMedia("(min-width: 840px)");
-window.opsPanel = { h, btn, api, toast, render, S, els, go, row, section, icon, svg, share, fmtN, hhmm, dayKey, dayLabel, when, tz,
+window.opsPanel = { h, btn, api, toast, render, S, els, go, row, section, icon, svg, minutes, fmtN, hhmm, dayKey, dayLabel, when, tz,
   getJSON, loadHistory, loadSystem, loadState, ask, wide, rich, announce, saveDrafts, clock, loadThread, loadHome, markRead };
 function saveDrafts() { try { sessionStorage.setItem("ops.drafts", JSON.stringify(S.drafts)); } catch (e) { /* private mode */ } }
 
@@ -407,8 +407,8 @@ async function loadHistory(filter, more) {
   render();
 }
 async function loadSystem() {
-  const [o, u, k, g] = await Promise.all([api("GET", "api/ops"), api("GET", "api/updates"), api("GET", "api/suppressions"), api("GET", "api/usage")]);
-  S.sys = { ops: o.status === 200 ? o.data : null, updates: u.status === 200 ? u.data : null, rules: k.status === 200 ? k.data : null, usage: g.status === 200 ? g.data : null };
+  const [o, u, k] = await Promise.all([api("GET", "api/ops"), api("GET", "api/updates"), api("GET", "api/suppressions")]);
+  S.sys = { ops: o.status === 200 ? o.data : null, updates: u.status === 200 ? u.data : null, rules: k.status === 200 ? k.data : null };
   render();
 }
 async function act(t, a) {
@@ -652,11 +652,10 @@ setInterval(() => {
   if (S.state && slots.hdr && freshState() !== els.freshSt) render();
 }, 1000);
 
-/* A share in percent: never a misleading 0.0 for a small non-zero value; "est." when it includes estimates. */
-function share(v, est, digits = 1) {
-  const n = Number(v) || 0, floor = 10 ** -digits;
-  const text = n === 0 ? "0%" : n < floor ? `<${floor}%` : `${n.toFixed(digits)}%`;
-  return est ? `${text} est.` : text;
+/* Run seconds as whole minutes: never a misleading 0 for a run of a few seconds. */
+function minutes(s) {
+  const n = Number(s) || 0;
+  return n === 0 ? "0" : n < 60 ? "<1" : String(Math.round(n / 60));
 }
 function fmtN(n) { return n == null ? "–" : n >= 1e6 ? `${(n / 1e6).toFixed(1)} M` : n >= 1e3 ? `${Math.round(n / 1e3)} k` : String(n); }
 

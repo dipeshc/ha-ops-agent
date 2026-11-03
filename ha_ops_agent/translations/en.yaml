@@ -22,7 +22,7 @@ configuration:
         description: "A setup token from claude setup-token (subscription), or an API key. Empty: AI is off."
       plan:
         name: Plan
-        description: "Subscription tier, for estimating a run's share when Claude Code reports too coarsely. auto detects it, else pro."
+        description: "Subscription tier that sizes the agent's run-time budget (its weekly hours). auto means pro, the smallest."
       model_standard:
         name: Standard model
         description: Health-check triage, chat, follow-ups, investigations and update reviews.
@@ -102,11 +102,11 @@ configuration:
         description: "Comma-separated integration domains (for example cast,hue). Empty: the house profile's reload.domains. Locks, the alarm, garage doors, Bluetooth and core plumbing are always refused."
   usage:
     name: Usage
-    description: How much of your subscription the agent may use.
+    description: How much AI run time the agent may use on a subscription.
     fields:
       max_share_percent:
         name: Maximum share (%)
-        description: Most the agent may use of any subscription window (0.5 to 25).
+        description: "The agent's run time per 7 days, as a percent of the plan's weekly hours (0.5 to 25); a fifth of it per 5 hours. Runs stop at 80 % of it, chat at half."
   limits:
     name: Advanced limits
     description: Optional. Empty fields use the built-in defaults.
@@ -117,6 +117,9 @@ configuration:
       run_max_usd:
         name: USD per run
         description: The AI's per-run budget (an estimate on a subscription). Default 1.5.
+      daily_max_usd:
+        name: USD per day
+        description: "Most the AI's runs may cost in a day, as the AI provider reports it (for API keys). Empty or 0: no daily cap."
       log_level:
         name: Log level
         description: "debug, info, warning or error. Default info."

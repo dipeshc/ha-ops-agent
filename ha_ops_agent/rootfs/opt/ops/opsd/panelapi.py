@@ -13,7 +13,7 @@ import logging
 import re
 import sqlite3
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from opsd import __version__, diagnostics, proposals
@@ -41,10 +41,6 @@ HISTORY_FILTERS: dict[str, tuple[str, ...] | None] = {
     "checks": ("check", "backup"),
 }
 USER_ACK_DAYS = {"snooze": 7, "accept": 30}
-USAGE_DAYS = timedelta(days=7)
-MAX_CHART_RUNS = 2000
-FIVE_HOURS = timedelta(hours=5)
-WEEK = timedelta(days=7)
 _CLIENT_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
 _DIGITS_RE = re.compile(r"[0-9]{1,12}")
 _CONTROL_KEEP_NL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -133,8 +129,6 @@ class PanelHandlers:
                 return 200, self.state()
             case ("GET", ("ops",)):
                 return 200, self.ops()
-            case ("GET", ("usage",)):
-                return 200, self.usage_history()
             case ("POST", ("ai",)):
                 return await self.ai(body, user)
             case ("POST", ("run",)):
@@ -210,11 +204,9 @@ class PanelHandlers:
             "status": status,
             "ai": {"on": control.get("ai_switch") == "on", "state": ai_state,
                    "backoff_until": control.get("ai_backoff_until"), "credential": d.credential_kind()},
-            "usage": {k: view.get(k) for k in ("agent_share_5h_percent", "agent_share_7d_percent",
-                                               "agent_share_5h_estimated", "agent_share_7d_estimated",
-                                               "max_share_percent", "share_stop_percent", "account_5h_percent",
-                                               "account_7d_percent",
-                                               "today", "last_run", "run_time_5h_s", "run_time_5h_cap_s")},
+            "usage": {k: view.get(k) for k in ("run_time_5h_s", "run_time_5h_cap_s", "run_time_7d_s",
+                                               "run_time_7d_cap_s", "account_5h_percent", "account_7d_percent",
+                                               "cost_today_usd", "daily_max_usd", "today", "last_run")},
             "run": {"profile": current.profile, "thread": current.thread_id} if current is not None else None,
             "queue": queued,
             "chat": {"used": used, "cap": CHAT_TURNS_PER_DAY,
@@ -256,29 +248,6 @@ class PanelHandlers:
             "history": list(reversed(d.history()[-30:])),
             "status": d.status_view(),
             "profile": d.profile_view(),
-        }
-
-    def usage_history(self) -> dict[str, Any]:
-        """Agent share of the rolling 5-hour and 7-day windows, hourly over the last 7 days (for the chart).
-
-        169 points over at most `MAX_CHART_RUNS` runs (two weeks of a few dozen runs a day in practice):
-        a plain loop is cheaper than anything clever at this size, and the ceiling bounds it.
-        """
-        d = self._d
-        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        view = d.usage.view(datetime.now(UTC)) if d.usage is not None else {}
-        runs = d.store.run_shares(since=now - USAGE_DAYS - WEEK)[-MAX_CHART_RUNS:] if d.store is not None else []
-        points = []
-        for step in range(USAGE_DAYS // timedelta(hours=1) + 1):
-            at = now - USAGE_DAYS + timedelta(hours=step)
-            s5 = sum(r[1] for r in runs if at - FIVE_HOURS < r[0] <= at)
-            s7 = sum(r[2] for r in runs if at - WEEK < r[0] <= at)
-            points.append({"t": at.isoformat(timespec="seconds"), "s5": round(100 * s5, 3), "s7": round(100 * s7, 3)})
-        return {
-            "points": points,
-            "max_share_percent": view.get("max_share_percent"),
-            "share_stop_percent": view.get("share_stop_percent"),
-            "today": view.get("today"),
         }
 
     async def _run(self, kind: str, args: dict[str, Any], user: str) -> Result:
@@ -443,9 +412,10 @@ class PanelHandlers:
             else f"report only: {control.get('reason') or 'unavailable'}"
         )
         view = d.usage.view(datetime.now(UTC)) if d.usage is not None else {}
-        share = view.get("agent_share_7d_percent")
+        used, cap = view.get("run_time_7d_s"), view.get("run_time_7d_cap_s")
         ai_on = d.control.snapshot(datetime.now(UTC)).get("ai_switch") == "on"
-        ai = ("on" if ai_on else "off") + (f", {share} % of 7-day budget" if share is not None else "")
+        budget = f", {round(100 * used / cap)} % of 7-day run time" if isinstance(used, (int, float)) and cap else ""
+        ai = ("on" if ai_on else "off") + budget
         health = f"{checked}, " + (f"{health_open} open" if health_open else "nothing new")
         strip = [{"label": "Health", "value": health},
                  {"label": "Backup", "value": backup}, {"label": "Next window", "value": window},

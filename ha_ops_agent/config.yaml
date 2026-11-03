@@ -53,7 +53,7 @@ options:
   claude:
     # A setup token from claude setup-token (subscription), or an API key (sk-ant-api...).
     token: ""
-    # Subscription tier for the run-time share estimate (auto: detect, else pro).
+    # Subscription tier that sizes the agent's run-time budget (auto: pro, the smallest).
     plan: auto
     model_standard: claude-sonnet-5-5
   chat:
@@ -83,7 +83,7 @@ options:
   capabilities:
     require_approval: []
     never: []
-  # Most the agent may use of any subscription window, percent.
+  # The agent's run-time budget: this percent of the plan's weekly hours (a fifth of it per 5 hours).
   usage:
     max_share_percent: 5.0
   limits: {}
@@ -130,5 +130,6 @@ schema:
   limits:
     run_max_turns: int(5,100)?
     run_max_usd: float(0.1,20)?
+    daily_max_usd: float(0,1000)?
     log_level: list(debug|info|warning|error)?
     git_push: bool?

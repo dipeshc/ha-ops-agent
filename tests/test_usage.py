@@ -1,4 +1,4 @@
-"""The one budget (share rule, run time, profile run caps), kill switch, usage-limit backoff and sensors."""
+"""The one budget (run-time budget, profile run caps, cost cap), kill switch, usage-limit backoff and sensors."""
 
 import asyncio
 import dataclasses
@@ -13,8 +13,8 @@ from typing import Any, ClassVar
 import pytest
 
 from opsd.aicontrol import SWITCH_ENTITY, AiControl, Switch
-from opsd.budget import Caps, Period, resolve_plan, run_share, share_fraction, utilisation
-from opsd.claude_runner import RunResult, interpret_result, plan_hint, run_claude, usage_limit
+from opsd.budget import Caps, Period, resolve_plan, share_fraction, utilisation
+from opsd.claude_runner import RunResult, interpret_result, raw_utilisation, run_claude, usage_limit
 from opsd.config import Options, UsageOptions
 from opsd.redact import Redactor
 from opsd.runctx import AGENT_SELF, RunContext
@@ -35,9 +35,10 @@ def db(tmp_path: Path) -> Iterator[Store]:
     store.close()
 
 
-def reserve(db: Store, caps: Caps, *, profile: str = "chat", at: datetime = NOW, run_id: str | None = None) -> Any:
+def reserve(db: Store, caps: Caps, *, profile: str = "chat", at: datetime = NOW, run_id: str | None = None,
+            budget_class: str = "user") -> Any:  # fmt: skip
     return db.reserve_run(run_id=run_id or f"r{at.timestamp()}{profile}{id(caps)}{threading.get_ident()}",
-                          profile=profile, budget_class="user", period=Period.at(at, UTC), at=at, max_turns=15,
+                          profile=profile, budget_class=budget_class, period=Period.at(at, UTC), at=at, max_turns=15,
                           budget_usd=0.5, caps=caps)  # fmt: skip
 
 
@@ -46,7 +47,10 @@ def reserve(db: Store, caps: Caps, *, profile: str = "chat", at: datetime = NOW,
 
 def test_share_option_scales_run_time_and_is_clamped() -> None:
     base = Caps.from_options(Options())
-    assert base.share_limit == 0.05 and base.share_stop == pytest.approx(0.04)
+    # B = 40 h x 3600 x 5 %; runs stop at 80 % of it, user-class runs at half; the 5-hour budget is B / 5.
+    assert base.share_limit == 0.05 and base.week_seconds == 7200
+    assert base.stop("seven_day") == 5760 and base.stop("seven_day", user=True) == 3600
+    assert base.stop("five_hour") == pytest.approx(1152) and base.stop("five_hour", user=True) == pytest.approx(720)
     double = Caps.from_options(make_options(usage__max_share_percent=10))
     assert double.week_seconds == 2 * base.week_seconds
     assert share_fraction(0.1) == 0.005 and share_fraction(80) == 0.25
@@ -55,8 +59,8 @@ def test_share_option_scales_run_time_and_is_clamped() -> None:
 
 
 def test_plan_resolution() -> None:
-    assert resolve_plan("auto", None) == "pro" and resolve_plan("auto", "max20") == "max20"
-    assert resolve_plan("max5", "max20") == "max5" and resolve_plan("auto", "weird") == "pro"
+    # The provider reports no tier in its stream, so `auto` is pro, the smallest.
+    assert resolve_plan("auto") == "pro" and resolve_plan("max5") == "max5" and resolve_plan("weird") == "pro"
     pro, max20 = Caps.from_options(Options()), Caps.from_options(make_options(claude__plan="max20"))
     assert pro.week_seconds == 40 * 3600 * 0.05 and pro.window_seconds == pro.week_seconds * 0.2
     assert max20.week_seconds == 6 * pro.week_seconds
@@ -72,13 +76,12 @@ def test_utilisation_parsing() -> None:
                 {"rateLimitType": "five_hour", "utilization": float("nan")},
                 {"rateLimitType": "five_hour", "utilization": float("inf")}):  # fmt: skip
         assert utilisation(bad, "five_hour") is None
-    assert run_share(
-        {"rateLimitType": "five_hour", "utilization": 40},
-        {"rateLimitType": "five_hour", "utilization": 43},
-        "five_hour",
-    ) == pytest.approx(0.03)
-    assert run_share(None, info, "five_hour") is None
-    assert run_share(info, {"rateLimitType": "five_hour", "utilization": 10}, "five_hour") == 0.0
+    # The run's log line carries the readings exactly as reported, so their unit can be checked later.
+    assert raw_utilisation(info) == {"five_hour": 42, "seven_day": 12.5}
+    assert raw_utilisation({"rateLimitType": "seven_day", "utilization": 0.09}) == {"seven_day": 0.09}
+    assert (
+        raw_utilisation(None) == {} and raw_utilisation({"unifiedWindows": {"five_hour": {"utilization": "x"}}}) == {}
+    )
 
 
 # ------------------------------------------------------------ reservation
@@ -91,8 +94,7 @@ def test_reservation_replaced_by_actuals(db: Store) -> None:
     usage = db.usage(P, at=NOW)
     assert usage["window"]["seconds"] == 180.0 and usage["window"]["turns"] == 15
     db.finish_run("a", status="ok", at=NOW, turns=3, tokens_in=1000, tokens_out=200, tokens_cache_read=5000,
-                  duration_s=20, model="m", share_5h=0.002, share_7d=0.0004, acct_5h=0.3,
-                  acct_7d=0.1)  # fmt: skip
+                  duration_s=20, model="m", acct_5h=0.3, acct_7d=0.1)  # fmt: skip
     usage = db.usage(P, at=NOW)
     assert (usage["window"]["tokens"], usage["window"]["turns"], usage["window"]["seconds"]) == (1200, 3, 20)
     assert usage["day"]["cache_read"] == 5000 and usage["account"] == {"five_hour": 0.3, "seven_day": 0.1}
@@ -121,13 +123,23 @@ def test_concurrent_reservations_cannot_both_take_the_last_slot(tmp_path: Path) 
     assert {r for r in results if isinstance(r, str)} == {"run_cap_reached:chat"}
 
 
+def seed(db: Store, caps: Caps, setup: str, *, windowed: Caps | None = None) -> None:
+    """A finished run whose history makes the window cap `setup` refuse a subscription run."""
+    budget = windowed or caps
+    at = NOW - timedelta(days=2) if setup == "seconds_7d" else NOW - timedelta(minutes=30)
+    assert not isinstance(reserve(db, caps, run_id="seed", at=at, budget_class="agent"), str)
+    seconds = {"seconds_5h": budget.stop("five_hour"), "seconds_7d": budget.stop("seven_day")}.get(setup, 1)
+    db.finish_run("seed", status="ok", at=at + timedelta(minutes=20), turns=1, tokens_in=1, tokens_out=1,
+                  tokens_cache_read=0, model="m", duration_s=seconds,
+                  acct_5h=0.95 if setup == "account" else 0.2, acct_7d=0.1)  # fmt: skip
+
+
 @pytest.mark.parametrize(
     ("setup", "reason"),
     [
-        ("share_5h", "share_cap:five_hour"),
-        ("share_7d", "share_cap:seven_day"),
+        ("seconds_5h", "share_cap:five_hour"),
+        ("seconds_7d", "share_cap:seven_day"),
         ("account", "account_busy:five_hour"),
-        ("seconds", "share_cap:run_time"),
         ("profile_runs", "run_cap_reached:chat"),
     ],
 )
@@ -135,18 +147,45 @@ def test_each_cap_refuses(db: Store, setup: str, reason: str) -> None:
     caps = Caps.from_options(Options())
     if setup == "profile_runs":
         caps = dataclasses.replace(caps, profile_runs={"chat": 0})
-    if setup in ("share_5h", "share_7d", "account", "seconds"):
-        assert not isinstance(reserve(db, caps, run_id="seed", at=NOW - timedelta(minutes=30)), str)
-        db.finish_run("seed", status="ok", at=NOW - timedelta(minutes=10), turns=1, tokens_in=1, tokens_out=1,
-                      tokens_cache_read=0, model="m",
-                      duration_s=caps.window_seconds if setup == "seconds" else 1,
-                      share_5h=0.039 if setup == "share_5h" else 0.0,
-                      share_7d=0.039 if setup == "share_7d" else 0.0,
-                      acct_5h=0.95 if setup == "account" else 0.2, acct_7d=0.1)  # fmt: skip
-    assert reserve(db, caps) == reason
+    else:
+        seed(db, caps, setup)
+    assert reserve(db, caps, budget_class="agent") == reason
 
 
-@pytest.mark.parametrize("setup", ["share_5h", "share_7d", "account", "seconds", "profile_runs"])
+def test_a_reservation_is_trimmed_to_the_budget_left_and_user_runs_stop_at_half(db: Store) -> None:
+    caps = Caps.from_options(Options())
+    assert not isinstance(reserve(db, caps, run_id="seed", at=NOW - timedelta(minutes=30), budget_class="agent"), str)
+    used = caps.stop("five_hour", user=True) - 100
+    db.finish_run("seed", status="ok", at=NOW - timedelta(minutes=10), turns=1, tokens_in=1, tokens_out=1,
+                  tokens_cache_read=0, model="m", duration_s=used)  # fmt: skip
+    # A user-class run gets what is left of half the budget; a monitoring run what is left of 80 % of it.
+    chat = reserve(db, caps, run_id="chat")
+    assert not isinstance(chat, str) and chat.seconds == pytest.approx(100)
+    db.finish_run("chat", status="ok", at=NOW, turns=1, tokens_in=1, tokens_out=1, tokens_cache_read=0, model="m",
+                  duration_s=100)  # fmt: skip
+    assert reserve(db, caps, run_id="chat2") == "share_reserve:five_hour"
+    triage = reserve(db, caps, profile="triage", run_id="triage", budget_class="agent")
+    assert not isinstance(triage, str)
+    assert triage.seconds == pytest.approx(caps.stop("five_hour") - caps.stop("five_hour", user=True))
+
+
+def test_the_daily_cost_cap_trims_each_run_and_refuses_when_spent(db: Store) -> None:
+    caps = dataclasses.replace(Caps.from_options(make_options(limits__daily_max_usd=1.0)), windows=False)
+    assert caps.daily_usd == 1.0 and Caps.from_options(Options()).daily_usd is None
+    first = reserve(db, caps, run_id="a")
+    assert not isinstance(first, str) and first.budget_usd == 0.5
+    assert db.add_cost(P.day, 0.7) == pytest.approx(0.7) and db.cost_today(P.day) == pytest.approx(0.7)
+    second = reserve(db, caps, run_id="b")
+    assert not isinstance(second, str) and second.budget_usd == pytest.approx(0.3)
+    db.add_cost(P.day, 0.28)
+    assert reserve(db, caps, run_id="c") == "cost_cap:day"
+    # A new day starts from nothing; a non-finite or negative cost never counts.
+    assert db.add_cost("2026-01-27", float("nan")) == 0.0 and db.add_cost("2026-01-27", -1) == 0.0
+    later = NOW + timedelta(days=1)
+    assert not isinstance(reserve(db, caps, run_id="d", at=later), str)
+
+
+@pytest.mark.parametrize("setup", ["seconds_5h", "seconds_7d", "account", "profile_runs"])
 def test_an_api_key_skips_the_share_rule_but_not_the_run_caps(db: Store, setup: str) -> None:
     windowed = Caps.from_options(Options())
     caps = Caps.from_options(Options(), windows=False)
@@ -154,29 +193,23 @@ def test_an_api_key_skips_the_share_rule_but_not_the_run_caps(db: Store, setup: 
         caps = dataclasses.replace(caps, profile_runs={"chat": 0})
     else:
         # The same history that makes each window cap refuse a subscription run (test_each_cap_refuses).
-        assert not isinstance(reserve(db, caps, run_id="seed", at=NOW - timedelta(minutes=30)), str)
-        db.finish_run("seed", status="ok", at=NOW - timedelta(minutes=10), turns=1, tokens_in=1, tokens_out=1,
-                      tokens_cache_read=0, model="m",
-                      duration_s=windowed.window_seconds if setup == "seconds" else 1,
-                      share_5h=0.039 if setup == "share_5h" else 0.0,
-                      share_7d=0.039 if setup == "share_7d" else 0.0,
-                      acct_5h=0.95 if setup == "account" else 0.2, acct_7d=0.1)  # fmt: skip
-        assert isinstance(reserve(db, windowed), str)
+        seed(db, caps, setup, windowed=windowed)
+        assert isinstance(reserve(db, windowed, budget_class="agent"), str)
     res = reserve(db, caps)
     if setup == "profile_runs":
         assert res == "run_cap_reached:chat"
         return
     assert not isinstance(res, str) and res.seconds == caps.seconds_for("chat") and res.budget_usd == 0.5
-    assert caps.estimated_share(600, "five_hour") == 0.0
 
 
-def test_an_api_key_shows_no_plan_or_window_caps(db: Store) -> None:
+def test_an_api_key_shows_no_window_caps(db: Store) -> None:
     w = World(db, make_options(claude__plan="max20"))
-    assert w.guard.view(NOW)["plan"] == "max20"
+    view = w.guard.view(NOW)
+    assert view["run_time_7d_cap_s"] == round(240 * 3600 * 0.05 * 0.8)
+    assert "plan" not in view and not any("share" in key for key in view)
     w.guard._api_key = lambda: True
     assert w.guard.caps().windows is False
     view = w.guard.view(NOW)
-    assert view["plan"] is None and view["share_stop_percent"] is None
     assert view["run_time_5h_cap_s"] is None and view["run_time_7d_cap_s"] is None
     json.dumps(view, allow_nan=False)  # no unbounded value leaks into the sensor or the panel
 
@@ -233,14 +266,12 @@ def test_tokens_duration_and_usage_limit_from_result() -> None:
     assert usage_limit("API Error: 429 rate_limit_error") == (True, None)
     assert usage_limit("all good") == (False, None)
     assert interpret_result({"subtype": "error_during_execution", "result": "boom"}).status == "error"
-    assert plan_hint({"type": "system", "rateLimitTier": "default_claude_max_20x"}) == "max20"
-    assert plan_hint({"subscriptionType": "pro"}) == "pro" and plan_hint({"subscription_type": None}) is None
 
 
 RATE_CLAUDE = """#!{python}
 import json
 def out(x): print(json.dumps(x), flush=True)
-out({{"type": "system", "subtype": "init", "rateLimitTier": "default_claude_max_5x"}})
+out({{"type": "system", "subtype": "init"}})
 out({{"type": "rate_limit_event", "rate_limit_info": {{"status": "allowed", "unifiedWindows": {{
     "five_hour": {{"utilization": 20, "resetsAt": 1}}, "seven_day": {{"utilization": 10, "resetsAt": 2}}}}}}}})
 out({{"type": "rate_limit_event", "rate_limit_info": {{"status": "{status}", "resetsAt": 1793000000,
@@ -261,8 +292,7 @@ async def test_stream_rate_limit_events(tmp_path: Path, meminfo: Path, status: s
     proc_dir.mkdir()
     result = await run_claude(config(tmp_path, str(script)), "p", token="t", transcript_path=tmp_path / "t.gz",
                               redactor=Redactor(), proc_dir=proc_dir, meminfo=meminfo)  # fmt: skip
-    assert result.status == expected and result.plan_hint == "max5"
-    assert run_share(result.rate_first, result.rate_last, "five_hour") == pytest.approx(0.03)
+    assert result.status == expected and utilisation(result.rate_last, "five_hour") == pytest.approx(0.23)
     if expected == "usage_limited":
         assert result.limit_reset == 1793000000
 
@@ -379,8 +409,8 @@ async def test_sensors_are_graphable(db: Store) -> None:
     runs, attrs = states["sensor.ops_agent_runs_today"]
     assert runs == "1" and attrs["state_class"] == "total" and "last_reset" in attrs
     ai_state, ai = states["sensor.ops_agent_ai"]
-    assert ai_state == "enabled" and ai["plan"] == "pro" and ai["max_share_percent"] == 5.0
-    assert ai["agent_share_5h_percent"] is not None and "usd_estimate" not in ai
+    assert ai_state == "enabled" and ai["run_time_5h_s"] == 180.0 and ai["run_time_7d_cap_s"] == 5760
+    assert ai["account_5h_percent"] is None and "plan" not in ai and not any("share" in key for key in ai)
 
 
 class Live:
@@ -510,11 +540,6 @@ def test_utilisation_is_always_read_as_percent() -> None:
     assert utilisation(info(0), "five_hour") == 0.0 and utilisation(info(100), "five_hour") == 1.0
     # Over 100 is a saturated window, capped (never dropped as "no reading").
     assert utilisation(info(100.5), "five_hour") == 1.0 and utilisation(info(250), "five_hour") == 1.0
-    assert run_share(info(99), info(130), "five_hour") == pytest.approx(0.01)
-    # A 0 -> 1 tick during a run is 1 % of the window, not all of it.
-    assert run_share(info(0), info(1), "five_hour") == pytest.approx(0.01)
-    assert run_share(info(0.9), info(1.4), "five_hour") == pytest.approx(0.005)
-    assert run_share(info(40), info(43), "five_hour") == pytest.approx(0.03)
     assert utilisation(info(0.7), "five_hour") == pytest.approx(0.007) and utilisation(info(70), "five_hour") == 0.7
 
 

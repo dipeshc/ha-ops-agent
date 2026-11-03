@@ -491,13 +491,13 @@ async def test_chat_leaves_half_the_share_to_monitoring(
 ) -> None:
     d = daemon(h)
     assert d.store is not None
-    column = "share_5h" if window == "window" else "share_7d"
     caps = d.runner._caps()
     original = d.store.usage
 
     def used(period: Any, *, at: datetime) -> dict[str, Any]:
         figures = original(period, at=at)
-        figures[window][column] = 0.5 * caps.share_stop  # exactly half of the stop line
+        # Exactly half of the window's run-time budget.
+        figures[window]["seconds"] = caps.stop("five_hour" if window == "window" else "seven_day", user=True)
         return figures
 
     monkeypatch.setattr(d.store, "usage", used)

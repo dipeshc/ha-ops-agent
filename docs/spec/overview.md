@@ -67,8 +67,8 @@ These hold at every stage; each has tests named in the owning document.
   push device, a failed self-test or an unreadable health all stop acting,
   installing and running the AI; the deterministic checks and safety pushes
   continue ([configuration.md](configuration.md)).
-- INV9. **Bounded.** Daily run caps, turn, cost and time limits, a usage
-  share, a memory guard and a kill switch for the AI; daily budgets for
+- INV9. **Bounded.** Daily run caps, turn, cost and time limits, a rolling
+  run-time budget, an optional daily cost cap, a memory guard and a kill switch for the AI; daily budgets for
   pushes; quotas and rate limits for every capability ([budget.md](budget.md),
   [items-and-pushes.md](items-and-pushes.md)).
 - INV10. **Local first.** The house keeps working when the AI provider or

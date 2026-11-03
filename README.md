@@ -110,16 +110,21 @@ Anthropic's signed package repository.
   - or an Anthropic API key (`sk-ant-api...`) from the Claude Console,
     billed per use. With a key there are no subscription windows, so
     `usage.max_share_percent` and `claude.plan` do not apply; the daily run
-    caps and `limits.run_max_usd` do.
+    caps, `limits.run_max_usd` and the optional `limits.daily_max_usd` do.
+    Set `limits.daily_max_usd` with a key: without it a day's spend is
+    bounded only by the run caps (about 30 USD a day at the defaults).
 
   The agent tells them apart by the key's prefix. The credential stays on
   your Home Assistant machine and is only passed to Claude Code.
 - **Models.** `claude.model_standard` (default `claude-sonnet-5-5`) is used
   for triage and chat; the optional `claude.model_fast` for chat
   summaries.
-- **Spend.** `usage.max_share_percent` (default 5) caps how much of each
-  subscription usage window the agent may use (setup token only), and
-  `limits.run_max_usd` caps each run's estimated cost.
+- **Spend.** On a subscription the agent has a run-time budget: its runs
+  may take `usage.max_share_percent` (default 5) of the plan's weekly hours
+  (`claude.plan`) per 7 days and a fifth of that per 5 hours; they stop at
+  80 % of it, chat at half. It also yields when your account is above 90 %
+  of a window. `limits.run_max_usd` caps each run's cost and the optional
+  `limits.daily_max_usd` a day's.
 
 `llm.provider: none` turns the AI off. The health check, pushes, approvals
 and the update rules keep working, but automatic updates wait for your
@@ -147,7 +152,7 @@ to your home. The main options:
 | `updates.need_approval` / `never` | `[]` | Update entities that always ask, or are never offered. |
 | `capabilities.reloadable_domains` | | Integrations it may reload, comma-separated. Empty: the profile's `reload.domains`, else none. |
 | `capabilities.require_approval` / `never` | `[]` | Tighten any capability by name. Options never loosen a built-in limit. |
-| `usage.max_share_percent` | `5.0` | Share of a subscription window the agent may use. |
+| `usage.max_share_percent` | `5.0` | The agent's run time per 7 days, as a percent of the plan's weekly hours. |
 
 The provider's own options are described under [AI access](#ai-access).
 Unused optional keys (`limits.*` and the provider's optional ones) are

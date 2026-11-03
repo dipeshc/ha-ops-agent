@@ -44,7 +44,7 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 | `agent.mode` | `observe` | `observe` / `act` | `observe` reports only; `act` lets the daemon install updates (with `updates.auto_install`), make backups and reload allowed integrations. |
 | `llm.provider` | `claude` | `claude` / `none` | `none`: no AI runs; deterministic checks, pushes and the update rule continue, but with `updates.hold_if_unreviewed` on (the default) every AUTO candidate is held for approval because nothing reviewed it. |
 | `claude.token` | empty | secret, not pattern-checked | Provider credential: a setup token or an API key; see [ai-runner.md](ai-runner.md) AP1. Falls back to `/data/secrets/claude_oauth_token`. No token: AI runs are refused (`no_token`) and the deterministic fallback is used. |
-| `claude.plan` | `auto` | `auto` / `pro` / `max5` / `max20` | Subscription tier for the usage-share estimate. Ignored with an API key. |
+| `claude.plan` | `auto` | `auto` / `pro` / `max5` / `max20` | Subscription tier whose weekly hours size the run-time budget ([budget.md](budget.md) B3, B4); `auto` is `pro`. Ignored with an API key. |
 | `claude.model_standard` | `claude-sonnet-5-5` | `[a-z0-9][a-z0-9.-]{1,63}` | Model for every run profile except summaries. |
 | `claude.model_fast` | empty | same pattern or empty | Model for the summary profile; empty means `model_standard`. |
 | `chat.activity_days` | 7 | 1..30 | Chat activity retention. |
@@ -61,9 +61,10 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 | `updates.need_approval`, `updates.never` | `[]` | `update.[a-z0-9_]{1,128}` | Always ask / never install (still reported). |
 | `capabilities.require_approval`, `capabilities.never` | `[]` | `[a-z][a-z0-9_]{0,40}.[a-z0-9_.]{1,60}` | Tighten a capability's tier by name; never loosens. `never: [dashboard.save]` refuses even an approved dashboard plan. |
 | `capabilities.reloadable_domains` | empty | up to 40 comma-separated `[a-z0-9_]{1,64}` | Reload allowlist; empty means the profile's `reload.domains`. |
-| `usage.max_share_percent` | 5.0 | 0.5..25 | Share of a subscription usage window the agent may use (clamped again in the budget). |
+| `usage.max_share_percent` | 5.0 | 0.5..25 | The run-time budget: this percent of the plan's weekly hours per 7 days, a fifth of it per 5 hours (clamped again in the budget, [budget.md](budget.md) B3). |
 | `limits.run_max_turns` | 30 | 5..100 | Turn cap of the triage profile. |
 | `limits.run_max_usd` | 1.5 | 0.1..20 | Cost cap of the triage profile; other profiles use the smaller of their fixed cap and this. |
+| `limits.daily_max_usd` | unset (0) | 0..1000 | The most the day's runs may cost, as the provider reports it; 0 or unset is no daily cap ([budget.md](budget.md) B3a, which gives the worst case without it). |
 | `limits.log_level` | `info` | `debug` / `info` / `warning` / `error` | Daemon log level. |
 | `limits.git_push` | `true` | bool | `false`: applied proposals are committed but not pushed. |
 

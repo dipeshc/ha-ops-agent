@@ -2,8 +2,8 @@
 
 - Sensors (REST-set like `sensor.ops_agent`, re-published with it):
   `sensor.ops_agent_ai` (state: enabled or why AI is blocked; attributes:
-  the agent's share of each window, the account's utilisation, run time,
-  runs and tokens today per profile, the last run) and
+  the agent's run time per window and its caps, the account's measured
+  utilisation, runs, tokens and cost today per profile, the last run) and
   `sensor.ops_agent_runs_today` (`state_class: total` with a daily
   `last_reset`, so HA long-term statistics work).
 - Deterministic notices (never written by the AI), at most once per reason
@@ -41,15 +41,15 @@ _REASONS = {
     "ai_disabled": "the AI kill switch is off",
     "usage_limited": "The AI provider reported a usage limit; waiting before trying again",
     "run_cap_reached": "today's run limit for this kind of run is reached",
-    "share_cap": "the agent's share of the subscription window is used up",
-    "share_reserve": "chat has used half of the agent's share; the rest is kept for monitoring",
+    "share_cap": "the agent's run-time budget for this window is used up",
+    "share_reserve": "chat has used half of the agent's run-time budget; the rest is kept for monitoring",
     "account_busy": "the subscription is nearly at its limit from other use; the agent yields",
+    "cost_cap": "today's AI cost cap (limits.daily_max_usd) is reached",
 }
 
 
 def _pct(value: float | None) -> float | None:
-    # Three decimals: a single chat run is a few thousandths of a percent of a window.
-    return None if value is None else round(100 * value, 3)
+    return None if value is None else round(100 * value, 1)
 
 
 class UsageGuard:
@@ -83,8 +83,7 @@ class UsageGuard:
         return Period.at(now, self._tz())
 
     def caps(self) -> Caps:
-        return Caps.from_options(self.options, detected_plan=self.store.kv_get("ai.plan_hint") or None,
-                                 windows=not self._api_key())  # fmt: skip
+        return Caps.from_options(self.options, windows=not self._api_key())
 
     def view(self, now: datetime) -> dict[str, Any]:
         """Everything the sensors and the panel show."""
@@ -98,26 +97,24 @@ class UsageGuard:
         last = usage.get("last_run") or {}
         # With an API key there is no plan and no window cap to show (they are unbounded, not JSON).
         windows = caps.windows
+        try:
+            cost = round(self.store.cost_today(self.period(now).day), 4)
+        except StoreError, sqlite3.Error:
+            cost = None
         return {
             **self.control.snapshot(now),
-            "plan": caps.plan if windows else None,
-            "max_share_percent": round(caps.share_limit * 100, 2),
-            "share_stop_percent": round(caps.share_stop * 100, 2) if windows else None,
-            "agent_share_5h_percent": _pct(window["share_5h"]),
-            "agent_share_7d_percent": _pct(week["share_7d"]),
-            # True when the figure includes run-time estimates (utilisation moved less than its resolution).
-            "agent_share_5h_estimated": window["estimated_runs"] > 0,
-            "agent_share_7d_estimated": week["estimated_runs"] > 0,
+            "run_time_5h_s": window["seconds"],
+            "run_time_5h_cap_s": round(caps.stop("five_hour")) if windows else None,
+            "run_time_7d_s": week["seconds"],
+            "run_time_7d_cap_s": round(caps.stop("seven_day")) if windows else None,
             "account_5h_percent": _pct(account.get("five_hour")),
             "account_7d_percent": _pct(account.get("seven_day")),
-            "run_time_5h_s": window["seconds"],
-            "run_time_5h_cap_s": round(caps.window_seconds) if windows else None,
-            "run_time_7d_s": week["seconds"],
-            "run_time_7d_cap_s": round(caps.week_seconds) if windows else None,
+            "cost_today_usd": cost,
+            "daily_max_usd": caps.daily_usd,
             "today": {k: day[k] for k in ("runs", "turns", "tokens", "cache_read")},
             "profiles_today": usage.get("profiles", {}),
             "last_run": {k: last.get(k) for k in ("profile", "status", "started_at", "turns", "tokens",
-                                                  "tokens_cache_read", "duration_s", "model", "share_5h")}
+                                                  "tokens_cache_read", "duration_s", "model")}
             if last else None,
         }  # fmt: skip
 
@@ -161,8 +158,6 @@ class UsageGuard:
 
     async def after_run(self, profile: object, result: RunResult, context: RunContext) -> None:
         now = datetime.now(UTC)
-        if result.plan_hint:
-            self.store.kv_set("ai.plan_hint", result.plan_hint, now=now)
         if result.status == "usage_limited":
             self.control.usage_limited(result.limit_reset, now=now)
         elif result.status == "ok":

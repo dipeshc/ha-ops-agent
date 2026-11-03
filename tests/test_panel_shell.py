@@ -88,7 +88,7 @@ _RENDER = (
     + re.search(r"const btn = .*?;\n", BODY).group(0)  # type: ignore[union-attr]
     + _between("const pad = ", "async function api(")
     + "const SECTIONS = ['needs', 'running', 'coming', 'today'];\n"
-    + _between("const GLYPH = ", "/* A share in percent:")
+    + _between("const GLYPH = ", "/* Run seconds as whole minutes:")
 )
 _STUBS = (
     "const S = { state: { tz: 'Europe/London' }, home: null, hist: null, items: {}, open: {}, note: {} };"
@@ -96,7 +96,8 @@ _STUBS = (
     " function go(x) { calls.push(['go', x]); } function ask(x) { calls.push(['ask', x]); }"
     " function act(t, a) { calls.push(['act', a.id]); }"
     " function loadItem() {} function render() {}"
-    " function share(v) { return `${v}%`; } function fmtN(n) { return String(n); }\n"
+    " function minutes(v) { return String(Math.round((Number(v) || 0) / 60)); }"
+    " function fmtN(n) { return String(n); }\n"
 )
 
 
@@ -221,7 +222,7 @@ def _views(state: str = "{}") -> str:
     """changes.js on the shell's real helpers."""
     exports = (
         "const window = { opsPanel: { h, btn, api: async () => ({ status: 0, data: {} }), toast() {},"
-        " render() {}, S, els, go, row, section, icon, share, fmtN, hhmm, dayKey, dayLabel, when, tz: () => 'UTC',"
+        " render() {}, S, els, go, row, section, icon, minutes, fmtN, hhmm, dayKey, dayLabel, when, tz: () => 'UTC',"
         " getJSON() {}, loadHistory() {}, loadSystem() {}, loadState() {}, ask, wide, rich, announce() {},"
         " saveDrafts() {}, clock, loadThread() {}, loadHome() {}, markRead() {} } };\n"
     )
@@ -385,3 +386,22 @@ def test_embedded_in_the_ha_app_the_bottom_inset_is_not_added_twice() -> None:
     detect = BODY[start : start + 400]
     assert "window.self !== window.top" in detect and 'classList.add("embedded")' in detect and "catch" in detect
     assert detect.count('classList.add("embedded")') == 2
+
+
+@needs_node
+def test_the_budget_rows_show_run_time_and_the_measured_account() -> None:
+    usage = (
+        "{run_time_7d_s: 1200, run_time_7d_cap_s: 5760, run_time_5h_s: 120, run_time_5h_cap_s: 1152,"
+        " account_7d_percent: 9, daily_max_usd: 2, cost_today_usd: 0.5, today: {runs: 3}}"
+    )
+    program = (
+        _views(f"{{state: {{ai: {{on: true, credential: 'setup_token'}}, usage: {usage}}}, sys: {{}}}}")
+        + "console.log(JSON.stringify(V.system().map((n) => n.textContent)));"
+    )
+    text = " ".join(_run(program))
+    assert "Run time, 7 days20 of 96 min" in text and "Run time, 5 hours2 of 19 min" in text
+    assert "Account, 7 days9 %" in text and "Cost today$0.50 of $2.00" in text and "share" not in text
+    unmeasured = _views("{state: {ai: {on: true}, usage: {run_time_7d_s: 0, run_time_7d_cap_s: 5760}}, sys: {}}")
+    assert "Account, 7 days" not in " ".join(
+        _run(unmeasured + "console.log(JSON.stringify(V.system().map((n) => n.textContent)));")
+    )

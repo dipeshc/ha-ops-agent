@@ -52,8 +52,8 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
   (`ai_disabled`, `usage_limited`), at least 1200 MB of available memory
   (`skipped_low_memory`), the user-class reserve, isolation
   (`isolation_failed`: the unprivileged account exists, no sensitive path is
-  reachable by it, the last self-test passed), the daily run cap and share
-  reservation, the export (`export_failed`), the prompt files
+  reachable by it, the last self-test passed), the daily run cap and the
+  run-time and cost reservation ([budget.md](budget.md) B3, B3a), the export (`export_failed`), the prompt files
   (`setup_failed`), the kill switch again, the drafts directory. Tests
   `test_preflight_refusals_never_start_claude`,
   `test_isolation_failure_blocks_claude`.
@@ -154,10 +154,10 @@ dispatch on `llm.provider`.
   because setup tokens share it (`sk-ant-oat...`). Exactly one is ever set:
   Claude Code ranks `ANTHROPIC_API_KEY` above `CLAUDE_CODE_OAUTH_TOKEN`
   and, in `-p` mode, uses the key whenever it is present. With a key there
-  are no subscription usage windows: the share rule, the account-busy
+  are no subscription usage windows: the run-time budget, the account-busy
   yield and the user-class reserve ([budget.md](budget.md) B3, B5) do not
-  apply, the daily run caps, turn caps, run time and `limits.run_max_usd`
-  do, and `claude.plan` is ignored. The key is never logged, written to a
+  apply, the daily run caps, turn caps, run time, `limits.run_max_usd` and
+  `limits.daily_max_usd` do, and `claude.plan` is ignored. The key is never logged, written to a
   transcript, the diagnostics export or `api/state` (the redactor masks
   `sk-ant-` values and every configured token); `api/state` `ai.credential`
   and the diagnostics `health.ai_credential` report the kind
@@ -199,11 +199,13 @@ dispatch on `llm.provider`.
 - AP6. **Output.** The `result` event decides the status (`ok`, `max_turns`,
   `budget`, `error`); the structured output, else the last top-level JSON
   object in the result text, is the result; tokens, cache reads, duration,
-  cost, turns and permission denials are read from it (the usage ledger
-  keeps no cost, [budget.md](budget.md) B7; the health check's history line
-  keeps its triage run's cost). Rate-limit events give
-  the usage-window readings ([budget.md](budget.md)); a rejected last
+  cost, turns and permission denials are read from it (the cost goes to
+  the day's cost counter, [budget.md](budget.md) B3a, B7; the health
+  check's history line keeps its triage run's cost). Rate-limit events give
+  the usage-window readings ([budget.md](budget.md) B6), logged as reported
+  in the "claude run finished" line; a rejected last
   reading or a usage-limit message makes the status `usage_limited` with
-  the reset time; system events may carry a plan hint. Without a result
+  the reset time. The output names no subscription tier, so nothing
+  detects one. Without a result
   event the last 20 stderr lines decide between error and usage limit.
   Tests `test_claude_runner.py:58-72`, `test_usage.py:165-218`.

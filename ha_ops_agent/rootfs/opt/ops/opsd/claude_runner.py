@@ -77,25 +77,27 @@ class RunResult:
     # First and last `rate_limit_info` seen during the run (account utilisation per window).
     rate_first: dict[str, Any] | None = None
     rate_last: dict[str, Any] | None = None
-    # A plan tier hint from the stream (`pro`, `max5`, `max20`), if Claude Code exposes one.
-    plan_hint: str | None = None
     # Tool calls the guard hook never decided, or that were denied although it allowed them:
     # the CLI's behaviour changed (a timeout falls through, a new rule), raised as a health item.
     guard_anomalies: list[str] = field(default_factory=list)
 
 
-_TIER_RE = re.compile(r"max[_ -]?(5|20)x|\bpro\b", re.IGNORECASE)
-
-
-def plan_hint(event: dict[str, Any]) -> str | None:
-    """`pro` / `max5` / `max20` from a stream event that names the subscription tier (to confirm live)."""
-    for key in ("rateLimitTier", "rate_limit_tier", "subscriptionType", "subscription_type"):
-        value = event.get(key)
-        if isinstance(value, str):
-            match = _TIER_RE.search(value)
-            if match:
-                return f"max{match.group(1)}" if match.group(1) else "pro"
-    return None
+def raw_utilisation(info: dict[str, Any] | None) -> dict[str, Any]:
+    """Each window's `utilization` exactly as Claude Code reported it, for the run's log line (so the unit the
+    budget assumes can be checked against the account's own figures later). Numbers only; nothing else."""
+    if not isinstance(info, dict):
+        return {}
+    found: dict[str, Any] = {}
+    windows = info.get("unifiedWindows")
+    if isinstance(windows, dict):
+        for name, window in list(windows.items())[:6]:
+            value = window.get("utilization") if isinstance(window, dict) else None
+            if isinstance(name, str) and isinstance(value, (int, float)) and not isinstance(value, bool):
+                found[name[:40]] = value
+    value = info.get("utilization")
+    if isinstance(info.get("rateLimitType"), str) and isinstance(value, (int, float)) and not isinstance(value, bool):
+        found.setdefault(str(info["rateLimitType"])[:40], value)
+    return found
 
 
 # Subscription usage limits and API rate limits, as Claude Code reports them
@@ -429,7 +431,6 @@ async def run_claude(
     result_event: dict[str, Any] | None = None
     tool_calls: list[tuple[str, str]] = []
     rate_events: list[dict[str, Any]] = []
-    hints: list[str] = []
     guard_reason = ""
 
     async def pump_stdout() -> None:
@@ -452,8 +453,6 @@ async def run_claude(
                     result_event = event
                 elif event.get("type") == "rate_limit_event" and isinstance(event.get("rate_limit_info"), dict):
                     rate_events.append(event["rate_limit_info"])
-                elif event.get("type") == "system" and (hint := plan_hint(event)):
-                    hints.append(hint)
 
     async def pump_stderr() -> list[str]:
         if proc.stderr is None:
@@ -522,7 +521,6 @@ async def run_claude(
             result.status = "usage_limited"
             reset = result.rate_last.get("resetsAt")
             result.limit_reset = float(reset) if isinstance(reset, (int, float)) else result.limit_reset
-    result.plan_hint = hints[-1] if hints else None
     decisions, problem = read_decisions(cfg.config_dir / GUARD_DECISIONS)
     raw_denials = (result_event or {}).get("permission_denials")
     denials = [d for d in raw_denials if isinstance(d, dict)] if isinstance(raw_denials, list) else []
@@ -536,6 +534,12 @@ async def run_claude(
         _LOGGER.warning("Claude state directory not cleared after the run", extra={"error": str(err)[:200]})
     _LOGGER.info(
         "claude run finished",
-        extra={"status": result.status, "cost_usd": result.cost_usd, "turns": result.turns, "exit": proc.returncode},
+        extra={
+            "status": result.status,
+            "cost_usd": result.cost_usd,
+            "turns": result.turns,
+            "exit": proc.returncode,
+            "utilization": raw_utilisation(result.rate_last),
+        },
     )
     return result

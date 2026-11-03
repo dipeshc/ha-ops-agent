@@ -286,8 +286,6 @@ async def test_chat_flood_is_capped(h: Harness, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(budget, "RESERVE_SECONDS", {**budget.RESERVE_SECONDS, "chat": 1.0})
     monkeypatch.setattr(budget, "MIN_RUN_SECONDS", 0.5)
     monkeypatch.setattr("opsd.store.MIN_RUN_SECONDS", 0.5)
-    monkeypatch.setattr(budget, "DEFAULT_RUN_SHARE", 0.0)
-    monkeypatch.setattr("opsd.store.DEFAULT_RUN_SHARE", 0.0)
     for i in range(CHAT_TURNS_PER_DAY + 5):
         await chat(d, h, f"message {i}")
     # One chat: the long thread is also summarised on the way; count the chat runs only.

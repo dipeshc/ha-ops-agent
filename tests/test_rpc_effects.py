@@ -32,10 +32,12 @@ ITEMS = {
 class Sink:
     def __init__(self) -> None:
         self.messages: list[Message] = []
+        self.replies: list[bool] = []
         self.outcome = "sent"
 
-    async def send_message(self, message: Message) -> str:
+    async def send_message(self, message: Message, *, reply: bool = True) -> str:
         self.messages.append(message)
+        self.replies.append(reply)
         return self.outcome
 
 
@@ -212,6 +214,7 @@ async def test_notify_one_per_run_and_urgent_only_with_critical(world: World) ->
     assert message.urgent is False and message.body == "two sensors down\ncheck the hub"
     assert message.title == "Agent: Zigbee" and message.tag == "ha-ops-agent"
     assert message.budget_class is BudgetClass.AGENT
+    assert world.sink.replies == [False]  # the agent's own push offers no Reply into the chat
 
 
 async def test_notify_urgent_with_critical_and_redaction(world: World) -> None:
@@ -335,9 +338,9 @@ async def test_concurrent_calls_cannot_both_pass_the_quota(world: World) -> None
     gate = asyncio.Event()
     original = world.sink.send_message
 
-    async def slow(message: Message) -> str:
+    async def slow(message: Message, *, reply: bool = True) -> str:
         await gate.wait()
-        return await original(message)
+        return await original(message, reply=reply)
 
     world.sink.send_message = slow  # type: ignore[method-assign]
     world.run()

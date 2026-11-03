@@ -410,22 +410,20 @@ async def test_followup_generation_and_daily_caps(h: Harness) -> None:
 # ----------------------------------------------------------- entry points
 
 
-async def test_triage_push_carries_a_reply_button(h: Harness) -> None:
+async def test_a_triage_push_links_to_the_chat_without_a_reply_button(h: Harness) -> None:
     await h.daemon().health_cycle("catch_up")
     h.fake.set_unavailable("light.kitchen", hours_ago=8)
-    h.in_run_requests = [{"verb": "notify", "args": {"title": "Kitchen", "message": "light down"}}]
+    h.in_run_requests = [{"verb": "notify", "args": {"title": "Kitchen", "message": "reply with OK to approve"}}]
     h.claude_reply = {"result": "ok", "summary": "s", "acks": [], "notify": None, "ops_log": None}
     d = daemon(h)
     await d.health_cycle("daily")
     agent = next(p for p in h.pushes() if p["title"] == "Agent: Kitchen")
-    assert "REPLY" in actions_of(agent)
-    assert d.store is not None
-    event = verify_action(tap(actions_of(agent)["REPLY"], reply_text="why?"), ADMIN, d.store, datetime.now(UTC))
-    assert isinstance(event, Event)
-    turns = d.store.turns_page(str(event.payload["thread_id"]), limit=5)
-    # The push that needs the admin is one message in the one chat, naming its activity entry.
-    assert turns[0].role == "agent" and "light down" in turns[0].text and "(activity #" in turns[0].text
-    assert event.payload["thread_id"] == d.assistant.main_thread()  # type: ignore[union-attr]
+    # The agent's own run cannot invite an answer into the chat: no Reply button, only the link.
+    assert "REPLY" not in actions_of(agent)
+    assert d.store is not None and d.assistant is not None
+    turns = d.store.turns_page(d.assistant.main_thread(), limit=5)
+    # The push is still one message in the one chat, naming its activity entry.
+    assert turns[0].role == "agent" and "reply with OK" in turns[0].text and "(activity #" in turns[0].text
 
 
 def test_fence_and_reply_validation() -> None:

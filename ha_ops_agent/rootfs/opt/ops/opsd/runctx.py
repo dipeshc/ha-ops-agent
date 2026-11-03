@@ -88,7 +88,9 @@ class RunContext:
 class EffectSink(Protocol):
     """Daemon-side effects an executor may trigger."""
 
-    def send_message(self, message: Message) -> Awaitable[str]: ...
+    def send_message(self, message: Message, *, reply: bool = True) -> Awaitable[str]:
+        """Send an agent push; `reply` offers the Reply button into the chat (never for the agent's own runs)."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

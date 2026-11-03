@@ -785,10 +785,23 @@ class Daemon:
             "last": {k: latest[k] for k in ("window_day", "mode", "state", "summary")} if latest else None
         }
 
+    def sensor_view(self) -> dict[str, Any]:
+        """`status_view` as `sensor.ops_agent` publishes it: daemon-written fields only.
+
+        Every Home Assistant user and add-on can read the sensor, so model text (the triage summary, an update
+        night's summary) stays in the admin's panel.
+        """
+        view = self.status_view()
+        view.pop("last_summary", None)
+        updates = view.get("updates")
+        if isinstance(updates, dict) and isinstance(updates.get("last"), dict):
+            view["updates"] = updates | {"last": {k: v for k, v in updates["last"].items() if k != "summary"}}
+        return view
+
     async def publish_status(self, state_value: str | None = None) -> None:
         value = state_value or self.state.last_result or "unknown"
         attrs = {
-            **self.status_view(),
+            **self.sensor_view(),
             "friendly_name": "Ops Agent",
             "icon": "mdi:robot-outline",
         }
@@ -860,9 +873,9 @@ class Daemon:
         return await self.send(message, core_up=self.state.core_down_since is None, now=datetime.now(UTC))
 
     # EffectSink, for capability executors running inside an agent run.
-    async def send_message(self, message: Message) -> str:
+    async def send_message(self, message: Message, *, reply: bool = True) -> str:
         if self.assistant is not None:
-            message = self.assistant.with_reply(message, now=datetime.now(UTC))
+            message = self.assistant.with_reply(message, now=datetime.now(UTC), reply=reply)
         return await self.send_now(message)
 
     def _save_snapshot(self, snapshot: Snapshot) -> None:

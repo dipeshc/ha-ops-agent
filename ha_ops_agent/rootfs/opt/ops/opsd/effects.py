@@ -16,6 +16,7 @@ Text is redacted before it leaves the daemon.
 from opsd.baseline import CRITICAL_ACK_MAX_DAYS, WARNING_SNOOZE_MAX_DAYS
 from opsd.capabilities import Args, CapabilityError
 from opsd.channels import agent_message
+from opsd.policy import Origin
 from opsd.runctx import Ack, ExecContext, RunContext
 
 MAX_NOTIFY_CHARS = 900
@@ -82,7 +83,9 @@ async def exec_notify(ctx: ExecContext, args: Args) -> str:
         urgent=args.flag("urgent"),
         budget_class=run.budget_class,
     )
-    outcome = await sink.send_message(message)
+    # A push from the agent's own run (triage) offers no Reply: what it says is the model's, not the admin's
+    # conversation, so it cannot invite an answer into the chat.
+    outcome = await sink.send_message(message, reply=run.principal.origin is not Origin.AGENT_SELF)
     run.effects.notify_outcomes.append(outcome)
     if outcome in ("sent", "relayed"):
         return f"ok: push {outcome}"

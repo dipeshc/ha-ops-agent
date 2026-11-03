@@ -181,7 +181,12 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   cycle result that status and the fallback applies. Tests
   `test_daemon.py:127-178`, `test_without_token_sends_deterministic_fallback`.
 - H18. Each cycle is recorded in `history.jsonl`, `state.json`, the status
-  sensor (`attention` while anything is unacked) and one activity line.
+  sensor (`attention` while anything is unacked) and one activity line. The
+  status sensor (`sensor.ops_agent`) is readable by every Home Assistant
+  user and add-on, so its attributes carry daemon-written fields only: never
+  the triage summary or an update night's summary (the panel's `api/state`
+  keeps them for the admin). Test
+  `test_broken_custom_integration_runs_claude_and_notifies`.
 
 ## Evidence and the config check
 

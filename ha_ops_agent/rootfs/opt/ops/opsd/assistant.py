@@ -238,10 +238,11 @@ class Assistant:
             return
         self.activity.record(kind, title, detail, needs_admin=needs_admin, ref=ref, chat_text=chat_text)
 
-    def with_reply(self, message: Message, *, now: datetime, source: str = "alert") -> Message:
+    def with_reply(self, message: Message, *, now: datetime, source: str = "alert", reply: bool = True) -> Message:
         """A push that needs the admin: an activity entry, one message in the chat, and a Reply button into it.
 
-        Reminders are logged by `deliver_reminder` and post nothing in the chat.
+        Reminders are logged by `deliver_reminder` and post nothing in the chat. Without `reply` (a push from the
+        agent's own run) the push links to the chat but has no Reply button.
         """
         title = message.title.removeprefix("Agent: ")
         try:
@@ -255,7 +256,8 @@ class Assistant:
             return message
         return Message(
             message.title, message.body, urgent=message.urgent, tag=message.tag, thread_id=thread,
-            actions=(*message.actions, REPLY_ACTION), budget_class=message.budget_class, url=deep_link(thread),
+            actions=(*message.actions, *((REPLY_ACTION,) if reply else ())), budget_class=message.budget_class,
+            url=deep_link(thread),
             quiet_ok=message.quiet_ok,
         )  # fmt: skip
 

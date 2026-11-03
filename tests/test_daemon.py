@@ -148,6 +148,10 @@ async def test_broken_custom_integration_runs_claude_and_notifies(h: Harness) ->
     # custom:acme_solar was not acked, so the sensor stays at "attention".
     assert record["unacked"] == ["custom:acme_solar"]
     assert h.client.states["sensor.ops_agent"][0] == "attention"
+    # Every HA user can read the sensor: the model's summary stays in the panel's status.
+    attributes = h.client.states["sensor.ops_agent"][1]
+    assert "last_summary" not in attributes and "Acme Solar down after update" not in str(attributes)
+    assert h.current is not None and h.current.status_view()["last_summary"] == "Acme Solar down after update"
     assert read_jsonl(h.paths.history_file)[-1]["cost_usd"] == 0.2
 
 

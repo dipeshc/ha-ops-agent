@@ -75,9 +75,11 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `test_a_house_fact_item_resolves_with_its_decision`.
 - I5b. **Time.** An item whose words depend on the clock carries
   `source.recheck_at`: a health item whose `needs_after` is ahead (I10), an
-  update rejected within the last 7 days (I6). The minute tick
-  ([overview.md](overview.md) D2) recomposes such an item once that time
-  passes and forgets a recheck its source did not renew (a resolved item
+  update rejected within the last 7 days (I6), a maintenance finding or its
+  config change whose deadline is more than 30 days away ([maintenance.md](maintenance.md)
+  M12, M12a). The minute tick
+  ([overview.md](overview.md) D2) recomposes such an item (health, update,
+  maintenance and change items) once that time passes and forgets a recheck its source did not renew (a resolved item
   carries none), then decides the pushes time made due (N1). The add-on options
   are a source too: at each start the daemon recomposes the update items
   and nights (the gate and the window), the maintenance items (act mode)
@@ -103,7 +105,8 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `quiet`; a failed night is `failed` with an urgent `ack` unless a job
   already escalated.
 - I9. Proposal items: `open` is `waiting` (`apply` / `reject`, with the row's
-  expiry); approved is `running`; applied is `done` with a `revert` action;
+  expiry), except a maintenance finding's change before its finding may ask,
+  which is `proposed` with the same actions ([maintenance.md](maintenance.md) M12a); approved is `running`; applied is `done` with a `revert` action;
   failed is `failed` with an `ack`; rejected or stale is `cancelled`; expired
   is `expired`; refused rows produce no item. The proposer's words go in
   `agent`, never in the need or the push. Test
@@ -238,5 +241,7 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   the composition, escalation, pushes and actions are
   in [maintenance.md](maintenance.md) M10–M18 and the wire shape in
   [panel.md](panel.md) N20. Only entering Needs you pushes (a deprecation
-  within two releases, a dashboard plan waiting for approval, a failed
-  dashboard change); every other maintenance item is silent.
+  within 30 days of its deadline, a dashboard plan waiting for approval in
+  those 30 days, a dashboard restore that failed); every other maintenance
+  item is silent. A config change proposed for a finding follows its
+  finding's deadline (maintenance.md M12a).

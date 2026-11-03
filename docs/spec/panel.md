@@ -152,11 +152,13 @@ The record behind Home, History and the item page
   numbered plan steps and `agent` the plan run's text. A dashboard plan
   fills `change` with the changed card paths as `diff`, `files` as
   `["dashboard <url_path>"]` and `shown` as the SHA-256 of the dashboard
-  JSON after the edit; in act mode it waits with an `approval` need,
-  primary `apply_dashboard` ("Apply to the dashboard"), secondary
-  `reject`. An escalated deprecation or a failed dashboard change waits
-  with an `ack` need (`ack`); an open finding offers `dismiss` ("Not
-  relevant here"). Test
+  JSON after the edit; in act mode it offers `apply_dashboard` ("Apply to
+  the dashboard") and `reject` as actions in Coming up, and within 30 days
+  of the finding's deadline waits with an `approval` need, primary
+  `apply_dashboard`, secondary `reject` ([maintenance.md](maintenance.md)
+  M12a). A deprecation within 30 days of its deadline or a dashboard
+  restore that failed waits with an `ack` need (`ack`); an open finding
+  offers `dismiss` ("Not relevant here"). Test
   `test_the_panel_applies_an_approved_dashboard_plan_end_to_end`.
 
 ## Routes

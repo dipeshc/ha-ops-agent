@@ -693,6 +693,17 @@ class Composer:
                     return spec
                 text = (f"Change #{cid} to {paths}. Apply it and the daemon checks the config, reloads, commits "
                         "and pushes, and undoes it if anything fails.")  # fmt: skip
+                if self._maintenance_waits(row, spec):
+                    # A deprecation's one-tap fix: ready in Coming up, and in Needs you only 30 days before the
+                    # removal (the finding's own item says so); it may be applied from either.
+                    spec.state, spec.gist = "proposed", "a fix for a deprecation; ready to apply"
+                    spec.actions = [act("apply", "Apply and commit"), act("reject", "Reject", "text")]
+                    expires = _parse(row.get("expires_at"))
+                    if expires is not None:
+                        spec.footnote = f"Expires {expires.astimezone(self.tz):%Y-%m-%d %H:%M} if not applied"
+                    if approval is not None:
+                        spec.source["approval"] = approval["id"]
+                    return spec
                 spec.gist = "waiting for your approval"
                 spec.need = need("approval", text, act("apply", "Apply and commit"), [act("reject", "Reject", "text")],
                                  expires_at=str(row.get("expires_at") or "") or None)  # fmt: skip
@@ -725,6 +736,21 @@ class Composer:
             case _:
                 return None
         return spec
+
+    def _maintenance_waits(self, row: Mapping[str, Any], spec: Spec) -> bool:
+        """A config change proposed for a maintenance finding whose deadline is not close yet (or that has none,
+        or whose finding is gone): it does not ask. Sets the recheck for the day it would."""
+        who = str(row.get("requested_by") or "")
+        if not who.startswith(maint.PROPOSER):
+            return False
+        key = who.removeprefix(maint.PROPOSER)
+        finding = next((f for f in maint.load(self.store) if f.key == key), None)
+        if finding is None:
+            return True
+        start = finding.asks_at()
+        if start is not None and start > self.now:
+            spec.source["recheck_at"] = _iso(start)
+        return not finding.asks(str(maint.meta(self.store).get("installed") or ""), self.now)
 
     def fact(self, fact: Mapping[str, Any]) -> Spec | None:
         """A house fact noted without a change proposal: the admin acknowledges it."""
@@ -906,16 +932,26 @@ class Composer:
         result = maint.result_of(store, finding.key)
         board = maint.dashboard_plan(store, finding.key)
         bound = (board or {}).get("binding")
+        # Only a deadline close enough asks (Needs you); until then the finding and its one-tap fix are Coming up.
+        asks = finding.asks(installed, self.now)
+        start = finding.asks_at()
+        if start is not None and start > self.now:
+            spec.source["recheck_at"] = _iso(start)
         if result is not None and result.get("state") in ("restored", "escalated", "refused"):
             token = f"result:{result.get('at')}"
-            if not acked(store, key, token):
+            detail = clean_text(str(result.get("detail") or ""), 400)
+            if result.get("state") == "escalated" and not acked(store, key, token):
+                # The restore did not read back: the dashboard may be broken, and only the admin can restore it.
                 spec.state, spec.gist = "failed", "the dashboard change was not made"
-                spec.need = need("ack", f"{clean_text(str(result.get('detail') or ''), 400)}.", act("ack", "OK"))
+                spec.need = need("ack", f"{detail}.", act("ack", "OK"))
                 spec.source["ack"] = token
                 spec.since = str(result.get("at") or "") or None
-                spec.urgent = result.get("state") == "escalated"
-                spec.pushes = True
+                spec.urgent = spec.pushes = True
                 return spec
+            if result.get("state") != "escalated":
+                # Nothing changed on the dashboard (restored or refused): a fact, not a question.
+                spec.facts.append({"label": "Dashboard change", "value": f"not made: {detail}",
+                                   "at": result.get("at")})  # fmt: skip
         if isinstance(bound, Mapping):
             url_path = str(bound.get("url_path"))
             edit = dashboards.edit_of(bound)
@@ -934,6 +970,11 @@ class Composer:
             if not ctx.acting:
                 spec.gist = f"{gist}; a dashboard change is planned (applies in agent.mode: act)"
                 return spec
+            if not asks:
+                # Ready, and the admin may apply it from Coming up; it asks only 30 days before the deadline.
+                spec.gist = f"{gist}; a dashboard change is ready to apply"
+                spec.actions = [act("apply_dashboard", "Apply to the dashboard"), act("reject", "Reject", "text")]
+                return spec
             text = (f"Change dashboard {url_path}: {words}. Approve and the daemon backs up the dashboard's JSON, "
                     "saves the change, reads it back and restores the backup if anything differs.")  # fmt: skip
             spec.state, spec.gist = "waiting", "a dashboard change waits for your approval"
@@ -945,10 +986,11 @@ class Composer:
             spec.gist = "dashboard saved; the next scan confirms it is resolved"
             return spec
         if proposal is not None and proposal["state"] in ("open", "applying"):
-            spec.gist = f"{gist}; config change #{proposal['change']} waits for you"
+            ready = "waits for you" if asks else "is ready to apply"
+            spec.gist = f"{gist}; config change #{proposal['change']} {ready}"
             return spec
         spec.actions = [act("dismiss", "Not relevant here", "text")]
-        if left is not None and left <= maint.ESCALATE_RELEASES and finding.signal in maint.AUTHORITATIVE:
+        if asks:
             token = f"left:{finding.removal}:{left}"
             if not acked(store, key, token):
                 text = (f"{finding.title()}: {gist}. Nothing here changes it by itself; the plan below says what to "
@@ -1234,6 +1276,10 @@ class ItemBook:
 
     def _maintenance(self, composer: Composer) -> None:
         self._group("maint", composer.maintenance())
+        # A finding's open config change asks or waits with its finding's deadline.
+        for row in self.store.changes(states=("open",), limit=50):
+            if str(row.get("requested_by") or "").startswith(maint.PROPOSER):
+                self._safely(f"change:{row['id']}", partial(self._change, composer, int(row["id"])))
 
     def write_health(self) -> list[dict[str, Any]]:
         """The health check saved its open items: write them (cleared ones resolve, new ones enter Needs you)."""
@@ -1265,6 +1311,12 @@ class ItemBook:
                     self._safely("updates", partial(self._updates, composer, updates))
                 if any(str(r["key"]).startswith("health:") for r in due):
                     self._safely("health", partial(self._health, composer))
+                if any(str(r["key"]).startswith("maint:") for r in due):
+                    self._safely("maint", partial(self._maintenance, composer))
+                for record in due:
+                    if str(record["key"]).startswith("change:"):
+                        change_id = int(str(record["key"]).removeprefix("change:"))
+                        self._safely(f"change:{change_id}", partial(self._change, composer, change_id))
                 # Composed again: a recheck the source did not renew (a hold, a source that is gone) is done.
                 for record in self.store.items_due(now):
                     self.store.clear_recheck(str(record["id"]))

@@ -31,9 +31,11 @@ A signal that could not be read keeps its previous findings: missing evidence ne
 Variants (title, gist, need and plan steps are the daemon's words; the plan run's text is `agent`):
 
 - **deprecation ahead**: what is affected, the removal version, the releases left, a plan. It is in
-  Needs you (pushed once per release left) only when it comes from a repair or the release notes, is
-  within `ESCALATE_RELEASES` releases of removal and nothing else answers it; else it is Coming up and
-  silent;
+  Needs you (pushed once per release left) only when it comes from a repair or the release notes, its
+  deadline (the first day of the month of the removal release) is at most `ASK_BEFORE` (30 days) away or
+  the removal is installed, and nothing else answers it; else it is Coming up and silent. Its one-tap fix
+  (a config change or a dashboard plan) is Coming up too, approvable there, until the same 30 days; a
+  finding without a deadline never asks;
 - **replacement candidate**: never automatic, a plan only; Suggestions, never pushed;
 - **suggestion**: Suggestions, never pushed.
 
@@ -79,7 +81,8 @@ from opsd.updatefix import Edit, apply_edits, parse_edits
 
 _LOGGER = logging.getLogger(__name__)
 
-ESCALATE_RELEASES = 2
+# A deprecation with a deadline asks the admin (Needs you) this long before it, never earlier.
+ASK_BEFORE = timedelta(days=30)
 POSTS_BACK = 2
 WEEK = timedelta(days=7)
 STALE_BEFORE_UPDATE = timedelta(hours=26)
@@ -144,6 +147,13 @@ def releases_left(installed: Any, removal: Any) -> int | None:
     return max(0, (at[0] * 12 + at[1]) - (now[0] * 12 + now[1]))
 
 
+def deadline(removal: Any) -> datetime | None:
+    """When a removal breaks: the first day of the month its Core release ships in (UTC; Core minors ship in the
+    first week of their month, so this is never late). None when the version is unknown."""
+    at = minor(removal)
+    return datetime(at[0], at[1], 1, tzinfo=UTC) if at is not None else None
+
+
 def _version_text(at: tuple[int, int]) -> str:
     return f"{at[0]}.{at[1]}"
 
@@ -190,6 +200,24 @@ class Finding:
 
     def left(self, installed: str) -> int | None:
         return releases_left(installed, self.removal) if self.removal else None
+
+    @property
+    def deadline(self) -> datetime | None:
+        """The date its removal breaks, for a deprecation Home Assistant itself vouches for; None: no deadline
+        (a log line, a deprecation without a removal version, a replacement candidate, a suggestion)."""
+        if self.variant != "deprecation" or self.signal not in AUTHORITATIVE or not self.removal:
+            return None
+        return deadline(self.removal)
+
+    def asks_at(self) -> datetime | None:
+        """From when it may ask the admin (`ASK_BEFORE` its deadline); None: never."""
+        due = self.deadline
+        return due - ASK_BEFORE if due is not None else None
+
+    def asks(self, installed: str, now: datetime) -> bool:
+        """It may be in Needs you now: within `ASK_BEFORE` of its deadline, or its removal is already installed."""
+        start = self.asks_at()
+        return start is not None and (now >= start or self.left(installed) == 0)
 
     def title(self) -> str:
         name = self.domain or "Core"

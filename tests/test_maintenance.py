@@ -316,13 +316,28 @@ async def test_without_hacs_there_is_no_marketplace_suggestion(tmp_path: Path) -
 # ------------------------------------------------------------------ items and escalation
 
 
-async def test_only_deprecations_within_two_releases_need_the_admin_and_push(tmp_path: Path) -> None:
+# 2030.4 ships in April 2030: its deadline is 2030-04-01, so it may ask from 2030-03-02.
+ASKS_AT = datetime(2030, 3, 2, tzinfo=UTC)
+
+
+async def test_only_deprecations_within_30_days_of_their_deadline_need_the_admin_and_push(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     await rig.scan()
     items = rig.items()
     near = items["acme_sprinkler: deprecated, removed in 2030.4"]
-    assert near["state"] == "waiting" and near["need"]["kind"] == "ack" and near["kicker"] == "Deprecation ahead"
+    # Six weeks ahead: Coming up and silent, composed again on the day it may ask.
+    assert near["state"] == "proposed" and not near["needs"] and near["kicker"] == "Deprecation ahead"
     assert near["gist"] == "removed in 2030.4, 2 releases left"
+    assert near["source"]["recheck_at"] == ASKS_AT.isoformat()
+    assert near["title"] in {r["title"] for r in rig.book.home()["coming"]}
+    await rig.deliver()
+    # The release-notes findings for 2030.3 are inside their 30 days already; the 2030.4 one is not.
+    assert all("2030.3" in m.title for m in rig.sent) and rig.sent
+    rig.now = ASKS_AT
+    rig.book.tick()
+    items = rig.items()
+    near = items["acme_sprinkler: deprecated, removed in 2030.4"]
+    assert near["state"] == "waiting" and near["need"]["kind"] == "ack" and "recheck_at" not in near["source"]
     # The far one comes from the Core log: labelled as the log's claim in the title and the gist.
     far = items["The Core log says acme_weather is removed in 2030.9"]
     assert far["state"] == "proposed" and not far["needs"]
@@ -341,26 +356,69 @@ async def test_only_deprecations_within_two_releases_need_the_admin_and_push(tmp
 
 async def test_an_acknowledged_deprecation_asks_again_one_release_closer(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
+    rig.now = ASKS_AT
     await rig.scan()
     near = rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]
     assert rig.book.ack(near, now=rig.now)
     assert rig.items()[near["title"]]["state"] == "proposed"
-    rig.installed, rig.now = "2030.3.0", rig.now + timedelta(days=30)
+    rig.installed, rig.now = "2030.3.0", rig.now + timedelta(days=10)
     await rig.scan()
     again = rig.items()[near["title"]]
     assert again["state"] == "waiting" and again["gist"] == "removed in 2030.4, 1 release left"
+
+
+def test_a_deadline_is_the_month_of_the_removal_and_only_authoritative_removals_have_one() -> None:
+    repair = Finding(key="0123456789abcdef", variant="deprecation", signal="repair", what="x", removal="2030.4")
+    assert repair.deadline == datetime(2030, 4, 1, tzinfo=UTC) and repair.asks_at() == ASKS_AT
+    assert not repair.asks("2030.2.1", ASKS_AT - timedelta(seconds=1)) and repair.asks("2030.2.1", ASKS_AT)
+    # A removal already installed asks whatever the date says.
+    assert repair.asks("2030.4.0", ASKS_AT - timedelta(days=90))
+    for no_deadline in (
+        Finding(key="0123456789abcdef", variant="deprecation", signal="repository", what="archived"),
+        Finding(key="0123456789abcdef", variant="deprecation", signal="log", what="x", removal="2030.3"),
+        Finding(key="0123456789abcdef", variant="replacement", signal="replacement", what="x"),
+        Finding(key="0123456789abcdef", variant="suggestion", signal="marketplace", what="x", removal="2030.3"),
+    ):
+        assert no_deadline.deadline is None and not no_deadline.asks("2030.3.0", ASKS_AT)
+
+
+async def test_only_a_dashboard_restore_that_failed_asks(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    await rig.scan()
+    near = rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]
+    key = near["source"]["finding"]
+    from opsd.dashboards import Outcome
+
+    rig.manager.record_result(key, Outcome("restored", "the save did not read back; the backup was restored"))
+    item = rig.items()[near["title"]]
+    assert item["state"] == "proposed" and not item["needs"]
+    assert any(f["label"] == "Dashboard change" and f["value"].startswith("not made") for f in item["facts"])
+    rig.now += timedelta(minutes=1)
+    rig.manager.record_result(key, Outcome("escalated", "the restore did not read back"))
+    item = rig.items()[near["title"]]
+    assert item["state"] == "failed" and item["need"]["kind"] == "ack" and item["needs"]
 
 
 async def test_a_findings_config_change_moves_its_item(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     await rig.scan()
     near = rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]
-    assert near["state"] == "waiting"
     who = f"{maintenance.PROPOSER}{near['source']['finding']}"
     change = rig.store.create_change(kind="change", subject="fix(automations): migrate", why="", effect="",
                                      state="open", requested_by=who, now=rig.now,
                                      expires_at=rig.now + timedelta(days=7))  # fmt: skip
-    # The change answers it: out of Needs you at once, not one card twice.
+    # Before the 30 days, the one-tap fix is ready in Coming up: applicable there, never asking or pushed.
+    fix = rig.store.item_by_key(f"change:{change['id']}")
+    assert fix is not None and fix["state"] == "proposed" and fix["need"] is None
+    assert [a["id"] for a in fix["actions"]] == ["apply", "reject"] and fix["source"]["recheck_at"]
+    assert f"config change #{change['id']} is ready to apply" in rig.items()[near["title"]]["gist"]
+    await rig.deliver()
+    assert not any(m.tag == fix["id"] for m in rig.sent)
+    # Within 30 days of the deadline the fix asks, and the finding defers to it: not one card twice.
+    rig.now = ASKS_AT
+    rig.book.tick()
+    fix = rig.store.item_by_key(f"change:{change['id']}")
+    assert fix is not None and fix["state"] == "waiting" and fix["need"]["primary"]["id"] == "apply"
     item = rig.items()[near["title"]]
     assert item["state"] == "proposed" and f"config change #{change['id']} waits for you" in item["gist"]
     assert rig.store.move_change(change["id"], expect=("open",), to="rejected", now=rig.now)
@@ -437,6 +495,7 @@ def test_stored_findings_of_the_wrong_shape_are_dropped(tmp_path: Path) -> None:
 
 async def test_the_plan_is_the_agents_text_and_the_title_and_need_stay_the_daemons(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
+    rig.now = ASKS_AT
     await rig.scan()
     repair = by_signal(rig, "repair")[0]
     assert rig.prompts and "<evidence>" in rig.prompts[0] and repair.key in rig.prompts[0]
@@ -619,7 +678,9 @@ async def test_the_panel_applies_an_approved_dashboard_plan_end_to_end(
         await d.maintenance.scan("daily")
         await d.items_flush()
         item = d.store.item_by_key(f"maint:{card.key}")
-        assert item["state"] == "waiting" and item["need"]["primary"]["id"] == "apply_dashboard"
+        # Years before its deadline: ready in Coming up, applied from there without asking.
+        assert item["state"] == "proposed" and item["need"] is None
+        assert [a["id"] for a in item["actions"]] == ["apply_dashboard", "reject"]
         act = {"action": "apply_dashboard", "revision": item["revision"]}
         # Listed in YAML mode when the admin taps: the request is refused with the reason, nothing queued.
         h.fake.lovelace_modes["example-garden"] = "yaml"

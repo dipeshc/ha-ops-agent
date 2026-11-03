@@ -123,21 +123,44 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   the removal version, the releases left, a plan), **Replacement candidate**
   (parity of entity platforms, entity-id impact, risk `low`/`medium`/`high`;
   never automatic) and **Suggestion**.
-- M12. **Escalation.** A deprecation from a repair or the release notes
-  is in Needs you, with an `ack`, only when its removal is at most `ESCALATE_RELEASES` (2) Core minors away and
-  nothing else answers it (no proposal that is open or applying, no
-  dashboard plan, no applied dashboard change, not hidden). A failed
-  dashboard change to acknowledge takes precedence over all of these.
-  OK hides it until one release closer (the ack token holds the releases
-  left). Releases left count minors across years and are 0 once the removal
-  is installed or due. Tests
-  `test_only_deprecations_within_two_releases_need_the_admin_and_push`,
+- M12. **Escalation: 30 days before the deadline.** A finding's deadline
+  is the first day of the month of its removal release (`deadline`; Core
+  minors ship in the first week of their month), and only a deprecation
+  from a repair or the release notes with a removal version has one. Such
+  a deprecation is in Needs you, with an `ack`, only from `ASK_BEFORE` (30
+  days) before its deadline, or once its removal is installed, and only
+  when nothing else answers it (no proposal that is open or applying, no
+  dashboard plan, no applied dashboard change, not hidden). Until then it
+  is Coming up and silent, with `source.recheck_at` set to the day it may
+  ask, so the minute tick moves it then. A finding without a deadline (a
+  log line, an archived repository, a deprecation without a removal
+  version, a replacement candidate, a suggestion) never enters Needs you.
+  A dashboard restore that did not read back (`escalated`) takes
+  precedence over all of these; a dashboard change that was refused or
+  restored changed nothing and is a fact on the item, never a need. OK
+  hides it until one release closer (the ack token holds the releases
+  left). Releases left count minors across years and are 0 once the
+  removal is installed or due. Tests
+  `test_only_deprecations_within_30_days_of_their_deadline_need_the_admin_and_push`,
+  `test_a_deadline_is_the_month_of_the_removal_and_only_authoritative_removals_have_one`,
+  `test_only_a_dashboard_restore_that_failed_asks`,
   `test_an_acknowledged_deprecation_asks_again_one_release_closer`,
   `test_releases_left_counts_core_minors_across_years`.
+- M12a. **One-tap fixes wait with their finding.** A config change
+  proposed for a finding (`requested_by = maintenance:<finding>`) that is
+  open is `proposed` (Coming up) with `apply` and `reject` as plain actions
+  and its expiry in the footnote, until its finding may ask (M12); then it
+  is `waiting` with its approval need like any proposal. A change whose
+  finding has no deadline, or is gone, never asks. A dashboard plan in act
+  mode is likewise Coming up with `apply_dashboard` and `reject` until the
+  finding may ask. Applying from Coming up is the same approval as from
+  Needs you. A scan recomposes the open changes of its findings. Test
+  `test_a_findings_config_change_moves_its_item`,
+  `test_the_panel_applies_an_approved_dashboard_plan_end_to_end`.
 - M13. **Pushes.** A maintenance item pushes only when it enters Needs you:
-  a deprecation within two releases, a dashboard plan waiting for approval,
-  or a failed dashboard change to acknowledge (time-sensitive when the
-  restore failed). Everything else is silent: deprecations further away are
+  a deprecation within 30 days of its deadline, a dashboard plan waiting
+  for approval within the same 30 days, or a dashboard restore that failed
+  (time-sensitive). Everything else is silent: deprecations further away are
   Coming up; replacement candidates and suggestions are a separate Home
   section, `suggestions`; all are in History.
 - M14. **Resolution.** A finding the scan no longer reports is `done`
@@ -197,7 +220,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   These are checked when the plan is made, at the approval request and
   again at execution, where a card that no longer qualifies voids the
   approval and nothing is written. The item shows the changed paths as its
-  diff and waits for approval in act mode; in observe mode it shows the
+  diff and, in act mode, offers the approval (in Coming up, or in Needs
+  you within 30 days of the deadline, M12a); in observe mode it shows the
   plan without the action. Tests
   `test_a_dashboard_plan_waits_for_approval_and_never_targets_another_dashboard`,
   `test_a_dashboard_not_named_by_the_finding_is_never_planned`,

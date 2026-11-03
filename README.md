@@ -40,10 +40,12 @@ plain, tested code for everything that acts.
   releases before it removes something. The agent matches repairs, Core log
   warnings, release notes, archived HACS repositories and Core integrations
   that now cover a custom one against what you use, and keeps one item for
-  each with the removal version and a plan. It asks you only once a removal
-  is two releases away; replacement candidates and suggestions wait under
-  *Suggestions*. With git on, a YAML migration is a one-tap proposal. A
-  dashboard migration is a plan you approve, and only ever on core
+  each with the removal version and a plan. It asks you only 30 days before
+  a removal's deadline (the month its release ships); until then the item
+  and its one-tap fix wait under *Coming up*, ready to apply, and a finding
+  without a deadline never asks. Replacement candidates and suggestions
+  wait under *Suggestions*. With git on, a YAML migration is a one-tap
+  proposal. A dashboard migration is a plan you approve, and only ever on core
   display-only cards: the agent backs the dashboard up, saves the change,
   reads it back and restores the backup if anything differs. A Core update that would remove something you still use always
   asks.

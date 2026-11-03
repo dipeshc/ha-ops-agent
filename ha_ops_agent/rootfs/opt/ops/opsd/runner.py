@@ -406,8 +406,9 @@ class AgentRunner:
         self.isolation_problems: Callable[[Paths, privsep.Account], list[str]] = privsep.isolation_problems
 
     def _build_export(self, repo: Path, export_root: Path) -> Path:
-        """The export with the house profile's documents; the tracked files only when git is on."""
-        redactor = None if self.options.git_on else build_redactor(self.paths.secrets_yaml, [self._token()])
+        """The export with the house profile's documents; the tracked files only when git is on; always redacted."""
+        tokens = [self._token(), os.environ.get("SUPERVISOR_TOKEN", "")]
+        redactor = build_redactor(self.paths.secrets_yaml, [t for t in tokens if t])
         return privsep.build_export(repo, export_root, reads=self.options.reads, git=self.options.git_on,
                                     redactor=redactor)  # fmt: skip
 

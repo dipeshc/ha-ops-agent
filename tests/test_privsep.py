@@ -12,7 +12,7 @@ from opsd.claude_runner import RunConfig, run_claude
 from opsd.config import Paths
 from opsd.privsep import Account, build_export, isolation_problems, reachable_by
 from opsd.redact import Redactor
-from tests.conftest import OPT
+from tests.conftest import OPT, make_options
 
 STRANGER = Account(uid=987654, gid=987654, groups=frozenset({987654}))
 
@@ -92,6 +92,58 @@ def test_build_export_copies_only_readable_tracked_files(tmp_path: Path) -> None
     export = build_export(repo, tmp_path / "export")
     assert not (export / "automations" / "a.yaml").exists()
     assert [p.name for p in (tmp_path / "export").iterdir()] == ["config"]
+
+
+def test_the_tracked_export_is_redacted_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from opsd.redact import build_redactor
+
+    repo = tmp_path / "repo"
+    (repo / "packages").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "secrets.yaml").write_text("router_password: hunter22secret\n")
+    (repo / "configuration.yaml").write_text("homeassistant:\n")
+    (repo / "packages" / "rest.yaml").write_text(
+        "rest:\n  - password: hunter22secret\n    headers:\n      Authorization: Bearer abcdefghijklmnop123\n"
+        "    url: rtsp://admin:pw123456@10.0.0.9/live\nnote: oat-token-abcdef\nsup: supervisor-token-xyz987\n"
+    )
+    git(repo, "add", "configuration.yaml", "packages")
+    git(repo, "commit", "-qm", "init")
+    redactor = build_redactor(repo / "secrets.yaml", ["oat-token-abcdef", "supervisor-token-xyz987"])
+    export = build_export(repo, tmp_path / "export", git=True, redactor=redactor)
+    text = (export / "packages" / "rest.yaml").read_text()
+    for secret in ("hunter22secret", "abcdefghijklmnop123", "pw123456", "oat-token-abcdef", "supervisor-token-xyz987"):
+        assert secret not in text, secret
+    assert "rest:" in text
+    # Without an explicit redactor the secrets.yaml values are still masked.
+    assert "hunter22secret" not in (build_export(repo, tmp_path / "export2") / "packages" / "rest.yaml").read_text()
+
+
+def test_the_runner_redacts_the_export_with_git_on_and_both_tokens(
+    paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from opsd import runner as runner_mod
+
+    seen: dict[str, object] = {}
+
+    def fake_build(repo: Path, root: Path, **kwargs: object) -> Path:
+        seen.update(kwargs)
+        return root
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "supervisor-token-xyz987")
+    monkeypatch.setattr(runner_mod.privsep, "build_export", fake_build)
+    paths.secrets_yaml.parent.mkdir(parents=True, exist_ok=True)
+    paths.secrets_yaml.write_text("k: hunter22secret\n")
+    agent = runner_mod.AgentRunner(
+        paths=paths, options=make_options(), store=None, token=lambda: "oat-token-abcdef",
+        period=lambda _now: None,  # type: ignore[arg-type,return-value]
+        selftest=lambda: None, rpc=lambda: None, require_privsep=lambda: False,
+    )  # fmt: skip
+    assert make_options().git_on
+    agent._build_export(paths.ha_config, paths.data / "export")
+    redactor = seen["redactor"]
+    assert redactor is not None and seen["git"] is True
+    masked = redactor.redact("hunter22secret oat-token-abcdef supervisor-token-xyz987")  # type: ignore[attr-defined]
+    assert "hunter22secret" not in masked and "oat-token" not in masked and "supervisor-token" not in masked
 
 
 def test_ops_account_lookup() -> None:

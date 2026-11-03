@@ -86,12 +86,13 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 - R10. **Run copy** `/run/ops-claude/config`, root-owned 0755, files 0644,
   rebuilt before every run and never containing symlinks. With git on: the
   tracked files (`git ls-files --cached`) that pass the readable rules,
-  copied from the working tree. With git off: a strict allowlist (top-level
+  read from the working tree. With git off: a strict allowlist (top-level
   `*.yaml`/`*.yml` and `README.md`; `automations`, `scripts`, `packages`,
   `alerts`, `templates`, `blueprints` `**.yaml`; `custom_templates/*.jinja`;
-  the profile's `.md` documents), each file redacted with the `secrets.yaml`
-  values and the provider token, at most 256 KiB per file, 16 MiB and 5000
-  files in total. Readable never includes hidden parts, `secrets.yaml`,
+  the profile's `.md` documents). Git on or off, each file is redacted with
+  the `secrets.yaml` values, the provider token, the Supervisor token and
+  the credential shapes, and only UTF-8 files of at most 256 KiB each and
+  16 MiB in total are copied (with git off also at most 5000 files). Readable never includes hidden parts, `secrets.yaml`,
   `secrets.yml`, `ip_bans.yaml`, `known_devices.yaml` or a `secrets`
   directory, in any letter case; readable directories are `automations`,
   `alerts`, `templates`, `custom_templates`, `custom_components`,
@@ -100,6 +101,8 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
   `test_export_skips_files_behind_symlinked_directories`,
   `test_the_export_without_git_is_a_strict_allowlist`,
   `test_a_planted_secret_or_token_is_never_exported`,
+  `test_the_tracked_export_is_redacted_too`,
+  `test_the_runner_redacts_the_export_with_git_on_and_both_tokens`,
   `test_deny_files_in_any_letter_case`.
 - R11. The system prompt file lives at `/run/ops-claude/system-prompt.md`,
   outside the export. The drafts directory `/run/ops-drafts` exists only for

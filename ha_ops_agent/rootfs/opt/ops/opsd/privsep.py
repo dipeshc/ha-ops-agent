@@ -193,8 +193,8 @@ def _copy_redacted(source: Path, destination: Path, redactor: Redactor, budget: 
 def build_export(repo: Path, export_root: Path, *, reads: Reads | None = None, git: bool = True,
                  redactor: Redactor | None = None) -> Path:  # fmt: skip
     """Copy readable files (never symlinks) into a fresh root-owned tree: the tracked ones when `git`, else the
-    allowlisted files on disk, each redacted (`redactor`, by default the values in `secrets.yaml` and the
-    credential shapes)."""
+    allowlisted files on disk. Either way each file is redacted (`redactor`, by default the values in
+    `secrets.yaml` and the credential shapes) and the per-file and total size caps apply."""
     export_root.mkdir(parents=True, exist_ok=True)
     # World-readable on purpose: the export only holds files the ops user may read.
     os.chmod(export_root, 0o755)  # noqa: S103
@@ -202,7 +202,7 @@ def build_export(repo: Path, export_root: Path, *, reads: Reads | None = None, g
     staging.mkdir(mode=0o755)
     root = Path(os.path.realpath(repo))
     names = tracked_readable_files(repo, reads) if git else disk_files(repo, reads)
-    redact = None if git else (redactor or build_redactor(repo / "secrets.yaml"))
+    redact = redactor or build_redactor(repo / "secrets.yaml")
     budget = [MAX_DISK_TOTAL_BYTES]
     for name in names:
         source = repo / name
@@ -218,12 +218,9 @@ def build_export(repo: Path, export_root: Path, *, reads: Reads | None = None, g
             continue
         destination = staging / name
         destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-        if redact is None:
-            shutil.copyfile(source, destination, follow_symlinks=False)
-        else:
-            _copy_redacted(source, destination, redact, budget)
-            if not destination.exists():
-                continue
+        _copy_redacted(source, destination, redact, budget)
+        if not destination.exists():
+            continue
         os.chmod(destination, 0o644)
     for directory in [staging, *(p for p in staging.rglob("*") if p.is_dir())]:
         os.chmod(directory, 0o755)  # noqa: S103

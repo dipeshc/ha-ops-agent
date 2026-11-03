@@ -50,7 +50,8 @@ These hold at every stage; each has tests named in the owning document.
   configuration, `secrets.yaml`, `.storage`, the backups and the add-on's
   data are unreachable at the operating-system level; the daemon checks
   this before every run and refuses to start the AI otherwise
-  ([privsep.md](privsep.md)).
+  ([privsep.md](privsep.md)). The configuration copy the AI reads is
+  redacted, with git on or off ([ai-runner.md](ai-runner.md) R10).
 - INV5. **Untrusted text is data.** Device names, logs, release notes,
   documents and chat messages reach the AI fenced as data, are rendered by
   the panel as text, and never title a need or a push; model text appears

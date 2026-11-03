@@ -20,7 +20,8 @@ Health check and pushes:
   Assist are reported too.
 - An item the agent snoozed or accepted in its triage run, or that you
   acked in the panel, no longer stays in Needs you: it shows as resolved
-  with who acked it, until when and why. Its critical push still goes out.
+  with who acked it, until when and why, and you can still accept or snooze
+  it there yourself. Its critical push still goes out.
 - `sensor.ops_agent` carries daemon-written attributes only; the triage
   and update-night summaries stay in the panel.
 - A push from the agent's own run links to the chat but has no Reply

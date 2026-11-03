@@ -159,9 +159,13 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   admin in the panel, is handled, not open: it leaves the open items (the
   panel's health list, the status sensor's count, Needs you) and its item is
   shown resolved with who acked it, until when and why ("snoozed until … by
-  the agent: <reason>", "accepted as normal by you"). The safety net (H17)
-  still pushes every critical item of the check, acked in the run or not.
-  Tests `test_in_run_effects`, `test_user_ack_from_panel_can_accept`.
+  the agent: <reason>", "accepted as normal by you"). An item the agent
+  acked keeps the panel's `snooze` and `accept` actions there, so the admin
+  can override it (the only accept of a critical item stays the admin's)
+  without it entering Needs you. The safety net (H17) still pushes every
+  critical item of the check, acked in the run or not.
+  Tests `test_in_run_effects`, `test_user_ack_from_panel_can_accept`,
+  `test_access_hardware_is_its_own_critical_item_the_agent_cannot_accept`.
 
 ## Triage
 

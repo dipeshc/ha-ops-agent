@@ -822,9 +822,13 @@ class Composer:
         reason = ctx.redact(clean_text(str(handled.get("reason") or ""), 160))
         gist = f"{verb} by {'you' if who == 'you' else 'the agent'}" + (f": {reason}" if reason else "")
         title = ctx.redact(clean_text(str(raw.get("summary") or raw.get("key")), 120))
-        return Spec(key=f"health:{raw.get('key')}", kind="check", title=title, state="done", kicker="Health check",
+        spec = Spec(key=f"health:{raw.get('key')}", kind="check", title=title, state="done", kicker="Health check",
                     gist=gist, since=ctx.health_at, created=ctx.health_at, as_of=ctx.health_at,
                     source={"health": str(raw.get("key"))}, actor=who, pushes=False)  # fmt: skip
+        if who == "agent":
+            # The admin can still override the agent's ack (the only accept of a critical item is theirs).
+            spec.actions = [act("snooze", "Snooze 7 days"), act("accept", "Accept as normal", "text")]
+        return spec
 
     # ------------------------------------------------------------ maintenance
 

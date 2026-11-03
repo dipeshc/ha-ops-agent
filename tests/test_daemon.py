@@ -320,6 +320,16 @@ async def test_access_hardware_is_its_own_critical_item_the_agent_cannot_accept(
     ack = read_json(h.paths.baseline_file, {})["acks"]["access:lock.side_door"]
     assert ack["accepted"] is False and ack["by"] == "claude"
     assert "lock.side_door" not in read_json(h.paths.baseline_file, {}).get("accepted_access", [])
+    # Snoozed by the agent: out of Needs you, but the admin can still accept it from History.
+    d = h.current
+    assert d is not None and d.store is not None and d.open_items() == []
+    record = d.store.item_by_key("health:access:lock.side_door")
+    assert record is not None and record["state"] == "done" and not record["needs"]
+    assert {a["id"] for a in record["actions"]} == {"snooze", "accept"}
+    assert await d.user_ack("access:lock.side_door", days=30, accept=True)
+    assert read_json(h.paths.baseline_file, {})["accepted_access"] == ["lock.side_door"]
+    record = d.store.item_by_key("health:access:lock.side_door")
+    assert record is not None and record["gist"].startswith("accepted as normal by you") and not record["actions"]
 
 
 async def test_run_cap(h: Harness) -> None:

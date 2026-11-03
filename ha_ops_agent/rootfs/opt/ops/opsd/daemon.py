@@ -1080,8 +1080,12 @@ class Daemon:
         return [Item(**i) for i in raw.get("items", []) if isinstance(i, dict)]
 
     async def user_ack(self, key: str, *, days: int, accept: bool) -> bool:
-        """An admin acknowledgement from the ingress panel (the only way to accept a critical item)."""
-        item = next((i for i in self.open_items() if i.key == key), None)
+        """An admin acknowledgement from the ingress panel (the only way to accept a critical item).
+
+        It acts on an open item, or on one the agent acked in its run since the check (shown resolved in
+        History): the admin can accept it or snooze it their own way.
+        """
+        item = next((i for i in self.open_items() if i.key == key), None) or self._agent_handled(key)
         if item is None:
             return False
         async with self._cycle_running:
@@ -1104,6 +1108,18 @@ class Daemon:
         _LOGGER.info("user ack", extra={"key": key, "days": days, "accept": accept})
         await self.publish_status()
         return True
+
+    def _agent_handled(self, key: str) -> Item | None:
+        """A health item the agent acked in its run since the check (from `open-items.json`'s handled list)."""
+        raw = read_json(self.paths.open_items_file, {})
+        for handled in (raw.get("handled") or []) if isinstance(raw, dict) else []:
+            found = handled.get("item") if isinstance(handled, dict) else None
+            if handled.get("by") == "agent" and isinstance(found, dict) and found.get("key") == key:
+                try:
+                    return Item(**found)
+                except TypeError:
+                    return None
+        return None
 
     async def _triage(
         self, items: list[Item], snapshot: Snapshot, trigger: str, now: datetime, redactor: Redactor

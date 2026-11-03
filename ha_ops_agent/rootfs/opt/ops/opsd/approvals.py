@@ -78,6 +78,8 @@ class ApprovalError(ValueError):
 # The parts of a plan item an approval is about: what is installed, why it needs approval,
 # and what the release-note review said when the admin looked at it.
 HASHED_FIELDS = ("entity_id", "kind", "title", "installed", "latest", "tier", "bump", "reason", "review", "held")
+# What identifies the thing being installed: tonight's plan item must match the approved one on each.
+IDENTITY_FIELDS = ("kind", "title", "slug", "hacs_repo")
 
 
 def plan_hash(item: Mapping[str, Any], plan_run: int, created_at: str) -> str:
@@ -248,8 +250,7 @@ class Approvals:
         plan = found.get("plan") or {}
         if not is_update(found):
             return False
-        run = self._store.update_run(int(plan.get("plan") or 0))
-        source = next((i for i in (run or {}).get("plan", []) if i.get("entity_id") == plan.get("entity_id")), None)
+        source = self._source(found)
         if source is None:
             return False
         if not same_version(source.get("installed"), plan.get("from")) or not same_version(
@@ -258,6 +259,12 @@ class Approvals:
             return False
         recomputed = plan_hash(source, int(plan["plan"]), str(found["created_at"]))
         return hmac.compare_digest(recomputed, str(found["plan_hash"]))
+
+    def _source(self, found: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        """The plan item the approval was given for, as stored in its update run (not the approval's own copy)."""
+        plan = found.get("plan") or {}
+        run = self._store.update_run(int(plan.get("plan") or 0))
+        return next((i for i in (run or {}).get("plan", []) if i.get("entity_id") == plan.get("entity_id")), None)
 
     def _mismatch(self, found: Mapping[str, Any], current: Mapping[str, Any] | None) -> str | None:
         """None when it is bound to its plan and the live update is still exactly that action; else why not."""
@@ -328,10 +335,35 @@ class Approvals:
             return f"Home Assistant now offers {item.get('installed')} → {item.get('latest')} instead"
         if not self.bound(found):
             return "the update plan it was given for changed"
+        source = self._source(found) or {}
+        changed = [k for k in IDENTITY_FIELDS if (item.get(k) or None) != (source.get(k) or None)]
+        if changed:
+            # What is installed and how (an add-on slug, a HACS repository) is part of what was approved.
+            return f"the update is no longer the one approved ({', '.join(changed)} changed)"
         return None
 
     def consume(self, approval_id: str, job_id: int) -> bool:
-        return self._store.decide_approval(approval_id, expect=("approved",), to="used", now=self._clock(), job=job_id)
+        """Single use, when the job is created: approved, unexpired, still bound and for exactly this job."""
+        found = self._store.approval(approval_id)
+        now = self._clock()
+        if found is None or not is_update(found) or found["state"] != "approved" or not found["decided_by"]:
+            return False
+        if now >= datetime.fromisoformat(found["expires_at"]):
+            self._store.decide_approval(approval_id, expect=("approved",), to="expired", now=now)
+            return False
+        job = self._store.update_job(job_id)
+        plan = found["plan"]
+        if (
+            job is None
+            or not self.bound(found)
+            or plan.get("entity_id") != job.entity_id
+            or not same_version(plan.get("from"), job.from_version)
+            or not same_version(plan.get("to"), job.to_version)
+        ):
+            self._store.decide_approval(approval_id, expect=("approved",), to="void", now=now,
+                                        detail="the update plan it was given for changed")  # fmt: skip
+            return False
+        return self._store.decide_approval(approval_id, expect=("approved",), to="used", now=now, job=job_id)
 
     def proves(self, approval_id: str | None, job: UpdateJob) -> bool:
         """The executor's check: this job consumed this approval, for exactly this action."""

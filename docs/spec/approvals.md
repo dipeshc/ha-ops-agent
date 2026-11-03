@@ -58,15 +58,22 @@ Tests: `tests/test_approvals.py`, `tests/test_dashboards.py`, `tests/test_items.
   missing, not bound, not `on`, or its versions changed (the daemon fetches
   the live entity before confirming). Only then `pending -> approved`. Test
   `test_a_version_change_voids_the_approval`.
-- A11. **Single use.** The executor consumes with a compare-and-set
-  `approved -> used` recording the job id; `proves()` requires state `used`,
+- A11. **Single use.** The job's creation consumes it with a compare-and-set
+  `approved -> used` recording the job id, and only when the approval is
+  unexpired (else `expired`), still bound, and the job is for the same
+  entity and versions (else `void`); `proves()` requires state `used`,
   the same job, a `decided_by`, a still-valid binding and the same entity and
   versions. Tests `test_replay_is_refused_and_an_approval_is_used_once`,
-  `test_executors_need_a_consumed_approval_for_the_approve_tier`.
+  `test_executors_need_a_consumed_approval_for_the_approve_tier`,
+  `test_using_an_approval_checks_its_expiry_its_plan_and_the_job`.
 - A12. The nightly plan annotates items with `approved` only for approved,
   still-approvable items (and, for a now-run, only `run_when == now`), and is
   the only pass that voids mismatched approvals (`approval.void` by
-  `daemon`). Test `test_now_only_runs_approved_items_not_the_auto_ones`.
+  `daemon`). An approval matches tonight's item only with the same installed
+  and latest versions, a valid binding, and the same kind, title, add-on slug
+  and HACS repository as the plan item it was given for. Tests
+  `test_now_only_runs_approved_items_not_the_auto_ones`,
+  `test_an_approval_is_void_when_what_it_installs_changed`.
 - A13. Reject creates and immediately rejects a request; a rejection within
   the last 7 days shows the item as `cancelled` ("rejected by you").
 - A14. Withdraw voids the live approval named by the item (`withdrawn by

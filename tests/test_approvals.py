@@ -235,3 +235,32 @@ async def test_the_approval_is_checked_against_its_plan_row(rig: Rig) -> None:
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
     assert rig.ops.installs() == [] and state(rig, approval) == "void"
+
+
+async def test_using_an_approval_checks_its_expiry_its_plan_and_the_job(rig: Rig) -> None:
+    """Single use when the job is created: an expired approval or one for another action is never used."""
+    from opsd.updates import job_spec
+
+    approval, outcome = await approve(rig, WEATHER)
+    run, items = await latest_plan(rig)
+    assert outcome == "approved"
+    [wrong] = rig.store.add_update_jobs(run, [job_spec(items[WEATHER] | {"latest": "v2.4.9"})], now=rig.now)
+    assert not rig.approvals.consume(approval, wrong.id) and state(rig, approval) == "void"
+    assert not rig.approvals.consume(approval, 999_999)
+
+    late, _ = await approve(rig, WEATHER)
+    run, items = await latest_plan(rig)
+    [right] = rig.store.add_update_jobs(run, [job_spec(items[WEATHER])], now=rig.now)
+    rig.now += APPROVAL_TTL + timedelta(hours=5)
+    assert not rig.approvals.consume(late, right.id) and state(rig, late) == "expired"
+
+
+async def test_an_approval_is_void_when_what_it_installs_changed(rig: Rig) -> None:
+    """Same entity and versions, but another HACS repository behind it: the approval does not carry over."""
+    approval, _ = await approve(rig, WEATHER)
+    rig.ops.hacs["612978245"]["full_name"] = "someone-else/ha-acme-weather"
+    rig.now += timedelta(days=1)
+    await rig.manager.run_window()
+    assert rig.ops.installs() == [] and state(rig, approval) == "void"
+    found = rig.store.approval(approval)
+    assert found is not None and "hacs_repo changed" in found["detail"]

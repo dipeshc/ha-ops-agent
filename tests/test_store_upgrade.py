@@ -214,7 +214,11 @@ def test_an_open_approval_is_still_bound_and_usable_once(upgraded: Store) -> Non
     # The binding is recomputed from the plan row exactly as before the upgrade.
     assert approvals.bound(found)
     assert upgraded.decide_approval("a" * 32, expect=("pending",), to="approved", now=NOW, by=ADMIN)
-    assert approvals.consume("a" * 32, 9) and not approvals.consume("a" * 32, 9)  # single use survives
+    plan = found["plan"]
+    *_, job = upgraded.add_update_jobs(4, [{"entity_id": plan["entity_id"], "kind": "hacs", "title": "t",
+                                          "from_version": plan["from"], "to_version": plan["to"], "target": {}}],
+                                     now=NOW)  # fmt: skip
+    assert approvals.consume("a" * 32, job.id) and not approvals.consume("a" * 32, job.id)  # single use survives
     used = upgraded.approval("b" * 32)
     assert used is not None and used["state"] == "used" and used["used_by_job"] == 3
     # Nothing reads a request, a change or a fact as an approval.

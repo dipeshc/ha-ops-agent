@@ -19,9 +19,21 @@ ENTRIES = {
                 "data": {"device_name": "Household Phone", "app_data": {"push_url": "u", "push_token": "p"}},
             },
             {
+                # Another user's phone with the same name, registered earlier.
                 "domain": "mobile_app",
                 "data": {
                     "device_name": "Admin Phone",
+                    "user_id": "u-other",
+                    "device_id": "d-other",
+                    "app_data": {"push_url": "https://elsewhere/send", "push_token": "theirs"},
+                },
+            },
+            {
+                "domain": "mobile_app",
+                "data": {
+                    "device_name": "Admin Phone",
+                    "user_id": "u-admin",
+                    "device_id": "d-admin",
                     "app_id": "io.robbie.HomeAssistant",
                     "app_version": "2026.10",
                     "os_version": "26.1",
@@ -35,11 +47,15 @@ ENTRIES = {
 
 
 def test_extract_registration_matches_service_name() -> None:
-    reg = extract_registration(ENTRIES, "mobile_app_admin_phone")
+    reg = extract_registration(ENTRIES, "mobile_app_admin_phone", "u-admin", "d-admin")
     assert reg is not None and reg["push_token"] == "tok"
+    # Only the admin's registration: never another user's phone named alike, whichever was registered first.
+    assert extract_registration(ENTRIES, "mobile_app_admin_phone", "u-admin")["push_token"] == "tok"  # type: ignore[index]
+    assert extract_registration(ENTRIES, "mobile_app_admin_phone", "u-admin", "d-other") is None
+    assert extract_registration(ENTRIES, "mobile_app_admin_phone", "u-nobody") is None
     assert reg["registration_info"] == {"app_id": "io.robbie.HomeAssistant", "app_version": "2026.10",
                                         "webhook_id": "wh", "os_version": "26.1"}  # fmt: skip
-    assert extract_registration(ENTRIES, "mobile_app_nobody") is None
+    assert extract_registration(ENTRIES, "mobile_app_nobody", "u-admin") is None
     body = relay_payload(reg, Push("t", "m", urgent=True))
     assert body["data"]["push"] == {"interruption-level": "time-sensitive"}
     assert body["push_token"] == "tok" and body["message"] == "m"
@@ -79,7 +95,9 @@ def test_relay_fallback(tmp_path: Path) -> None:
     assert n.send(Push("t", "m"), core_up=True, now=NOW) == "failed"  # no cached registration yet
     entries_file = tmp_path / "core.config_entries"
     write_json(entries_file, ENTRIES)
-    assert n.cache_registration(entries_file)
+    assert not n.cache_registration(entries_file, None)  # no verified admin: the cache is left alone
+    assert not (tmp_path / "push.json").exists()
+    assert n.cache_registration(entries_file, "u-admin", "d-admin")
     assert (tmp_path / "push.json").stat().st_mode & 0o777 == 0o600
     assert n.send(Push("t", "m", urgent=True), core_up=False, now=NOW) == "relayed"
     assert relays[0][0]["push_token"] == "tok"

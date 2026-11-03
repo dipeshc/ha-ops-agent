@@ -86,17 +86,22 @@ def push_data(push: Push) -> dict[str, Any]:
     return data
 
 
-def extract_registration(config_entries: dict[str, Any], notify_service: str) -> dict[str, Any] | None:
-    """The mobile_app registration behind `notify.<notify_service>`, for the relay.
+def extract_registration(config_entries: dict[str, Any], notify_service: str, user_id: str,
+                         device_id: str | None = None) -> dict[str, Any] | None:  # fmt: skip
+    """The admin's mobile_app registration behind `notify.<notify_service>`, for the relay.
 
-    The legacy notify service is named `mobile_app_<slug(device_name)>`.
+    The legacy notify service is named `mobile_app_<slug(device_name)>`. Several registrations can carry that
+    name (another user's phone named alike), so only the one `inbound.admin_identity` chose qualifies: the
+    admin's `user_id` (and its `device_id` when known).
     """
     wanted = notify_service.removeprefix("mobile_app_")
     for entry in config_entries.get("data", {}).get("entries", []):
         if entry.get("domain") != "mobile_app":
             continue
         data = entry.get("data", {})
-        if slugify(str(data.get("device_name", ""))) != wanted:
+        if slugify(str(data.get("device_name", ""))) != wanted or data.get("user_id") != user_id:
+            continue
+        if device_id is not None and data.get("device_id") != device_id:
             continue
         app_data = data.get("app_data", {})
         if "push_url" not in app_data or "push_token" not in app_data:
@@ -216,16 +221,20 @@ class Notifier:
         _LOGGER.info("push", extra={"outcome": outcome, "title": push.title, "urgent": push.urgent})
         return outcome
 
-    def cache_registration(self, config_entries_file: Path) -> bool:
-        """Refresh the relay registration from Core's storage (read-only)."""
-        if not self._service:
+    def cache_registration(self, config_entries_file: Path, user_id: str | None, device_id: str | None = None,
+                           ) -> bool:  # fmt: skip
+        """Refresh the relay registration from Core's storage (read-only): the verified admin's only.
+
+        Without a verified admin (`user_id` None) the cache is left as it is.
+        """
+        if not self._service or not user_id:
             return False
         try:
             entries = json.loads(config_entries_file.read_text())
         except (OSError, json.JSONDecodeError) as err:
             _LOGGER.warning("cannot read config entries", extra={"error": str(err)[:200]})
             return False
-        registration = extract_registration(entries, self._service)
+        registration = extract_registration(entries, self._service, user_id, device_id)
         if registration is None:
             _LOGGER.warning("no mobile_app registration for notify service", extra={"service": self._service})
             return False

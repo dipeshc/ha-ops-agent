@@ -42,6 +42,7 @@ import hmac
 import logging
 import re
 import sqlite3
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -192,8 +193,20 @@ class InboundGate:
     ) -> None:
         self._store = store
         self._queue = queue
+        self._admin: AdminIdentity | None = None
+        self.verified_at: float | None = None
         self.admin = admin
         self._limiter = limiter or RejectionLimiter(30)
+
+    @property
+    def admin(self) -> AdminIdentity | None:
+        return self._admin
+
+    @admin.setter
+    def admin(self, identity: AdminIdentity | None) -> None:
+        """Set the admin as Home Assistant just confirmed it (`verified_at`, monotonic seconds)."""
+        self._admin = identity
+        self.verified_at = time.monotonic() if identity is not None else None
 
     def _audit(self, event: Mapping[str, Any], *, decision: str, detail: str, now: datetime) -> None:
         if self._store is None:

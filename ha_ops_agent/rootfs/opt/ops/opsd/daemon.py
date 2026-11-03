@@ -21,6 +21,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -133,8 +134,11 @@ UPDATE_TASK = "update.window"
 HEALTH_OVERDUE = timedelta(hours=26)
 OVERDUE_RETRY = timedelta(hours=6)
 OVERDUE_GRACE = timedelta(hours=2)
-ADMIN_REFRESH_KNOWN_S = 24 * 3600
-ADMIN_REFRESH_UNKNOWN_S = 3600
+# The panel trusts the admin id only this long after Home Assistant last confirmed it (an active, non-system
+# `system-admin`), so a demoted or deactivated admin loses the panel within minutes; the refresh runs sooner.
+ADMIN_VERIFIED_TTL_S = 300
+ADMIN_REFRESH_KNOWN_S = 240
+ADMIN_REFRESH_UNKNOWN_S = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,7 +340,7 @@ class Daemon:
                 tz=lambda: self.tz,
                 send=self.send_now,
                 kill=self.runner.kill,
-                admin_user=lambda: self.inbound.admin.user_id if self.inbound.admin is not None else None,
+                admin_user=self.admin_user,
                 api_key=lambda: self.runner.api_key,
             )
             self.runner._caps = self.usage.caps
@@ -905,7 +909,10 @@ class Daemon:
         if self.backups is not None and self.backups.self_heal_due(snapshot.backups, acting=self.options.acting):
             self.start_backup(by="agent", admin=False)
         if snapshot.core.get("api_up"):
-            await asyncio.to_thread(self.notifier.cache_registration, self.paths.core_config_entries)
+            admin = self.inbound.admin
+            await asyncio.to_thread(self.notifier.cache_registration, self.paths.core_config_entries,
+                                    admin.user_id if admin is not None else None,
+                                    admin.device_id if admin is not None else None)  # fmt: skip
 
         expected = self._expected_unavailable(snapshot)
         raw_baseline = read_json(self.paths.baseline_file, None)
@@ -1716,6 +1723,13 @@ class Daemon:
             await self.publish_status()
         return identity
 
+    def admin_user(self) -> str | None:
+        """The admin's user id for the panel, only while Home Assistant confirmed it in the last 5 minutes."""
+        admin, verified = self.inbound.admin, self.inbound.verified_at
+        if admin is None or verified is None or monotonic() - verified > ADMIN_VERIFIED_TTL_S:
+            return None
+        return admin.user_id
+
     async def panel_ai(self, on: bool, admin_user: str) -> None:
         """Resume or stop AI from the panel (already checked to be the admin)."""
         if self.usage is None:
@@ -1728,7 +1742,7 @@ class Daemon:
         self.hub.publish("state", None, {})
 
     async def admin_loop(self) -> None:
-        """Re-resolve the admin identity: hourly until known (Core may be down at start), then daily."""
+        """Re-resolve the admin identity: every 10 minutes until known (Core may be down at start), then every 4."""
         while True:
             try:
                 identity = await self.refresh_admin()
@@ -1895,7 +1909,7 @@ class Daemon:
             port=port,
             api=PanelHandlers(self),
             hub=self.hub,
-            admin_user=lambda: self.inbound.admin.user_id if self.inbound.admin is not None else None,
+            admin_user=self.admin_user,
             shell=PanelServer.load_shell(self.paths.panel_shell),
             scripts={"changes.js": PanelServer.load_shell(self.paths.panel_shell.with_name("changes.js")) or ""},
         )

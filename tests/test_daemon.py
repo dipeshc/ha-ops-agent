@@ -771,9 +771,15 @@ async def test_refresh_admin_requires_an_active_admin(h: Harness, monkeypatch: p
     write(h.paths.core_config_entries, entries)
     identity = await d.refresh_admin()
     assert identity is not None and identity.user_id == "u1" and d.inbound.admin == identity
-    assert d.status_view()["inbound"] == "subscribed"
+    assert d.status_view()["inbound"] == "subscribed" and d.admin_user() == "u1"
+    # The panel trusts the id only while Home Assistant confirmed it recently.
+    assert d.inbound.verified_at is not None
+    d.inbound.verified_at -= daemon_mod.ADMIN_VERIFIED_TTL_S + 1
+    assert d.admin_user() is None
+    assert await d.refresh_admin() == identity and d.admin_user() == "u1"
     users[0]["group_ids"] = ["system-users"]
-    assert await d.refresh_admin() is None and d.inbound.admin is None
+    assert await d.refresh_admin() is None and d.inbound.admin is None and d.admin_user() is None
+    assert daemon_mod.ADMIN_REFRESH_KNOWN_S < daemon_mod.ADMIN_VERIFIED_TTL_S
 
 
 async def test_a_notify_device_of_a_non_admin_fails_closed(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -199,7 +199,11 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   URL (any other URL is replaced by the panel URL), `time-sensitive`
   interruption level when urgent, and actions; when Core is down or the call
   fails, the cached mobile-app push URL (stored 0600 under `/data/secrets`)
-  is used as a relay. Test `test_relay_fallback`.
+  is used as a relay. The cache holds only the verified admin's
+  registration (the one the admin identity chose, by user and device id),
+  never another registration with the same device name; without a
+  verified admin it is not refreshed. Tests `test_relay_fallback`,
+  `test_extract_registration_matches_service_name`.
 - N6. When the push device's user is not an active administrator, the agent
   fails closed and sends nothing, safety pushes included
   ([configuration.md](configuration.md) C5).

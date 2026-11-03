@@ -20,12 +20,16 @@ Tests: `tests/test_panel.py`, `tests/test_panel_shell.py`,
 - N2. **Admin check.** Every route except `/healthz` MUST require the
   ingress header `x-remote-user-id` to equal, in constant time, the one
   admin user id the daemon knows: the active administrator who owns the
-  configured push device (resolved hourly until known, then daily). Unknown
+  configured push device, as Home Assistant confirmed it within the last 5
+  minutes (re-resolved every 4 minutes once known, every 10 until known; a
+  demoted or deactivated admin loses the panel within minutes, and a
+  confirmation older than 5 minutes counts as unknown). Unknown
   admin, empty or different header: 403 `admin_only`. Home Assistant's
   `panel_admin: true` limits the sidebar entry to administrators; the daemon
   narrows that to the one user. Other administrators are refused. Tests
   `test_every_get_needs_the_admin`,
-  `test_admin_identity_prefers_the_active_admins_registration`.
+  `test_admin_identity_prefers_the_active_admins_registration`,
+  `test_refresh_admin_requires_an_active_admin`.
 - N3. **CSRF.** A per-process token is embedded in the shell's meta tag and
   returned as `csrf` by `GET api/state`. Every POST MUST carry
   `Content-Type: application/json` (else 415 `json_required`), the header

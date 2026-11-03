@@ -985,9 +985,9 @@ class ChangeManager:
                 outcome = Outcome("failed", clean_text(str(err), 200))
         self._audit(f"change.{action}", change_id, outcome=outcome.state, detail=outcome.detail)
         if self.activity is not None:
+            # The admin applied it and sees the outcome on its item: an event there, never a chat ping.
             self.activity("change", f"Config change #{change_id} ({action}): {outcome.state}", outcome.detail,
-                          needs_admin=outcome.state in ("failed", "refused"), ref={"change": change_id},
-                          item=f"change:{change_id}")  # fmt: skip
+                          ref={"change": change_id}, item=f"change:{change_id}")  # fmt: skip
         self._publish()
         return outcome
 

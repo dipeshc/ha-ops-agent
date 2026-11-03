@@ -757,6 +757,22 @@ async def test_a_refused_install_fails_without_rollback(rig: Rig) -> None:
     assert job.state == "failed" and "refused" in job.detail and job.rollback_attempts == 0
 
 
+async def test_a_failed_install_asks_only_when_it_failed_twice(rig: Rig) -> None:
+    only_auto(rig, CORE)
+    rig.ops.fail.add(CORE)
+    await rig.manager.run_window()
+    core = rig.ops.entities[CORE]["attributes"]["latest_version"]
+    # Once: nothing changed and the next window tries again, so it is History and the plan, not a question.
+    item = rig.item(CORE, core)
+    assert item["state"] == "scheduled" and "not installed last time" in item["gist"] and not item["needs"]
+    assert not [m for m in await rig.flush() if m.tag == item["id"]]
+    rig.now += timedelta(days=1)
+    await rig.manager.run_window()
+    item = rig.item(CORE, core)
+    assert item["state"] == "failed" and item["need"]["kind"] == "ack" and "2 times" in item["gist"]
+    assert [m for m in await rig.flush() if m.tag == item["id"]]
+
+
 async def test_unreadable_health_fails_closed(rig: Rig) -> None:
     only_auto(rig, CARD)
     rig.ops.probe_error = True

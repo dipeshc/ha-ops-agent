@@ -91,6 +91,8 @@ KINDS = {"core": "Core update", "addon": "Add-on update", "hacs": "HACS update",
 USUAL_S = {"core": 600, "addon": 240, "hacs": 120, "firmware": 600, "os": 900}
 JOBS_SINCE = timedelta(days=14)
 RECENT_REJECT = timedelta(days=7)
+# An install that failed and changed nothing asks the admin only once the same version failed this often.
+REPEATED_FAILURES = 2
 RESURFACE = timedelta(days=1)
 # A push that was not delivered (failed, rate limited) is tried again after this long.
 RETRY = timedelta(minutes=15)
@@ -410,24 +412,20 @@ class Composer:
                               "usual_s": self._usual(kind, jobs)}  # fmt: skip
                 return base
         if job is not None:
-            settled = self._settled(base, job, live)
+            settled = self._settled(base, job, live, jobs)
             if settled is not None:
                 return settled
         if item is None:
             # The latest plan no longer lists it (installed or superseded): a live approval for it is not enough.
             if job is not None and job.state == "skipped":
-                base.state, base.gist = "cancelled", f"not installed: {clean_text(job.detail, 160)}"
+                # Home Assistant no longer offers this version: nothing is left to approve, so it is History.
+                approved = " (approved, but Home Assistant no longer offers it)" if needs_admin(job) else ""
+                base.state, base.gist = "cancelled", f"not installed: {clean_text(job.detail, 160)}{approved}"
                 base.since = job.finished_at
-                token = f"job:{job.id}"
-                if needs_admin(job) and not acked(self.store, base.key, token):
-                    # An approved job that did not run always tells the admin (`updates.needs_admin`).
-                    base.state = "failed"
-                    base.need = need("ack", f"Approved but not installed: {clean_text(job.detail, 300)}.",
-                                     act("ack", "OK"))  # fmt: skip
-                    base.source["ack"] = token
                 return base
             return None
-        skipped = f" (not installed last time: {clean_text(job.detail, 120)})" if job and job.state == "skipped" else ""
+        skipped = (f" (not installed last time: {clean_text(job.detail, 120)})"
+                   if job and job.state in ("skipped", "failed") else "")  # fmt: skip
         if item.get("tier") == Tier.AUTO and not item.get("held"):
             base.when = self._window_at()
             if ctx.gate is None:
@@ -524,8 +522,10 @@ class Composer:
                       "usual_s": self._usual(job.kind, jobs)}  # fmt: skip
         return base
 
-    def _settled(self, base: Spec, job: UpdateJob, live: Mapping[str, dict[str, Any]]) -> Spec | None:
-        """A finished job's item, or None when the plan decides (a skipped job, an acknowledged failure)."""
+    def _settled(self, base: Spec, job: UpdateJob, live: Mapping[str, dict[str, Any]],
+                 jobs: list[UpdateJob]) -> Spec | None:  # fmt: skip
+        """A finished job's item, or None when the plan decides (a skipped job, an acknowledged failure, an install
+        that failed once and changed nothing: the next window tries it again)."""
         store = self.store
         key = base.key
         reboot = _dict(job.target.get("reboot"))
@@ -565,6 +565,11 @@ class Composer:
             urgent = job.state in ("rolled_back", "rollback_failed") or fell_back
             if acked(store, key, token):
                 return None
+            failures = [j for j in jobs if (j.entity_id, j.to_version) == (job.entity_id, job.to_version)
+                        and j.state == "failed"]  # fmt: skip
+            if job.state == "failed" and not fell_back and len(failures) < REPEATED_FAILURES:
+                # Nothing changed on the house and the next window tries again: History, not Needs you.
+                return None
             base.state, base.since = "failed", job.finished_at
             detail = clean_text(job.detail, 300)
             regressions = clean_text("; ".join(str(r) for r in job.regressions[:2]), 200)
@@ -586,8 +591,9 @@ class Composer:
                 text = (f"{detail[:1].upper()}{detail[1:]}. Automatic updates are paused and {job.to_version} is held. "
                         "Check Settings > System > Repairs and the host log before you try it again.")  # fmt: skip
             else:
-                base.gist = f"not installed: {clean_text(job.detail, 120)}"
-                text = f"Not installed: {detail}. Nothing changed on the house."
+                base.gist = f"not installed {len(failures)} times: {clean_text(job.detail, 120)}"
+                text = (f"Not installed {len(failures)} times in a row: {detail}. Nothing changed on the house, but "
+                        "it keeps failing, so it needs a look.")  # fmt: skip
             secondary = [act("resume_updates", "Resume automatic updates")] if self.ctx.paused else []
             base.need = need("ack", text, act("ack", "OK"), secondary)
             base.source["ack"] = token
@@ -684,12 +690,10 @@ class Composer:
                     spec.actor, spec.event = "you", "Approved by you"
                     return spec
                 if not complete:
-                    # Never approvable: the admin could not see all of it.
-                    spec.gist = "the diff cannot be shown in full; reject it"
-                    spec.need = need("ack", f"Change #{cid} to {paths} cannot be shown in full, so it cannot be "
-                                     "applied. Reject it; the agent can propose it again in smaller parts.",
-                                     act("reject", "Reject"))  # fmt: skip
-                    spec.since = str(row["created_at"])
+                    # Never approvable (the admin could not see all of it), and it expires by itself: no question.
+                    spec.state = "proposed"
+                    spec.gist = "the diff cannot be shown in full, so it cannot be applied; it expires by itself"
+                    spec.actions = [act("reject", "Reject", "text")]
                     return spec
                 text = (f"Change #{cid} to {paths}. Apply it and the daemon checks the config, reloads, commits "
                         "and pushes, and undoes it if anything fails.")  # fmt: skip
@@ -720,11 +724,8 @@ class Composer:
                 spec.state, spec.gist = "done", "reverted"
                 spec.since = str(row["updated_at"])
             case "failed":
-                token = f"change:{cid}:{row['updated_at']}"
-                spec.state, spec.gist, spec.since = "failed", f"failed: {detail}", str(row["updated_at"])
-                if not acked(self.store, key, token):
-                    spec.need = need("ack", f"The change failed and was not applied: {detail}.", act("ack", "OK"))
-                    spec.source["ack"] = token
+                # The daemon undid it and nothing changed: the admin who applied it sees the outcome here.
+                spec.state, spec.gist, spec.since = "failed", f"failed, not applied: {detail}", str(row["updated_at"])
             case "rejected":
                 spec.state, spec.gist, spec.since = "cancelled", "rejected", str(row["updated_at"])
                 spec.actor = "you"
@@ -753,15 +754,16 @@ class Composer:
         return not finding.asks(str(maint.meta(self.store).get("installed") or ""), self.now)
 
     def fact(self, fact: Mapping[str, Any]) -> Spec | None:
-        """A house fact noted without a change proposal: the admin acknowledges it."""
+        """A house fact noted without a change proposal (no git or facts document): kept in the agent's store, in
+        History. Nothing about it needs the admin."""
         key = f"fact:{fact['id']}"
         if fact.get("status") != "pending" or fact.get("change_id"):
             return None
         text = clean_text(str(fact.get("text") or ""), 300)
-        return Spec(key=key, kind="proposal", title="House fact without a proposal", state="waiting",
-                    kicker="House fact", gist=text[:120], created=str(fact.get("created_at") or ""),
-                    since=str(fact.get("created_at") or ""), source={"fact": int(fact["id"])},
-                    need=need("ack", f"Not proposed as a change: {text}", act("dismiss", "Reject")))  # fmt: skip
+        return Spec(key=key, kind="proposal", title="House fact without a proposal", state="done",
+                    kicker="House fact", gist=f"kept in the agent's store, not proposed as a change: {text}"[:300],
+                    created=str(fact.get("created_at") or ""), since=str(fact.get("created_at") or ""),
+                    source={"fact": int(fact["id"])}, pushes=False)  # fmt: skip
 
     # ------------------------------------------------------------------ tasks
 
@@ -827,7 +829,12 @@ class Composer:
                         urgent=critical, pushes=False)  # fmt: skip
             spec.facts = [{"label": "Health check", "value": observed, "at": ctx.health_at}]
             after = _parse(detail.get("needs_after"))
-            if after is not None and self.now < after:
+            if severity == "info":
+                # Information (a pending update version, the config repository's state): shown, never a question.
+                spec.state, spec.need = "proposed", None
+                spec.gist = "info: noted; it does not need you"
+                spec.actions = [act("snooze", "Snooze 7 days"), act("accept", "Accept as normal", "text")]
+            elif after is not None and self.now < after:
                 # Shown, but it asks only once it lasts (remote access drops for a while often).
                 spec.state, spec.need = "proposed", None
                 spec.gist = f"{severity}: watching; asks you if it lasts past {after.astimezone(self.tz):%H:%M}"
@@ -1243,7 +1250,8 @@ class ItemBook:
         spec = composer.fact(fact)
         old = self.store.item_by_key(f"fact:{fact_id}")
         if spec is None:
-            if old is None or (old["resolved_at"] and not old["needs"]):
+            # A noted fact is resolved already: its later decision still says what became of it.
+            if old is None:
                 return
             if fact.get("change_id"):
                 spec = self._resolved(old, "cancelled", f"proposed as config change #{fact['change_id']}")

@@ -18,7 +18,7 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `waiting`, `scheduled`, `running`, `done`, `failed`, `cancelled`,
   `expired`; the last four are terminal.
 - I2. Need kinds: `approval`, `confirm`, `physical`, `answer`, `ack`. The
-  0.19.1 code only ever produces `approval` and `ack`. Actors: `you`,
+  code only ever produces `approval` and `ack`. Actors: `you`,
   `daemon`, `agent`. Action ids match `[a-z_]{1,32}`; item ids match
   `[a-z]-[0-9a-z]{1,40}`.
 - I3. **Needs you** is exactly `state == waiting`, or `failed` with a need.
@@ -95,8 +95,18 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `approve` "Approve for tonight", secondary `approve_now` except for OS,
   and `reject`). A running job is `running` with phases; success is `done`;
   installed-but-reboot-pending is `waiting` with primary `reboot_window`
-  (never `failed`); failed, rolled back or rollback-failed is `failed` with
-  an `ack` need, urgent for the two rollback outcomes, and hidden once acked.
+  (never `failed`); rolled back, rollback-failed, an OS update that did not
+  activate after its reboot, or an install of the same version that failed
+  for the second time (`REPEATED_FAILURES`, within the 14 days of jobs read)
+  is `failed` with an `ack` need, urgent for the two rollback outcomes and
+  the OS fallback, and hidden once acked. An install that failed once and
+  changed nothing is no question: the item follows the plan again, its
+  gist saying "not installed last time", and the next window retries it.
+  An approved job that was skipped while Home Assistant no longer offers
+  the version is `cancelled` without a need (still offered, the update
+  asks for approval again). Tests
+  `test_a_failed_install_asks_only_when_it_failed_twice`,
+  `test_review_1_a_silent_night_does_not_swallow_a_later_needs_you_push`.
 - I7. Phases: `[Backup, Install, Reboot, Verify]` for OS, else
   `[Backup, Install, Verify]`; `usual_s` is the median of succeeded jobs of
   that kind, else 600 (core), 240 (add-on), 120 (HACS), 600 (firmware),
@@ -106,17 +116,25 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   already escalated.
 - I9. Proposal items: `open` is `waiting` (`apply` / `reject`, with the row's
   expiry), except a maintenance finding's change before its finding may ask,
-  which is `proposed` with the same actions ([maintenance.md](maintenance.md) M12a); approved is `running`; applied is `done` with a `revert` action;
-  failed is `failed` with an `ack`; rejected or stale is `cancelled`; expired
-  is `expired`; refused rows produce no item. The proposer's words go in
+  which is `proposed` with the same actions ([maintenance.md](maintenance.md)
+  M12a); approved is `running`; applied is `done` with a `revert` action;
+  failed is `failed` without a need (the daemon undid it; nothing changed);
+  an open change whose diff cannot be shown in full is `proposed` with
+  `reject` only (it cannot be applied and expires by itself); rejected or
+  stale is `cancelled`; expired is `expired`; refused rows produce no item.
+  Tests `test_review_4_a_failed_change_is_one_failed_item_that_does_not_ask`,
+  `test_a_change_not_shown_in_full_cannot_be_approved`. The proposer's words go in
   `agent`, never in the need or the push. Test
   `test_a_change_proposal_keeps_the_proposers_words_out_of_the_need_and_the_push`.
-- I10. Fact items are `waiting` with an `ack` (`dismiss`). Task items are
+- I10. A fact noted without a change proposal is `done` ("kept in the
+  agent's store, not proposed as a change"), never in Needs you; its later
+  decision still resolves it (I5a). Task items are
   `scheduled` (investigations `running`) with `cancel` or `stop`. Health
   items are `waiting` with an `ack` (`snooze` 7 days, `accept` 30 days),
   urgent when critical, and never pushed by the item book (the health check
-  pushes its own); a health item whose `needs_after` is in the future is
-  `proposed` without a need. A health item acked since the check ran (by
+  pushes its own); a health item whose `needs_after` is in the future, or
+  whose severity is `info`, is `proposed` without a need (with `snooze` and
+  `accept` as actions). Test `test_an_info_health_item_is_shown_and_never_asks`. A health item acked since the check ran (by
   the agent in its run, or by the admin) is `done` without a need, actor
   `agent` or `you`, with a gist that says who acked it, until when and why
   ([health.md](health.md) H13a); it never enters Needs you. Tests
@@ -151,10 +169,11 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 - I16. Activity entries are items too (there is no separate log): with an
   item key they become events of that item, otherwise standalone
   `activity:<n>` items, whose push is decided at the write like any other's. Quiet kinds
-  (`check`, `suppressed`, `updates`, `reminder`, `investigation`) fold in
-  History and never show on Home unless they need the admin; an entry that
-  needs the admin becomes `waiting` with an `ack` and also posts one chat
-  message naming it. Tests `test_activity_entries_become_items_and_events`,
+  (`check`, `suppressed`, `updates`, `reminder`, `investigation`, `note`)
+  fold in History and never show on Home unless they need the admin; an
+  entry that needs the admin becomes `waiting` with an `ack` and also posts
+  one chat message naming it. A config change's outcome is an event on its
+  item and never posts in the chat. Tests `test_activity_entries_become_items_and_events`,
   `test_a_standalone_entry_is_pushed_when_it_is_written`.
 - I17. Home sections: `needs` oldest `needs_since` first; `running`;
   `coming` (proposed, scheduled) by `at`; `suggestions` (proposed
@@ -165,6 +184,31 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   is the panel's job. Test `test_history_pages_newest_first`.
 - I18. Resolved items not in Needs you, and their events, are deleted after
   90 days.
+
+- I20. **The Needs-you rule.** Needs you holds only what cannot happen or
+  be resolved without the admin: an approval only the admin can give, a
+  physical task, a decision, or a failure the agent cannot recover from by
+  itself. Everything else is Coming up, History or the agent's own
+  handling. The paths that set a need:
+
+  | Source | Need | In Needs you when |
+  | --- | --- | --- |
+  | Update to approve (I6) | `approval` | APPROVE tier, not soaking and not in the soak-unknown hold ([updates.md](updates.md) U5, U5a) |
+  | Update installed, reboot pending (I6) | `approval` | always (the host reboot is the admin's) |
+  | Update job failed (I6) | `ack` | rolled back, rollback failed, OS fallback, or the same version failed twice |
+  | Update night (I8) | `ack` | a failure before the install that repeats until fixed, or a whole-night regression (updates paused) |
+  | Config change (I9) | `approval` | open and complete, except a maintenance fix before its finding may ask ([maintenance.md](maintenance.md) M12a) |
+  | Maintenance finding (I19) | `ack` / `approval` | within 30 days of its deadline, or a dashboard restore that failed ([maintenance.md](maintenance.md) M12) |
+  | Health item (I10) | `ack` | warning or critical, not handled by the agent in its run, and not waiting quietly |
+  | Activity entry (I16) | `ack` | a failed backup (self-heal or Back up now) |
+
+  Never in Needs you: soaking updates, updates without a known release
+  age (until U5a asks), an update failure that changed nothing the first
+  time, a skipped approved update no longer offered, a failed or
+  incomplete config change, a maintenance fix before its 30 days, a
+  finding without a deadline, a refused or restored dashboard change, a
+  noted fact, info health items, items the agent acked, and the agent's
+  own notes and messages.
 
 ## Pushes
 

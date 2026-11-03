@@ -1057,6 +1057,10 @@ def test_a_diff_is_never_cut_and_each_file_is_counted(w: World, monkeypatch: pyt
 
 
 async def test_a_change_not_shown_in_full_cannot_be_approved(w: World) -> None:
+    from opsd.live import Hub
+    from tests.test_items import book_for
+
+    book_for(w.store, Hub(), w.now)  # the daemon's item book
     files = [{"path": ALERT, "new_sha256": "b" * 64}, {"path": FRIDGE, "new_sha256": "c" * 64}]
     cut = "--- a/alerts/fridge.yaml\n+++ b/alerts/fridge.yaml\n" + "+x\n" * 20_000
     row = w.store.create_change(kind="change", subject="fix(alerts): two files", why="w", effect="e", state="open",
@@ -1065,6 +1069,10 @@ async def test_a_change_not_shown_in_full_cannot_be_approved(w: World) -> None:
     assert not ch.diff_complete(row)
     with pytest.raises(Exception, match="cannot be shown in full"):
         await w.manager.request(int(row["id"]), "apply", ADMIN, [f["new_sha256"] for f in files])
+    # Never a question: it cannot be applied, and it expires by itself.
+    item = w.store.item_by_key(f"change:{row['id']}")
+    assert item is not None and item["state"] == "proposed" and not item["needs"]
+    assert [a["id"] for a in item["actions"]] == ["reject"]
 
 
 def test_the_review_shows_what_the_change_adds_and_removes(tmp_path: Path) -> None:

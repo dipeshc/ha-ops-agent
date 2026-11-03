@@ -131,6 +131,18 @@ def test_health_items_wait_and_clear(tmp_path: Path) -> None:
     store.close()
 
 
+def test_an_info_health_item_is_shown_and_never_asks(tmp_path: Path) -> None:
+    raw = [{"key": "git:dirty", "severity": "info", "summary": "the config repository has local changes"}]
+    store = Store.open(tmp_path / "ops.db")
+    book = ItemBook(store, Hub(), tz=lambda: UTC, clock=lambda: START,
+                    context=lambda: Context(health_at="2026-01-28T05:30:00+00:00", health_items=raw))  # fmt: skip
+    book.write_health()
+    [item] = [r for r in store.items_all() if r["kind"] == "check"]
+    assert item["state"] == "proposed" and item["need"] is None and not item["needs"]
+    assert [a["id"] for a in item["actions"]] == ["snooze", "accept"] and store.needs_count() == 0
+    store.close()
+
+
 async def test_reboot_required_follows_the_os_update_and_resolves_with_it(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     only_auto(rig)
@@ -462,7 +474,7 @@ async def test_review_3_the_review_reason_stays_out_of_the_need(tmp_path: Path) 
     store.close()
 
 
-async def test_review_4_a_failed_change_is_one_item_in_needs_you(tmp_path: Path) -> None:
+async def test_review_4_a_failed_change_is_one_failed_item_that_does_not_ask(tmp_path: Path) -> None:
     from tests.test_changes import FILES as CHANGE_FILES
     from tests.test_changes import FRIDGE, NEW_FRIDGE, World, git
 
@@ -482,9 +494,11 @@ async def test_review_4_a_failed_change_is_one_item_in_needs_you(tmp_path: Path)
     book_for(w.store, Hub(), w.now)  # the daemon's item book, before anything happens
     found = w.propose({FRIDGE: NEW_FRIDGE})
     assert (await w.run(found["id"])).state == "failed"
-    needs = [r for r in w.store.items_all() if r["needs"]]
-    assert [r["key"] for r in needs] == [f"change:{found['id']}"]
-    assert any("config check failed" in e["text"] for e in w.store.item_events(needs[0]["id"]))
+    # The daemon undid it and nothing changed: one failed item with the reason, never a question or a chat ping.
+    assert [r for r in w.store.items_all() if r["needs"]] == []
+    [item] = [r for r in w.store.items_all() if r["key"] == f"change:{found['id']}"]
+    assert item["state"] == "failed" and item["need"] is None and item["gist"].startswith("failed, not applied")
+    assert any("config check failed" in e["text"] for e in w.store.item_events(item["id"]))
     w.store.close()
 
 
@@ -734,7 +748,11 @@ def test_a_house_fact_item_resolves_with_its_decision(tmp_path: Path) -> None:
     store, _, _ = task_store(tmp_path)
     rejected = store.add_fact("the porch light is on a timer", thread_id=None, turn_id=None, now=START)
     linked = store.add_fact("the cellar pump runs at night", thread_id=None, turn_id=None, now=START)
-    assert all(store.item_by_key(f"fact:{f}")["needs"] for f in (rejected, linked))  # type: ignore[index]
+    # Noted without a proposal: History, never a question.
+    for fact in (rejected, linked):
+        noted = store.item_by_key(f"fact:{fact}")
+        assert noted is not None and noted["state"] == "done" and not noted["needs"]
+        assert noted["gist"].startswith("kept in the agent's store")
     assert store.decide_fact(rejected, "rejected", now=START)
     store.link_fact(linked, 4)
     first, second = store.item_by_key(f"fact:{rejected}"), store.item_by_key(f"fact:{linked}")

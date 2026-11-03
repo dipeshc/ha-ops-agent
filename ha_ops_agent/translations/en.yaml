@@ -80,7 +80,7 @@ configuration:
         description: The model reads AUTO candidates' release notes and can only hold them back.
       hold_if_unreviewed:
         name: Hold if not reviewed
-        description: When the review cannot run, AUTO candidates wait for approval.
+        description: When the review cannot run or is off, AUTO candidates wait for approval.
       need_approval:
         name: Always need approval
         description: Update entity ids that always need your approval (added to the house profile's list).

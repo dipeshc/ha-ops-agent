@@ -757,12 +757,17 @@ class UpdateManager:
         reviewed = auto_items(plan) + [i for i in plan if approvable(i) and not waits_quietly(i)]
         if trigger == "window" and reviewed and self.options.updates.review:
             plan = await self._apply_review(plan)
-        elif trigger == "refresh":
+        elif trigger == "refresh" or (trigger == "window" and reviewed and self.options.updates.hold_if_unreviewed):
             # Earlier assessments only: a refresh never starts a review run, and must not show a held
-            # update as automatic.
+            # update as automatic. With the review off nothing reviews tonight's candidates, so
+            # `hold_if_unreviewed` holds every AUTO one without an earlier assessment.
             cached: dict[str, dict[str, Any]] = {}
             for item in reviewed:
                 cached.update(self._cached_review(item))
+            if not self.options.updates.review and self.options.updates.hold_if_unreviewed:
+                off = {"risk": "high", "hold": True, "reason": "release notes not reviewed (the review is off)"}
+                for item in auto_items(plan):
+                    cached.setdefault(str(item["entity_id"]), off)
             plan = apply_review(plan, cached)
         autos = auto_items(plan) if trigger == "window" else []
         auto_ids = {str(i["entity_id"]) for i in autos}
@@ -879,7 +884,8 @@ class UpdateManager:
         }
 
     async def _apply_review(self, plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Cached assessments first; unreviewed AUTO candidates (and updates that ask) go to one AI run."""
+        """Cached assessments first; unreviewed AUTO candidates (and updates that ask) go to one AI run, and a
+        held Core update that may need a config change to a second run of its own."""
         autos = auto_items(plan) + [i for i in plan if approvable(i) and not waits_quietly(i)]
         cached: dict[str, dict[str, Any]] = {}
         missing = []
@@ -901,37 +907,52 @@ class UpdateManager:
             for item in [i for i in missing if i.get("tier") == Tier.AUTO]:
                 cached[str(item["entity_id"])] = {"risk": "high", "hold": True, "reason": "release notes not reviewed"}
         if missing and self._review is not None:
-            notes: dict[str, str | None] = {}
-            for item in missing:
-                try:
-                    notes[str(item["entity_id"])] = await self.ops.release_notes(str(item["entity_id"]))
-                except Exception as err:  # noqa: BLE001 - notes are optional input
-                    _LOGGER.info("release notes unavailable", extra={"entity": item["entity_id"],
-                                                                     "error": str(err)[:120]})  # fmt: skip
-                    notes[str(item["entity_id"])] = None
-            prompt = self._redactor().redact(build_review_prompt(missing, notes))
-            result = await self._review(prompt)
-            if result.status == "ok":
-                fresh = parse_review(result.structured, {str(i["entity_id"]) for i in missing})
-                for item in missing:
-                    # A candidate the review did not assess is held (fail closed).
-                    fresh.setdefault(str(item["entity_id"]), {"risk": "high", "hold": True,
-                                                              "reason": "not assessed by the review"})  # fmt: skip
-                now = self._clock()
-                for item in missing:
-                    assessment = fresh.get(str(item["entity_id"]))
-                    if assessment is not None:
-                        self.store.kv_set(f"{REVIEW_KEY}{item['entity_id']}:{item['latest']}",
-                                          json.dumps(assessment), now=now)  # fmt: skip
-                cached.update(fresh)
-                plan = await self._propose_fixes(plan, missing, result.structured)
-            elif self.options.updates.hold_if_unreviewed:
+            # A candidate whose answer may carry a config change is reviewed in its own run, so that only
+            # Home Assistant's own words (its Core notes and the needs_change block) shape the edits.
+            fixable = [i for i in missing if isinstance(i.get("needs_change"), Mapping)]
+            others = [i for i in missing if not isinstance(i.get("needs_change"), Mapping)]
+            for batch in (others, fixable):
+                if not batch:
+                    continue
+                structured = await self._review_batch(self._review, batch, cached)
+                if batch is fixable and structured is not None:
+                    plan = await self._propose_fixes(plan, fixable, structured)
+        return apply_review(plan, cached)
+
+    async def _review_batch(self, review: Callable[[str], Awaitable[RunResult]], batch: list[dict[str, Any]],
+                            cached: dict[str, dict[str, Any]]) -> Any:  # fmt: skip
+        """One review run over `batch`: its assessments go into `cached`; returns the answer (None: no answer)."""
+        notes: dict[str, str | None] = {}
+        for item in batch:
+            try:
+                notes[str(item["entity_id"])] = await self.ops.release_notes(str(item["entity_id"]))
+            except Exception as err:  # noqa: BLE001 - notes are optional input
+                _LOGGER.info("release notes unavailable", extra={"entity": item["entity_id"],
+                                                                 "error": str(err)[:120]})  # fmt: skip
+                notes[str(item["entity_id"])] = None
+        prompt = self._redactor().redact(build_review_prompt(batch, notes))
+        result = await review(prompt)
+        self._audit("update.review", outcome=result.status, detail=result.error or "", items=len(batch))
+        if result.status != "ok":
+            if self.options.updates.hold_if_unreviewed:
                 # The review could not run (AI off, capped, failed): hold, but do not remember it.
                 held = {"risk": "high", "hold": True, "reason": f"release notes not reviewed ({result.status})"}
-                for item in [i for i in missing if i.get("tier") == Tier.AUTO]:
+                for item in [i for i in batch if i.get("tier") == Tier.AUTO]:
                     cached[str(item["entity_id"])] = held
-            self._audit("update.review", outcome=result.status, detail=result.error or "", items=len(missing))
-        return apply_review(plan, cached)
+            return None
+        fresh = parse_review(result.structured, {str(i["entity_id"]) for i in batch})
+        for item in batch:
+            # A candidate the review did not assess is held (fail closed).
+            fresh.setdefault(str(item["entity_id"]), {"risk": "high", "hold": True,
+                                                      "reason": "not assessed by the review"})  # fmt: skip
+        now = self._clock()
+        for item in batch:
+            assessment = fresh.get(str(item["entity_id"]))
+            if assessment is not None:
+                self.store.kv_set(f"{REVIEW_KEY}{item['entity_id']}:{item['latest']}", json.dumps(assessment),
+                                  now=now)  # fmt: skip
+        cached.update(fresh)
+        return result.structured
 
     async def _propose_fixes(self, plan: list[dict[str, Any]], asked: list[dict[str, Any]],
                              structured: Any) -> list[dict[str, Any]]:  # fmt: skip

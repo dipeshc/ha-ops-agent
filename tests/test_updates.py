@@ -332,7 +332,16 @@ class Rig:
         self.proposed: list[tuple[str, frozenset[str], str, list[Any]]] = []
         self.options = make_options(
             strict=False,
-            **({"agent__mode": "act", "updates__auto_install": "on", "updates__review": False} | options),
+            # The review off and unreviewed candidates installing: most tests are about the pipeline, not the review.
+            **(
+                {
+                    "agent__mode": "act",
+                    "updates__auto_install": "on",
+                    "updates__review": False,
+                    "updates__hold_if_unreviewed": False,
+                }
+                | options
+            ),
         )
         self.hub = Hub()
 
@@ -1353,7 +1362,7 @@ async def test_a_slow_regression_across_the_night_is_escalated(rig: Rig) -> None
 
 
 async def test_unreviewed_candidates_are_held_by_default(tmp_path: Path) -> None:
-    rig = Rig(tmp_path, updates__review=True)
+    rig = Rig(tmp_path, updates__review=True, updates__hold_if_unreviewed=True)
     only_auto(rig, CARD)
     await rig.manager.run_window()  # AI is off: the review cannot run
     item = next(i for i in rig.run()["plan"] if i["entity_id"] == CARD)
@@ -1365,6 +1374,21 @@ async def test_unreviewed_candidates_are_held_by_default(tmp_path: Path) -> None
     await other.manager.run_window()
     assert other.jobs()[CARD].state == "succeeded"
     other.store.close()
+
+
+async def test_with_the_review_off_unreviewed_candidates_are_still_held(tmp_path: Path) -> None:
+    """`updates.review: false` means nothing reviews them: `hold_if_unreviewed` (the default) holds them."""
+    rig = Rig(tmp_path, updates__review=False, updates__hold_if_unreviewed=True)
+    only_auto(rig, CARD)
+    await rig.manager.run_window()
+    item = next(i for i in rig.run()["plan"] if i["entity_id"] == CARD)
+    assert item["tier"] == "approve" and "the review is off" in item["reason"]
+    assert rig.ops.installs() == [] and rig.reviews == []
+    # A refresh shows it held too, never as automatic.
+    await rig.manager.refresh()
+    item = next(i for i in rig.store.recent_update_runs(limit=1)[0]["plan"] if i["entity_id"] == CARD)
+    assert item["tier"] == "approve"
+    rig.store.close()
 
 
 async def test_backup_manager_view_drops_everything_but_the_schedule() -> None:
@@ -1639,6 +1663,37 @@ async def test_a_held_core_update_waits_for_its_one_tap_config_change_then_insta
         assert (await rig.manager.run_window())["result"] == "executed"
         assert rig.ops.installs()[0] == ("update_core", "2026.10.4") and rig.jobs()[CORE].state == "succeeded"
         rig.store.close()
+
+
+async def test_a_config_change_is_written_only_by_its_own_run_over_home_assistants_notes(tmp_path: Path) -> None:
+    """Third-party release notes never share a prompt with the run that may write a config change."""
+    rig = Rig(tmp_path, updates__review=True)
+    only_auto(rig, CORE)
+    rig.ops.notes[WEATHER] = "Third-party notes for the weather integration."
+    rig.ops.notes[CORE] = "Home Assistant's own release notes."
+    rig.evidence.changes = [Change("breaking", "Template: legacy", "template", "Legacy syntax removed.", (), "src")]
+    fix = {"why": "w", "edits": [{"path": "templates/status.yaml", "old": "{{ 1 }}", "new": "{{ 2 }}"}]}
+    answers = [
+        # The general run answers a fix for Core too: it was not asked, so it is ignored.
+        RunResult(status="ok", structured={"summary": "s", "assessments": [
+            {"entity_id": WEATHER, "risk": "low", "hold": False, "reason": "fine"},
+            {"entity_id": CORE, "risk": "low", "hold": False, "reason": "x", "fix": fix}]}),
+        RunResult(status="ok", structured={"summary": "s", "assessments": [
+            {"entity_id": CORE, "risk": "medium", "hold": True, "reason": "template change"}]}),
+    ]  # fmt: skip
+
+    async def review(prompt: str) -> RunResult:
+        rig.reviews.append(prompt)
+        return answers[len(rig.reviews) - 1]
+
+    rig.manager._review = review
+    await rig.manager.run_window()
+    general, own = rig.reviews
+    assert "<needs_change" not in general and "Third-party notes" in general and CORE not in general
+    assert "<needs_change" in own and "Home Assistant's own release notes." in own
+    assert WEATHER not in own and "Third-party notes" not in own
+    assert rig.proposed == []
+    rig.store.close()
 
 
 async def test_a_held_core_update_without_a_fix_asks_and_a_rejected_fix_asks_again(rig: Rig) -> None:

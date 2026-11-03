@@ -57,7 +57,7 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 | `updates.auto_install` | `off` | `off` / `on` | Install AUTO-tier updates in the window; needs `agent.mode: act`. |
 | `updates.min_age_days` | 7 | 7..90 | Patch soak; minors soak twice as long. Code floors it at 7 again. |
 | `updates.review` | `true` | bool | The AI reads AUTO candidates' release notes and may hold one back, never promote. |
-| `updates.hold_if_unreviewed` | `true` | bool | An AUTO candidate the AI could not review is held. |
+| `updates.hold_if_unreviewed` | `true` | bool | An AUTO candidate the AI could not review is held, also when `updates.review` is false. |
 | `updates.need_approval`, `updates.never` | `[]` | `update.[a-z0-9_]{1,128}` | Always ask / never install (still reported). |
 | `capabilities.require_approval`, `capabilities.never` | `[]` | `[a-z][a-z0-9_]{0,40}.[a-z0-9_.]{1,60}` | Tighten a capability's tier by name; never loosens. `never: [dashboard.save]` refuses even an approved dashboard plan. |
 | `capabilities.reloadable_domains` | empty | up to 40 comma-separated `[a-z0-9_]{1,64}` | Reload allowlist; empty means the profile's `reload.domains`. |

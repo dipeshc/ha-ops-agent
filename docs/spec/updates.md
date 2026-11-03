@@ -78,16 +78,22 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   a manual plan runs none. The prompt holds each candidate's release notes
   fenced (4000 characters, redacted); the profile has no capabilities and a
   10-minute wait. Schema: `assessments[<=20]{entity_id, risk, hold, reason,
-  fix?}`, `summary`.
+  fix?}`, `summary`. A candidate with a `<needs_change>` block (U23) is
+  reviewed in a second run of its own, whose prompt holds only Home
+  Assistant's own Core notes and that block; `fix` is read only from that
+  run's answer, never from the run that holds third-party notes. Test
+  `test_a_config_change_is_written_only_by_its_own_run_over_home_assistants_notes`.
 - U9. **Hold only.** The review can move an AUTO item to `approve` (when
   `hold` is true or risk is high) and never the reverse; a non-AUTO item
   only gets a note. An unassessed candidate is held "not assessed"; beyond 8
   candidates the rest are held "not reviewed yet". Tests
   `test_review_can_only_hold_updates_back`, `test_apply_review_never_lowers`.
 - U10. With `updates.hold_if_unreviewed` (default true) a review that did not
-  run (AI off, capped, failed) holds every AUTO item; false installs them
+  run (AI off, capped, failed, or `updates.review` false) holds every AUTO
+  item that has no earlier assessment of that version; false installs them
   unreviewed. Assessments are cached per entity and version and re-done when
-  a fix is involved. Test `test_unreviewed_candidates_are_held_by_default`.
+  a fix is involved. Tests `test_unreviewed_candidates_are_held_by_default`,
+  `test_with_the_review_off_unreviewed_candidates_are_still_held`.
 
 ## Execution
 

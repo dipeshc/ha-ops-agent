@@ -41,15 +41,20 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   remote other than `origin`, a remote's `uploadpack`, `receivepack` or
   `vcs`, or a driver name no `-c` key can name. That listing and the call
   are separate processes, so the overrides are defence in depth: the agent
-  never runs a git command that converts work-tree content, the only place
-  a filter driver runs. It never runs `add`, `commit`, `status`, `checkout`
-  or a diff against the work tree: a change is staged with `hash-object -w
-  --no-filters` and `update-index --cacheinfo` (or `--force-remove`) and
-  committed with `write-tree`, `commit-tree` and `update-ref` on
-  `refs/heads/main` (compare-and-swap with the old head); dirty paths come
-  from `diff-index --cached`, `ls-files --stage` with each work-tree file
-  hashed by `hash-object --no-filters`, and `ls-files --others`
-  (`safegit.status_lines`). Fetch and push name the remote by URL, never `origin`: the
+  never runs a git command that converts work-tree content (the only place
+  a filter driver runs) or refreshes or edits the live index entry by
+  entry (`update-index` re-checks racily clean entries by content). It
+  never runs `add`, `commit`, `status`, `update-index`, `checkout` or a
+  diff against the work tree. A change is committed from the exact bytes
+  the daemon wrote (the approved contents), never read back from the work
+  tree: each blob by `hash-object -w --stdin --no-filters`, the tree built
+  from `main`'s tree with `mktree` (a changed file keeps its mode, a new
+  one is 100644, a deleted one is removed; links and submodules are
+  refused), then `commit-tree` and `update-ref refs/heads/main <new>
+  <old>`, and `read-tree` brings the index level. Dirty paths come from
+  `diff-index --cached`, `ls-files --stage` with each work-tree file hashed
+  by `hash-object --no-filters` and its executable bit compared with the
+  index mode, and `ls-files --others` (`safegit.status_lines`). Fetch and push name the remote by URL, never `origin`: the
   `remote.origin.url` of the repository, refused unless it is a GitHub SSH
   URL (`git@github.com:<owner>/<repo>` or `ssh://git@github.com/...`). SSH
   uses the deploy key, the shipped `known_hosts` and
@@ -62,7 +67,10 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   `test_credential_helpers_and_askpass_never_run`,
   `test_hostile_filter_driver_never_runs`,
   `test_a_filter_driver_added_after_the_overrides_were_built_never_runs`,
-  `test_status_lines_match_git_status_on_a_plain_repo`),
+  `test_status_lines_match_git_status_on_a_plain_repo`,
+  `test_a_late_driver_never_runs_while_committing_even_with_racily_clean_files`,
+  `test_a_link_swapped_in_at_the_path_cannot_change_what_is_committed`,
+  `test_status_lines_report_an_executable_bit_change`),
   `test_paths_use_the_shipped_known_hosts`.
 
 ## Paths
@@ -159,8 +167,8 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   config check runs (skipped for document-only changes); `automation.reload`
   or `template.reload` by top directory, with `reload_custom_templates`
   first for macros; alerts and `configuration.yaml` take effect at the next
-  restart, which the agent never performs; `commit_paths` commits exactly
-  those paths with the profile's author; the push fetches first and refuses
+  restart, which the agent never performs; `commit_files` commits exactly
+  the approved contents of those paths (C2) with the profile's author; the push fetches first and refuses
   when `origin/main` is ahead, then pushes `HEAD:refs/heads/main`. Any
   failure restores the previous bytes, reloads again and escalates with a
   push. Revert is the same pipeline with the base contents. Recovery after

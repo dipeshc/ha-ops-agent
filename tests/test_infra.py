@@ -73,12 +73,14 @@ def test_git_commit_and_push(repos: tuple[Path, Path], tmp_path: Path) -> None:
     repo = Repo(work, tmp_path / "key", tmp_path / "kh", author=("Alex Example", "alex@example.com"))
     (work / "notes.md").write_text("# Notes\n\n## new\n")
     with pytest.raises(GitError, match="conventional"):
-        repo.commit_paths(["notes.md"], "Updated stuff")
+        repo.commit_files({"notes.md": (work / "notes.md").read_bytes()}, "Updated stuff")
     (work / "other.yaml").write_text("x: 1\n")
     with pytest.raises(GitBusyError):
-        repo.commit_paths(["notes.md"], "docs(notes): record ops agent triage 2026-01-31")
+        repo.commit_files(
+            {"notes.md": (work / "notes.md").read_bytes()}, "docs(notes): record ops agent triage 2026-01-31"
+        )
     (work / "other.yaml").unlink()
-    repo.commit_paths(["notes.md"], "docs(notes): record ops agent triage 2026-01-31")
+    repo.commit_files({"notes.md": (work / "notes.md").read_bytes()}, "docs(notes): record ops agent triage 2026-01-31")
     message = git(work, "log", "-1", "--format=%an|%B")
     assert message.startswith("Alex Example|docs(notes)") and "Co-Authored" not in message
     repo.push()

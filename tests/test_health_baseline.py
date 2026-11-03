@@ -457,7 +457,8 @@ def test_only_entities_that_act_are_access_hardware_by_name() -> None:
                       "light.front_door", "event.doorbell_lock", "device_tracker.gate_tag"):  # fmt: skip
         assert not acts_on_the_house(entity_id), entity_id
     for entity_id in ("switch.gate_opener", "cover.driveway", "button.garage_door_open", "script.unlock_side",
-                      "input_boolean.gate_open", "valve.gate", "lock.side", "alarm_control_panel.home"):  # fmt: skip
+                      "input_boolean.gate_open", "valve.gate", "scene.side_gate_open", "lock.side",
+                      "alarm_control_panel.home"):  # fmt: skip
         assert acts_on_the_house(entity_id), entity_id
     assert not acts_on_the_house("cover.lounge_blind", device_class="blind")
     # Reloads and the expected list keep the wider rule.

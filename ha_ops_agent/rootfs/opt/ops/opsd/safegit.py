@@ -24,11 +24,14 @@ That listing and the call are two processes, so a driver added to the
 repository config between them would escape the overrides. The agent
 therefore never runs a git command that converts work-tree content, the
 only place a filter driver runs: nothing is staged with `add` or committed
-with `commit`, and nothing is compared with `status` or a work-tree `diff`.
-Files are staged with `hash-object -w --no-filters` and `update-index
---cacheinfo`, committed with `write-tree`, `commit-tree` and `update-ref`,
-and the work tree is compared with the index by hashing each file with
-`hash-object --no-filters` (`status_lines`). Every other command the agent
+with `commit`, the live index is never refreshed or edited entry by entry
+(`update-index` re-checks racily clean entries by content), and nothing is
+compared with `status` or a work-tree `diff`. A commit is built from
+`main`'s tree and the approved bytes (`hash-object --stdin --no-filters`,
+`mktree`, `commit-tree`, `update-ref`), and `read-tree` levels the index;
+the work tree is compared with the index by hashing each file with
+`hash-object --no-filters` and comparing the executable bit
+(`status_lines`). Every other command the agent
 runs reads only the object store, the index or the refs.
 """
 
@@ -244,7 +247,10 @@ def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
             if mode != "120000" or found != sha:
                 worktree[path] = "M"
         elif stat.S_ISREG(info.st_mode) and mode in ("100644", "100755") and "\n" not in path:
-            regular.append(path)
+            if (mode == "100755") != bool(info.st_mode & 0o111):
+                worktree[path] = "M"  # the executable bit alone changed
+            else:
+                regular.append(path)
         else:
             worktree[path] = "M"
     if regular:

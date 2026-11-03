@@ -1064,7 +1064,8 @@ class ChangeManager:
                 return self._fail(change_id, running, f"reload failed: {clean_text(str(err), 160)}.{note}{again}")
         subject = str(row["subject"]) if action == "apply" else f"chore(ops-agent): revert config change {change_id}"
         try:
-            sha = await asyncio.to_thread(self.repo.commit_paths, paths, subject)
+            # The approved bytes the daemon wrote, never what the work tree holds now.
+            sha = await asyncio.to_thread(self.repo.commit_files, targets, subject)
         except GitError as err:
             note = await asyncio.to_thread(self._restore, before, created)
             again = "" if doc_only else await self._reload_again(paths)

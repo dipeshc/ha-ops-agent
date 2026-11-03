@@ -52,7 +52,7 @@ diff, acks), `opsd/triage.py` (prompt and result), `opsd/fingerprint.py`,
   Supervisor list is the fallback. Access hardware
   (`opsd.access.acts_on_the_house`) is a lock or an alarm panel by domain, a
   cover that is not positively a blind, shade, curtain, awning or shutter,
-  or a switch, button, script, input boolean, valve or cover whose id,
+  or a switch, button, script, scene, input boolean, valve or cover whose id,
   friendly name or registry names say access. Only domains that act count by
   name: a binary sensor, sensor, camera, light, event or device tracker
   named like a door observes it and is never access hardware here. (The

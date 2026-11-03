@@ -345,7 +345,7 @@ def derive_assist_exposure(exposure: Any, states: Iterable[dict[str, Any]],
     """Entities that open the house exposed to Assist, from `homeassistant/expose_entity/list`.
 
     Access hardware is `opsd.access.acts_on_the_house`: a lock, an alarm panel, any cover that is not positively
-    a blind or the like (a cover without a device class counts), or a switch, button, script, input boolean or
+    a blind or the like (a cover without a device class counts), or a switch, button, script, scene, input boolean or
     valve whose id, friendly name or registry names say access hardware (never a sensor, camera or light). The
     value is the kind (`lock`, `alarm`, `garage`, `cover`, or `access` for one only its names identify).
 

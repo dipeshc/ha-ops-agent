@@ -53,12 +53,12 @@ def opens_by_kind(entity_id: str, device_class: Any) -> bool:
 # Domains whose entities do something (a call opens, starts or switches it): only these can be access hardware by
 # their names in the health check and the Assist exposure check. A sensor, binary sensor, camera, light, event
 # or tracker named "front door" observes the door; it opens nothing.
-ACTING_DOMAINS = frozenset({"switch", "button", "script", "input_boolean", "valve", "cover"})
+ACTING_DOMAINS = frozenset({"switch", "button", "script", "scene", "input_boolean", "valve", "cover"})
 
 
 def acts_on_the_house(entity_id: str, *, device_class: Any = None, names: Iterable[Any] = ()) -> bool:
     """Access hardware for the health check and Assist exposure: a lock or an alarm panel by domain, a cover that is
-    not positively a blind or the like, and a switch, button, script, input boolean, valve or cover whose id or
+    not positively a blind or the like, and a switch, button, script, scene, input boolean, valve or cover whose id or
     names say access. Never a sensor, camera, light, event or tracker, whatever it is called.
 
     Reloads and the expected list keep the wider `opens_the_house` (fail closed there)."""

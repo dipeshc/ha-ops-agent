@@ -5,14 +5,13 @@ Proposals are built with plumbing only (`hash-object`, `mktree`,
 and the index are never touched, and those refs are never pushed (`push`
 names `HEAD:refs/heads/main` explicitly, to the checked GitHub URL rather than
 the remote name). An applied change is committed
-with `commit_paths`, which commits exactly the named paths on a clean tree.
+with `commit_files`, which commits exactly the approved contents on a clean tree.
 """
 
 import logging
-import os
 import re
-import stat
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -194,45 +193,57 @@ class Repo:
             return False
         return True
 
-    def commit_paths(self, paths: list[str], message: str) -> str:
-        """Commit exactly these paths (changes, additions or deletions) on main; refuses on any other change."""
+    def commit_files(self, files: Mapping[str, bytes | None], message: str) -> str:
+        """Commit exactly these contents on main (None deletes the path); refuses on any other change.
+
+        The commit is built from `main`'s tree and the given bytes only (the approved contents the daemon wrote),
+        never from the work tree or the index: `hash-object --stdin --no-filters`, `mktree`, `commit-tree`, then
+        `update-ref` from the old head, and `read-tree` levels the index. No command here reads the work tree or
+        refreshes the index, so no filter driver runs and a link swapped in at a path cannot change what is committed.
+        """
         if not COMMIT_RE.fullmatch(message):
             raise GitError(f"not a conventional commit subject: {message!r}")
         if not self.on_main():
             raise GitError("not on main")
-        others = [p for p in self.dirty_paths() if p not in paths]
+        others = [p for p in self.dirty_paths() if p not in files]
         if others:
             raise GitBusyError(f"working tree has other changes: {others[:5]}")
-        # Staged and committed with plumbing that never converts work-tree content, so no filter driver can run
-        # (`add` and `commit` would, and a driver added to the config after the overrides were built escapes them).
         parent = self.main_head()
-        for path in paths:
-            self._stage(path)
-        tree = self.run("write-tree").strip()
-        if tree == self.run("rev-parse", f"{parent}^{{tree}}").strip():
+        base = self.run("rev-parse", f"{parent}^{{tree}}").strip()
+        tree: str | None = base
+        for path, data in files.items():
+            blob = self.hash_blob(data) if data is not None else None
+            tree = self._edit_tree(tree, path.split("/"), blob)
+        tree = tree or self.raw("mktree", "-z", data=b"").decode().strip()
+        if tree == base:
             raise GitError("nothing to commit")
         commit = self.commit_tree(tree, parent, message)
         self.run("update-ref", "-m", f"commit: {message}", "refs/heads/main", commit, parent)
+        self.run("read-tree", tree)
         return self.main_head()
 
-    def _stage(self, path: str) -> None:
-        """Put the work tree's file at `path` in the index as it is (`--no-filters`), or remove it if gone."""
-        full = self.path / path
-        try:
-            info = os.lstat(full)
-        except FileNotFoundError:
-            self.run("update-index", "--force-remove", "--", path)
-            return
-        if not stat.S_ISREG(info.st_mode):
-            raise GitError(f"{path} is not a regular file")
-        found = self.run("ls-files", "--stage", "-z", "--", path).split("\0")[0]
-        mode = found.split(" ", 1)[0] if found else ""
-        if mode not in ("100644", "100755"):
-            mode = "100755" if info.st_mode & 0o111 else "100644"
-        sha = self.run("hash-object", "-w", "--no-filters", "--", path).strip()
-        if not SHA_RE.fullmatch(sha):
-            raise GitError(f"git hash-object: unexpected output for {path}")
-        self.run("update-index", "--add", "--cacheinfo", f"{mode},{sha},{path}")
+    def _edit_tree(self, tree: str | None, parts: list[str], blob: str | None) -> str | None:
+        """`tree` with the blob at `parts` (its existing regular mode kept, 100644 when new), or the path removed
+        when `blob` is None; None when the tree ends up empty. Links, submodules and odd modes are refused."""
+        entries = self.tree_entries(tree) if tree else []
+        name = parts[0]
+        existing = next((e for e in entries if e[3] == name), None)
+        rows = [e for e in entries if e[3] != name]
+        if len(parts) == 1:
+            if existing is not None and (existing[1] != "blob" or existing[0] not in ("100644", "100755")):
+                raise GitError(f"{name} is not a regular file in git (mode {existing[0]})")
+            if blob is not None:
+                rows.append((existing[0] if existing is not None else "100644", "blob", blob, name))
+        else:
+            if existing is not None and existing[1] != "tree":
+                raise GitError(f"{name} is not a directory in git")
+            sub = self._edit_tree(existing[2] if existing else None, parts[1:], blob)
+            if sub is not None:
+                rows.append(("040000", "tree", sub, name))
+        if not rows:
+            return None
+        data = b"".join(f"{m} {k} {s}\t".encode() + n.encode(errors="surrogateescape") + b"\0" for m, k, s, n in rows)
+        return self.raw("mktree", "-z", data=data).decode().strip()
 
     def remote_url(self) -> str:
         """`remote.origin.url`, refused unless it is a GitHub SSH URL."""

@@ -174,7 +174,9 @@ def test_hostile_filter_driver_never_runs(tmp_path: Path) -> None:
     build_export(ha, tmp_path / "export")
     (ha / "configuration.yaml").write_text("a: 1\n")
     (ha / ".gitattributes").unlink()
-    Repo(ha, tmp_path / "k", tmp_path / "kh").commit_paths(["notes.md"], "docs(notes): record test")
+    Repo(ha, tmp_path / "k", tmp_path / "kh").commit_files(
+        {"notes.md": (ha / "notes.md").read_bytes()}, "docs(notes): record test"
+    )
     assert not list(tmp_path.glob("PWNED*")), list(tmp_path.glob("PWNED*"))
 
 
@@ -209,7 +211,7 @@ def test_repo_config_cannot_set_a_signing_program(tmp_path: Path) -> None:
     commit = repo.commit_tree(repo.run("rev-parse", f"{head}^{{tree}}").strip(), head, "fix(a): test")
     assert "gpgsig" not in repo.run("cat-file", "commit", commit)
     (ha / "automations" / "a.yaml").write_text("- id: two\n")
-    repo.commit_paths(["automations/a.yaml"], "fix(a): test")
+    repo.commit_files({"automations/a.yaml": (ha / "automations/a.yaml").read_bytes()}, "fix(a): test")
     assert not _markers(tmp_path)
 
 
@@ -281,7 +283,9 @@ def test_filter_and_diff_drivers_of_any_name_never_run(tmp_path: Path) -> None:
     git(ha, "config", "diff.c:d.textconv", str(script))
     (ha / "automations" / "a.yaml").write_text("- id: two\n")
     githistory.diff(ha, "HEAD", None)
-    Repo(ha, tmp_path / "k", tmp_path / "kh").commit_paths(["automations/a.yaml"], "fix(a): test")
+    Repo(ha, tmp_path / "k", tmp_path / "kh").commit_files(
+        {"automations/a.yaml": (ha / "automations/a.yaml").read_bytes()}, "fix(a): test"
+    )
     githistory.show(ha, "HEAD", None)
     assert not _markers(tmp_path)
 
@@ -314,7 +318,9 @@ def test_editor_and_hooks_never_run(tmp_path: Path) -> None:
     hook.write_text(f"#!/bin/sh\ntouch {tmp_path}/PWNED_hook\n")
     hook.chmod(0o755)
     (ha / "automations" / "a.yaml").write_text("- id: two\n")
-    Repo(ha, tmp_path / "k", tmp_path / "kh").commit_paths(["automations/a.yaml"], "fix(a): test")
+    Repo(ha, tmp_path / "k", tmp_path / "kh").commit_files(
+        {"automations/a.yaml": (ha / "automations/a.yaml").read_bytes()}, "fix(a): test"
+    )
     assert not _markers(tmp_path)
 
 
@@ -357,7 +363,9 @@ def test_a_filter_driver_added_after_the_overrides_were_built_never_runs(
     assert githistory.status(ha) == " M automations/a.yaml\n"
     assert health.git_status(ha)["dirty"] == ["automations/a.yaml"]
     githistory.diff(ha, "HEAD", None)
-    head = repo.commit_paths(["automations/a.yaml"], "fix(automations): bump a")
+    head = repo.commit_files(
+        {"automations/a.yaml": (ha / "automations/a.yaml").read_bytes()}, "fix(automations): bump a"
+    )
     assert repo.file_at(head, "automations/a.yaml") == b"- id: three\n"
     assert not _markers(tmp_path), _markers(tmp_path)
 
@@ -372,3 +380,66 @@ def test_status_lines_match_git_status_on_a_plain_repo(tmp_path: Path) -> None:
     (ha / "new.yaml").write_text("x: 1\n")
     (ha / "automations" / "b.yaml").unlink()
     assert sorted(status_lines(ha)) == sorted(git(ha, "status", "--porcelain", "--untracked-files=all").splitlines())
+
+
+def test_a_late_driver_never_runs_while_committing_even_with_racily_clean_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Touching another tracked file makes the live index re-check it by content; committing never does."""
+    import os
+
+    from opsd import gitops, safegit
+    from opsd.gitops import Repo
+
+    ha, script = _hostile(tmp_path)
+    (ha / "automations" / "side_b.yaml").write_text("- id: side_b\n")
+    git(ha, "add", "-A")
+    git(ha, "commit", "-q", "-m", "side")
+    real = safegit.git_argv
+
+    def racing(repo: Path, *args: str) -> list[str]:
+        argv = real(repo, *args)
+        (repo / ".git" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "info" / "attributes").write_text("* filter=late\n")
+        with (repo / ".git" / "config").open("a") as config:
+            config.write(f'[filter "late"]\n\tclean = {script}\n\tsmudge = {script}\n\tprocess = {script}\n')
+        return argv
+
+    for module in (safegit, gitops):
+        monkeypatch.setattr(module, "git_argv", racing)
+    # Same content, new times: racily clean for the live index.
+    os.utime(ha / "automations" / "side_b.yaml", None)
+    (ha / "automations" / "a.yaml").write_text("- id: example\n")
+    head = Repo(ha, tmp_path / "k", tmp_path / "kh").commit_files(
+        {"automations/a.yaml": b"- id: example\n"}, "fix(automations): update example"
+    )
+    assert not _markers(tmp_path), _markers(tmp_path)
+    assert git(ha, "show", f"{head}:automations/a.yaml") == "- id: example\n"
+
+
+def test_a_link_swapped_in_at_the_path_cannot_change_what_is_committed(tmp_path: Path) -> None:
+    from opsd.gitops import Repo
+
+    ha, _ = _hostile(tmp_path)
+    secret = tmp_path / "side_secret.txt"
+    secret.write_text("acme-secret-value\n")
+    approved = b"- id: approved\n"
+    (ha / "automations" / "a.yaml").unlink()
+    (ha / "automations" / "a.yaml").symlink_to(secret)
+    repo = Repo(ha, tmp_path / "k", tmp_path / "kh")
+    head = repo.commit_files({"automations/a.yaml": approved}, "fix(automations): approve example")
+    assert repo.file_at(head, "automations/a.yaml") == approved
+    assert "acme-secret-value" not in git(ha, "log", "-p", "-1")
+    # A deletion removes the path, and a new file is a regular 100644 blob.
+    head = repo.commit_files({"automations/a.yaml": None, "automations/new/side.yaml": b"- id: side\n"},
+                             "fix(automations): replace example")  # fmt: skip
+    assert repo.entry(head, "automations/a.yaml") is None
+    assert repo.entry(head, "automations/new/side.yaml")[0] == "100644"  # type: ignore[index]
+
+
+def test_status_lines_report_an_executable_bit_change(tmp_path: Path) -> None:
+    from opsd.safegit import status_lines
+
+    ha, _ = _hostile(tmp_path)
+    (ha / "automations" / "a.yaml").chmod(0o755)
+    assert status_lines(ha) == [" M automations/a.yaml"]

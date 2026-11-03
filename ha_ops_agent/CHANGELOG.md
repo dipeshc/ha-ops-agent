@@ -8,7 +8,7 @@ Health check and pushes:
 
 - Each piece of access hardware that goes down (a lock, an alarm panel, a
   cover that is not positively a blind or the like, a switch, button,
-  script, input boolean or valve named like a door, gate or lock; never a
+  script, scene, input boolean or valve named like a door, gate or lock; never a
   sensor, binary sensor, camera or light) is its own critical item, `access:<entity_id>`,
   instead of part of its integration's `entities:<platform>` item. Only
   your accept in the panel silences it, until it recovers; the agent can
@@ -64,10 +64,12 @@ Config proposals:
   filter, diff and merge driver neutralised, over SSH only, and refuses to
   run when the repository config sets includes, URL rewrites, a proxy
   command, another work tree or a remote other than `origin`. The agent no
-  longer runs any git command that converts work-tree files (`add`,
-  `commit`, `status`, a work-tree diff): it stages with `hash-object
-  --no-filters` and `update-index`, commits with `write-tree`,
-  `commit-tree` and `update-ref`, and finds changed files by hashing them
+  longer runs any git command that converts work-tree files or edits the
+  index entry by entry (`add`, `commit`, `status`, `update-index`, a
+  work-tree diff): an applied change is committed from the exact approved
+  contents (`hash-object --stdin --no-filters`, `mktree`, `commit-tree`,
+  `update-ref`, then `read-tree`), never read back from the work tree, and
+  changed files (content or the executable bit) are found by hashing them
   without filters. `opsctl git-diff REV` now compares REV with the index.
   Fetch and push use `remote.origin.url`, which must be a GitHub SSH URL
   (`git@github.com:<owner>/<repo>`).
@@ -118,6 +120,9 @@ For house overlays (`opsd.house`):
   and `admin_notify`.
 - Git calls can raise `opsd.safegit.UnsafeRepoConfigError` (a
   `subprocess.SubprocessError`; `Repo` turns it into `GitError`).
+- `Repo.commit_paths(paths, message)` is replaced by
+  `Repo.commit_files({path: bytes or None}, message)`, which commits the
+  given contents (None deletes) instead of reading the work tree.
 
 ## 0.19.0
 

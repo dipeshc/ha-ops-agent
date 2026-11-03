@@ -96,8 +96,9 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   as well: a file that already calls an action outside the allowlist (a
   lock, the alarm, a cover, a switch, a script), uses devices, areas,
   events, scenes or blueprints, or carries YAML tags is never changed by a
-  proposal, and an alerts file never loses an alert or an alert's
-  notifier. Tests `test_changes.py:280-424`,
+  proposal, and an existing alert is never removed and keeps its
+  `entity_id`, `state`, `repeat`, `skip_first`, `can_acknowledge` and
+  notifiers (its name, message, title and push data may change). Tests `test_changes.py:280-424`,
   `test_setpoints_outside_the_band_or_templated_are_refused`,
   `test_templates_cannot_point_a_browser_anywhere`,
   `test_a_file_that_already_does_more_is_never_rewritten`,

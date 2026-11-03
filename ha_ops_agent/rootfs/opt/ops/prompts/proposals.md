@@ -43,7 +43,8 @@ The daemon checks the whole file and refuses all other content:
 - The daemon also reads the current file. You cannot change a file that
   already does more than the list above allows (for example a lock,
   switch or cover action, devices or areas, or tags). You cannot remove an
-  alert or an alert's notifier.
+  existing alert or change its `entity_id`, `state`, `repeat`,
+  `skip_first`, `can_acknowledge` or notifiers.
 - The admin sees the whole diff of every file. A proposal whose diff is too
   long to show in full is refused: propose smaller changes.
 

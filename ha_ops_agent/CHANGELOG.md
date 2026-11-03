@@ -46,8 +46,9 @@ Config proposals:
 - The current file is checked as well as the new one: a file that already
   calls an action outside the allowlist (a lock, the alarm, a cover, a
   switch), uses devices or areas, or carries YAML tags is never changed by
-  a proposal, and an alerts file never loses an alert or an alert's
-  notifier.
+  a proposal, and an existing alert is never removed and keeps what it
+  watches, its repeat, skip_first and acknowledgement settings and its
+  notifiers.
 - An automation's id and alias may not repeat another automation's;
   `repeat` runs at most 10 times (a literal count or list, no
   `while`/`until`); webhook triggers and sub-minute time patterns are

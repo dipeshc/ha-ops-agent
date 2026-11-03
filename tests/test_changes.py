@@ -343,7 +343,10 @@ def test_allowed_happy_paths_and_their_summary() -> None:
     assert summary["actions_added"] == ["fan.turn_off", "light.turn_on"]
     assert summary["entities_added"] == ["fan.bedroom", "light.kitchen", "light.porch"]
     assert summary["actions_removed"] == [] and summary["added"] > 0
-    alert = FILES[ALERT].replace("- critical_alerts", "- critical_alerts\n      - mobile_app_admin_phone")
+    alert = (
+        FILES[ALERT] + "  porch_alert:\n    name: Porch\n    entity_id: binary_sensor.fridge_warm\n"
+        "    notifiers:\n      - mobile_app_admin_phone\n"
+    )
     summary = check(ALERT, alert, FILES[ALERT])
     assert summary["actions_added"] == ["notify.mobile_app_admin_phone"]
     check(TEMPLATE, FILES[TEMPLATE].replace("{{ 1 }}", "{{ 2 }}"), FILES[TEMPLATE])
@@ -976,11 +979,20 @@ def test_a_file_that_already_does_more_is_never_rewritten(w: World) -> None:
 
 
 def test_an_alert_or_its_notifier_is_never_removed(w: World) -> None:
-    with pytest.raises(ChangeRefused, match=r"may not remove an alert or its notifiers \(fridge_alert\)"):
+    with pytest.raises(ChangeRefused, match=r"may not remove an existing alert.*\(fridge_alert\)"):
         w.propose({ALERT: "alert:\n  other:\n    name: Other\n    entity_id: binary_sensor.fridge_warm\n"})
-    with pytest.raises(ChangeRefused, match=r"fridge_alert \(notifiers critical_alerts\)"):
+    with pytest.raises(ChangeRefused, match=r"fridge_alert \(notifiers\)"):
         w.propose({ALERT: FILES[ALERT].replace("    notifiers:\n      - critical_alerts\n", "")})
-    w.propose({ALERT: NEW_ALERT})  # tuning an alert is fine
+    for old, new, key in (("entity_id: binary_sensor.fridge_warm", "entity_id: binary_sensor.porch", "entity_id"),
+                          ("    notifiers:", "    state: 'off'\n    notifiers:", "state"),
+                          ("    notifiers:", "    repeat: 1440\n    notifiers:", "repeat"),
+                          ("    notifiers:", "    skip_first: true\n    notifiers:", "skip_first"),
+                          ("    notifiers:", "    can_acknowledge: true\n    notifiers:", "can_acknowledge"),
+                          ("      - critical_alerts\n", "      - critical_alerts\n      - mobile_app_admin_phone\n",
+                           "notifiers")):  # fmt: skip
+        with pytest.raises(ChangeRefused, match=rf"fridge_alert \({key}\)"):
+            w.propose({ALERT: FILES[ALERT].replace(old, new)})
+    w.propose({ALERT: NEW_ALERT})  # rewording an alert is fine
 
 
 def test_an_automation_id_or_alias_is_never_taken_twice(w: World) -> None:

@@ -27,7 +27,8 @@ The whole file is walked, not just the added lines:
 The old version of a file is checked too (`does_more`, `alerts_removed`):
 a file that already does more than the allowlist (an action outside it,
 devices, areas, events, scenes, YAML tags) is never changed by a proposal,
-and an alerts file never loses an alert or an alert's notifier.
+and an existing alert is never removed and keeps its entity, state,
+repeat, skip_first, can_acknowledge and notifiers.
 """
 
 import difflib
@@ -659,8 +660,13 @@ def _alerts(text: str) -> dict[str, Any]:
     return {str(k): v for k, v in alerts.items()} if isinstance(alerts, dict) else {}
 
 
+# What an existing alert watches and who it tells: a proposal may reword an alert, never change these.
+FROZEN_ALERT_KEYS = ("entity_id", "state", "repeat", "skip_first", "can_acknowledge", "notifiers")
+
+
 def alerts_removed(old: str, new: str) -> list[str]:
-    """Alerts of an alerts package that a change removes, or whose notifiers it removes (both refused)."""
+    """Existing alerts a change removes, or whose watched entity, state, timing, acknowledgement or notifiers it
+    changes (all refused); a new alert, or a new message, title or name, is fine."""
     try:
         before, after = _alerts(old), _alerts(new)
     except ValueError:
@@ -670,12 +676,11 @@ def alerts_removed(old: str, new: str) -> list[str]:
         if name not in after:
             lost.append(name)
             continue
-        was = alert.get("notifiers") if isinstance(alert, dict) else None
-        now = after[name].get("notifiers") if isinstance(after[name], dict) else None
-        had = {n for n in (was if isinstance(was, list) else [was]) if isinstance(n, str)}
-        has = {n for n in (now if isinstance(now, list) else [now]) if isinstance(n, str)}
-        if had - has:
-            lost.append(f"{name} (notifiers {', '.join(sorted(had - has))})")
+        was = alert if isinstance(alert, dict) else {}
+        now = after[name] if isinstance(after[name], dict) else {}
+        changed = [k for k in FROZEN_ALERT_KEYS if was.get(k) != now.get(k)]
+        if changed:
+            lost.append(f"{name} ({', '.join(changed)})")
     return lost
 
 

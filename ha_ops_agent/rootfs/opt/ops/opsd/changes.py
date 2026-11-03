@@ -202,9 +202,8 @@ def check_content(path: str, old: bytes | None, new: bytes, *, notify_service: s
                                 " can edit it")  # fmt: skip
         lost = configcheck.alerts_removed(old_text, text) if path.startswith("alerts/") else []
         if lost:
-            raise ChangeRefused(
-                f"{path}: a proposal may not remove an alert or its notifiers ({', '.join(lost)[:200]})"
-            )
+            raise ChangeRefused(f"{path}: a proposal may not remove an existing alert or change what it watches, when"
+                                f" it repeats or whom it tells ({', '.join(lost)[:200]})")  # fmt: skip
     try:
         configcheck.check_file(path, text, entities=entities, admin_notify=notify_service, guarded=guarded)
     except configcheck.ConfigRefused as err:

@@ -883,6 +883,11 @@ class Daemon:
             message = self.assistant.with_reply(message, now=datetime.now(UTC), reply=reply)
         return await self.send_now(message)
 
+    async def note_message(self, title: str, body: str) -> None:
+        """An agent message for information only: a quiet History entry, no push and no chat message."""
+        if self.activity is not None:
+            self.activity.record("note", title.removeprefix("Agent: "), body, chat=False)
+
     def _save_snapshot(self, snapshot: Snapshot) -> None:
         self.paths.snapshots_dir.mkdir(parents=True, exist_ok=True)
         name = snapshot.taken_at.replace(":", "-") + ".json"
@@ -1183,7 +1188,9 @@ class Daemon:
             "denials": run.denials[:20] if run else [],
             "rejected": rejected or [],
             "in_run_effects": (
-                {"acks": len(effects.acks), "pushes": len(effects.notify_outcomes)} if effects else None
+                {"acks": len(effects.acks), "pushes": len([o for o in effects.notify_outcomes if o != "noted"])}
+                if effects
+                else None
             ),
         }
         append_jsonl(self.paths.history_file, record)

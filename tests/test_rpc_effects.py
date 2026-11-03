@@ -33,12 +33,16 @@ class Sink:
     def __init__(self) -> None:
         self.messages: list[Message] = []
         self.replies: list[bool] = []
+        self.notes: list[tuple[str, str]] = []
         self.outcome = "sent"
 
     async def send_message(self, message: Message, *, reply: bool = True) -> str:
         self.messages.append(message)
         self.replies.append(reply)
         return self.outcome
+
+    async def note_message(self, title: str, body: str) -> None:
+        self.notes.append((title, body))
 
 
 class World:
@@ -102,7 +106,10 @@ def strict(paths: Paths) -> Iterator[World]:
 
 
 async def test_effects_refused_outside_a_run(world: World) -> None:
-    for verb, args in (("ack", {"key": "entities:zha"}), ("notify", {"title": "t", "message": "m"})):
+    for verb, args in (
+        ("ack", {"key": "entities:zha"}),
+        ("notify", {"title": "t", "message": "m", "reason": "needs_action"}),
+    ):
         response = await world.call(verb, **args)
         assert not response["ok"] and "only available inside an agent run" in response["error"]
     assert world.sink.messages == []
@@ -206,9 +213,11 @@ async def test_replayed_ack_from_an_earlier_run_is_refused(world: World) -> None
 
 async def test_notify_one_per_run_and_urgent_only_with_critical(world: World) -> None:
     world.run(handoff={"entities:zha": ITEMS["entities:zha"]})
-    first = await world.call("notify", title="Zigbee", message="two sensors down\\ncheck the hub", urgent=True)
+    first = await world.call(
+        "notify", reason="needs_action", title="Zigbee", message="two sensors down\\ncheck the hub", urgent=True
+    )
     assert first["ok"] and "urgent downgraded" in first["output"]
-    second = await world.call("notify", title="again", message="spam")
+    second = await world.call("notify", reason="needs_action", title="again", message="spam")
     assert not second["ok"] and "1 call(s) per run" in second["error"]
     [message] = world.sink.messages
     assert message.urgent is False and message.body == "two sensors down\ncheck the hub"
@@ -219,7 +228,9 @@ async def test_notify_one_per_run_and_urgent_only_with_critical(world: World) ->
 
 async def test_notify_urgent_with_critical_and_redaction(world: World) -> None:
     run = world.run()
-    response = await world.call("notify", title="Acme Solar", message="password: hunter22secret leaked", urgent=True)
+    response = await world.call(
+        "notify", reason="needs_action", title="Acme Solar", message="password: hunter22secret leaked", urgent=True
+    )
     assert response["ok"] and world.sink.messages[0].urgent
     assert "hunter22secret" not in world.sink.messages[0].body and run.effects.notify_outcomes == ["sent"]
 
@@ -227,25 +238,43 @@ async def test_notify_urgent_with_critical_and_redaction(world: World) -> None:
 async def test_notify_rate_limited_is_reported_and_counts(world: World) -> None:
     world.sink.outcome = "rate_limited"
     world.run()
-    response = await world.call("notify", title="t", message="m")
+    response = await world.call("notify", reason="needs_action", title="t", message="m")
     assert response["ok"] and "not delivered: rate_limited" in response["output"]
-    assert not (await world.call("notify", title="t", message="m"))["ok"]
+    assert not (await world.call("notify", reason="needs_action", title="t", message="m"))["ok"]
 
 
 async def test_notify_daily_quota_across_runs(world: World) -> None:
     for _ in range(9):
         world.run()
-        assert (await world.call("notify", title="t", message="m"))["ok"]
+        assert (await world.call("notify", reason="needs_action", title="t", message="m"))["ok"]
         world.server.end_run()
     world.run()
-    response = await world.call("notify", title="t", message="m")
+    response = await world.call("notify", reason="needs_action", title="t", message="m")
     assert not response["ok"] and "daily quota" in response["error"]
+
+
+async def test_a_push_without_a_reason_class_is_a_history_note(world: World) -> None:
+    for reason in (None, "fyi", "update"):
+        run = world.run()
+        args = {"title": "Acme Solar", "message": "recovered after the reload"} | ({"reason": reason} if reason else {})
+        response = await world.call("notify", **args)
+        assert response["ok"] and "History note" in response["output"]
+        assert run.effects.notify_outcomes == ["noted"]
+        world.server.end_run()
+    assert world.sink.messages == [] and world.sink.notes == [("Acme Solar", "recovered after the reload")] * 3
+    for reason in ("needs_action", "physical_task", "security"):
+        world.run()
+        assert (await world.call("notify", title="t", message="m", reason=reason))["ok"]
+        world.server.end_run()
+    assert len(world.sink.messages) == 3
 
 
 async def test_notify_empty_message_refused(world: World) -> None:
     world.run()
-    assert "message is required" in (await world.call("notify", title="t", message="   "))["error"]
-    assert "message is required" in (await world.call("notify", title="t"))["error"]
+    assert (
+        "message is required" in (await world.call("notify", reason="needs_action", title="t", message="   "))["error"]
+    )
+    assert "message is required" in (await world.call("notify", reason="needs_action", title="t"))["error"]
 
 
 @pytest.mark.parametrize(
@@ -262,7 +291,7 @@ async def test_options_tighten_effects(paths: Paths, options: Options, message: 
     world = World(paths, options=options)
     try:
         world.run()
-        response = await world.call("notify", title="t", message="m")
+        response = await world.call("notify", reason="needs_action", title="t", message="m")
         assert not response["ok"] and message in response["error"] and world.sink.messages == []
     finally:
         world.store.close()
@@ -344,8 +373,8 @@ async def test_concurrent_calls_cannot_both_pass_the_quota(world: World) -> None
 
     world.sink.send_message = slow  # type: ignore[method-assign]
     world.run()
-    first = asyncio.create_task(world.call("notify", title="a", message="one"))
-    second = asyncio.create_task(world.call("notify", title="b", message="two"))
+    first = asyncio.create_task(world.call("notify", reason="needs_action", title="a", message="one"))
+    second = asyncio.create_task(world.call("notify", reason="needs_action", title="b", message="two"))
     await asyncio.sleep(0.05)
     gate.set()
     results = [await first, await second]

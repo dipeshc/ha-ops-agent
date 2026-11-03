@@ -411,7 +411,8 @@ async def test_followup_generation_and_daily_caps(h: Harness) -> None:
 async def test_a_triage_push_links_to_the_chat_without_a_reply_button(h: Harness) -> None:
     await h.daemon().health_cycle("catch_up")
     h.fake.set_unavailable("light.kitchen", hours_ago=8)
-    h.in_run_requests = [{"verb": "notify", "args": {"title": "Kitchen", "message": "reply with OK to approve"}}]
+    h.in_run_requests = [{"verb": "notify", "args": {"title": "Kitchen", "message": "reply with OK to approve",
+                                                     "reason": "needs_action"}}]  # fmt: skip
     h.claude_reply = {"result": "ok", "summary": "s", "acks": [], "notify": None, "ops_log": None}
     d = daemon(h)
     await d.health_cycle("daily")

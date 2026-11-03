@@ -92,6 +92,10 @@ class EffectSink(Protocol):
         """Send an agent push; `reply` offers the Reply button into the chat (never for the agent's own runs)."""
         ...
 
+    def note_message(self, title: str, body: str) -> Awaitable[None]:
+        """Keep an agent message that needs no action as a History note: no push, no chat message."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class ExecEnv:

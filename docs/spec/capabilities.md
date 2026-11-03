@@ -93,7 +93,15 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   and never accepted, a warning at most 7); the daemon applies it after the
   run. `notify.admin` needs a message of at most 900 characters, `urgent`
   only when the hand-off has a critical item, and is sent with the run's
-  budget class. Tests `test_rpc_effects.py:177-242`, `test_daemon.py:498-538`.
+  budget class. It reaches the phone only with a `reason` class from
+  `PUSH_REASONS` (`needs_action`, `physical_task`, `security`: the admin
+  must act or decide); any other or no reason makes it a quiet History
+  note (activity kind `note`, the text under `agent`), with no push and no
+  chat message, and the call answers so. The deterministic critical push
+  ([health.md](health.md) H17) is unaffected. Tests
+  `test_rpc_effects.py:177-242`, `test_a_push_without_a_reason_class_is_a_history_note`,
+  `test_an_agent_push_for_information_goes_to_history_and_the_critical_push_still_goes`,
+  `test_daemon.py:498-538`.
 - K12. **`dashboard.save`** (verb `dashboard-save`, executor
   `opsd.dashboards:exec_internal`, which always refuses) is daemon-internal:
   tier APPROVE, effect `{MUTATE_HA}`, origin agent-self only, in no run

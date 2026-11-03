@@ -45,13 +45,15 @@ Post = Callable[[dict[str, Any], str | None], int | None]
 _KIND = {"backup": "backup", "reload": "reload", "updates": "window", "approval": "update", "change": "proposal",
          "investigation": "investigation", "reminder": "reminder", "followup": "reminder"}  # fmt: skip
 # Routine lines: History folds them; they never show on Home.
-QUIET = frozenset({"check", "suppressed", "updates", "reminder", "investigation"})
+QUIET = frozenset({"check", "suppressed", "updates", "reminder", "investigation", "note"})
 # Entries whose title or detail can carry the model's words (a triage message, a follow-up's finding, an
 # investigation's title or result): their item gets a fixed title, and the words go under `agent` only.
-AGENT_TEXT = frozenset({"notice", "followup", "investigation"})
-_AGENT_KICKER = {"notice": "Message from the agent", "followup": "Follow-up", "investigation": "Investigation"}
+AGENT_TEXT = frozenset({"notice", "followup", "investigation", "note"})
+_AGENT_KICKER = {"notice": "Message from the agent", "followup": "Follow-up", "investigation": "Investigation",
+                 "note": "Note from the agent"}  # fmt: skip
 _AGENT_TITLE = {"notice": "The agent sent you a message", "followup": "The agent sent you a message",
-                "investigation": "An investigation ended"}  # fmt: skip
+                "investigation": "An investigation ended",
+                "note": "The agent noted something (not pushed)"}  # fmt: skip
 # A push names a standalone item by what it is, never by its entry's words.
 _PUSH_TITLE = {"backup": "Ops Agent: backup", "reload": "Ops Agent: reload", "approval": "Ops Agent: approval",
                "change": "Ops Agent: config change"}  # fmt: skip

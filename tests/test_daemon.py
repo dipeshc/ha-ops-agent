@@ -130,7 +130,7 @@ async def test_broken_custom_integration_runs_claude_and_notifies(h: Harness) ->
         h.fake.set_unavailable(entity, hours_ago=8)
     h.in_run_requests = [
         {"verb": "ack", "args": {"key": "entities:acme_solar", "days": 1, "reason": "user notified"}},
-        {"verb": "notify", "args": {"title": "Acme Solar down", "urgent": True,
+        {"verb": "notify", "args": {"title": "Acme Solar down", "urgent": True, "reason": "needs_action",
                                     "message": "All Acme Solar entities unavailable; rollback recommended."}},
     ]  # fmt: skip
     h.claude_reply = {"result": "escalated", "summary": "Acme Solar down after update"}
@@ -218,16 +218,32 @@ async def test_non_urgent_claude_push_does_not_suppress_critical(h: Harness) -> 
     h.fake.set_unavailable("light.kitchen", hours_ago=8)
     h.in_run_requests = [
         {"verb": "ack", "args": {"key": "entities:acme_solar", "days": 30, "accept": True, "reason": "fine"}},
-        {"verb": "notify", "args": {"title": "FYI", "message": "a light is off"}},
+        {"verb": "notify", "args": {"title": "Kitchen", "message": "a light is off", "reason": "physical_task"}},
     ]
     h.claude_reply = {"result": "ok", "summary": "fine"}
     await h.daemon().health_cycle("daily")
     titles = [p["title"] for p in h.pushes()]
-    assert titles[-2:] == ["Agent: FYI", "Ops Agent: critical"]
+    assert titles[-2:] == ["Agent: Kitchen", "Ops Agent: critical"]
     baseline = read_json(h.paths.baseline_file, {})
     ack = baseline["acks"]["entities:acme_solar"]
     assert ack["accepted"] is False and ack["by"] == "claude"
     assert "light.kitchen" not in baseline["unavailable"]  # the AI cannot accept critical
+
+
+async def test_an_agent_push_for_information_goes_to_history_and_the_critical_push_still_goes(h: Harness) -> None:
+    await h.daemon().health_cycle("catch_up")
+    h.fake.set_unavailable("light.kitchen", hours_ago=8)
+    h.in_run_requests = [{"verb": "notify", "args": {"title": "FYI", "message": "a light is off"}}]
+    h.claude_reply = {"result": "ok", "summary": "fine"}
+    outcome = await h.daemon().health_cycle("daily")
+    assert h.in_run_responses[-1]["ok"] and "History note" in h.in_run_responses[-1]["output"]
+    titles = [p["title"] for p in h.pushes()]
+    assert "Agent: FYI" not in titles and titles[-1] == "Ops Agent: critical"
+    assert outcome.record["in_run_effects"]["pushes"] == 0
+    d = h.current
+    assert d is not None and d.store is not None
+    [note] = [i for i in d.store.items_all() if i.get("kicker") == "Note from the agent"]
+    assert note["quiet"] and not note["needs"] and note["agent"]["text"].startswith("FYI: a light is off")
 
 
 async def test_rate_limited_claude_push_still_gets_safety_net(h: Harness) -> None:
@@ -569,7 +585,12 @@ async def test_in_run_effects(h: Harness) -> None:
         {"verb": "ack", "args": {"key": "custom:acme_solar", "days": 30, "accept": True}},
         {
             "verb": "notify",
-            "args": {"title": "Acme Solar down", "message": "All Acme Solar entities unavailable", "urgent": True},
+            "args": {
+                "title": "Acme Solar down",
+                "message": "All Acme Solar entities unavailable",
+                "urgent": True,
+                "reason": "needs_action",
+            },
         },
         {"verb": "notify", "args": {"title": "again", "message": "second push"}},
     ]
@@ -889,7 +910,7 @@ async def test_agent_push_cannot_impersonate_a_safety_push(h: Harness) -> None:
     await h.daemon().health_cycle("catch_up")
     h.fake.config_ok = False
     h.in_run_requests = [{"verb": "notify", "args": {"title": "Ops Agent: Core is back", "message": "all fine",
-                                                     "urgent": True}}]  # fmt: skip
+                                                     "urgent": True, "reason": "security"}}]  # fmt: skip
     h.claude_reply = {"result": "ok", "summary": "s"}
     await h.daemon().health_cycle("daily")
     agent, safety = h.pushes()[-2:]

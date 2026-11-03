@@ -181,7 +181,10 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 - H16. The triage profile gets the read capabilities plus `task.create`,
   `task.list`, `baseline.ack`, `notify.admin`, `suppress.propose` and
   `integration.reload` (see [capabilities.md](capabilities.md)). It MUST NOT
-  change a severity. Its result is `{result: ok|escalated|failed, summary}`;
+  change a severity. It handles what it can itself and pushes only when the
+  admin must act or decide: something it cannot handle, a physical task or
+  a security-relevant change, given as the push's `reason` class; a push
+  for information becomes a History note (capabilities.md K11). Its result is `{result: ok|escalated|failed, summary}`;
   an unknown result is `failed`. At most 6 triage runs a day.
 - H17. **Safety net.** Whatever the AI did or whether it ran: any critical
   item sends an urgent safety-class push (tag `ha-ops-fallback`); when

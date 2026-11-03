@@ -214,7 +214,10 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `Agent: <title>` (70 characters), tagged `ha-ops-agent`, and are never
   SAFETY class; the full text stays in the panel. A push from the agent's
   own run (`notify.admin`) is one message in the chat and links to it, but
-  carries no Reply button: model text never invites an answer. Test
+  carries no Reply button: model text never invites an answer. It goes out
+  only with a reason class (`needs_action`, `physical_task`, `security`);
+  without one it is a quiet History note, never a push
+  ([capabilities.md](capabilities.md) K11). Test
   `test_a_triage_push_links_to_the_chat_without_a_reply_button`.
 - N8. **Quiet hours.** Non-bypassing pushes are held in the store and sent on
   the first liveness pass after the window; urgent, quiet-ok and SAFETY

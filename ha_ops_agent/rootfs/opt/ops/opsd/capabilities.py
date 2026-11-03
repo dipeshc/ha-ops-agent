@@ -40,6 +40,8 @@ SLUG_RE = re.compile(r"[a-z0-9_]{1,64}")
 IDENT_RE = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
 TEXT_RE = re.compile(r"[^\x00-\x1f\x7f]{1,300}")
 TITLE_RE = re.compile(r"[^\x00-\x1f\x7f]{1,60}")
+# A reason class: any short word passes the schema, and the executor decides what it means (`effects`).
+REASON_RE = re.compile(r"[a-z_]{0,32}")
 # Multi-line text: newlines and tabs, no other control characters.
 MULTILINE_RE = re.compile(r"[^\x00-\x08\x0b-\x1f\x7f]{1,4000}")
 ITEM_KEY_RE = re.compile(r"[A-Za-z0-9_.:@/+-]{1,200}")
@@ -340,12 +342,18 @@ REGISTRY: tuple[Capability, ...] = (
     Capability(
         "notify.admin",
         "notify",
-        "send the one push this run may send to the admin's phone",
+        "send the one push this run may send to the admin's phone, only when the admin must act or decide",
         "opsd.effects:exec_notify",
         {
             "title": Arg(str, None, pattern=TITLE_RE),
             "message": Arg(str, None, pattern=MULTILINE_RE, unescape_newlines=True, help="900 characters at most"),
             "urgent": Arg(bool, False, help="only honoured when a hand-off item is critical"),
+            "reason": Arg(
+                str,
+                "",
+                pattern=REASON_RE,
+                help="needs_action, physical_task or security; anything else is a History note, not a push",
+            ),
         },
         effects=frozenset({Effect.NOTIFY}),
         origins=frozenset({Origin.AGENT_SELF}),

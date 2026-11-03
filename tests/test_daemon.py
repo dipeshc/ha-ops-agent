@@ -294,6 +294,10 @@ async def test_user_ack_from_panel_can_accept(h: Harness) -> None:
     assert not await d.user_ack("nope", days=1, accept=False)
     baseline = read_json(h.paths.baseline_file, {})
     assert "light.kitchen" in baseline["unavailable"] and baseline["acks"]["entities:acme_solar"]["by"] == "user"
+    assert d.store is not None
+    record = d.store.item_by_key("health:entities:acme_solar")
+    assert record is not None and record["state"] == "done" and not record["needs"]
+    assert record["gist"].startswith("accepted as normal by you")
     outcome = await d.health_cycle("daily")
     assert outcome.result == "ok"
 
@@ -570,6 +574,14 @@ async def test_in_run_effects(h: Harness) -> None:
     audit = h.current.store.audit_rows(limit=50) if h.current else []
     assert {r["capability"] for r in audit} >= {"agent.status", "baseline.ack", "notify.admin"}
     assert h.current is not None and h.current.rpc is not None and h.current.rpc.active_run is None
+    # What the run acked is handled: shown resolved by the agent, never in Needs you; the critical push went out.
+    d = h.current
+    assert d is not None and d.open_items() == [] and d.store is not None
+    for key in ("health:entities:acme_solar", "health:custom:acme_solar"):
+        record = d.store.item_by_key(key)
+        assert record is not None and record["state"] == "done" and not record["needs"], key
+        assert "by the agent" in record["gist"]
+    assert "user notified" in str(d.store.item_by_key("health:entities:acme_solar")["gist"])
 
 
 async def test_in_run_acks_survive_a_failed_run(h: Harness) -> None:

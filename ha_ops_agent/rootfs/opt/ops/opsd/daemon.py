@@ -202,6 +202,13 @@ def fallback_push(items: list[Item], now: datetime | None = None) -> Message | N
     )
 
 
+def _handled(item: Item, baseline: Baseline, by: str) -> dict[str, Any]:
+    """An acked health item as the items show it: resolved, by whom, until when and why."""
+    ack = baseline.acks.get(item.key) or {}
+    return {"item": item.to_json(), "by": by, "until": ack.get("until"), "accepted": bool(ack.get("accepted")),
+            "reason": str(ack.get("reason") or "")[:300]}  # fmt: skip
+
+
 def baseline_summary(snapshot: Snapshot, expected_unavailable: frozenset[str] = frozenset()) -> tuple[str, bool]:
     """Seed push text, and whether something critical was found (and not accepted)."""
     platforms: dict[str, int] = {}
@@ -464,6 +471,9 @@ class Daemon:
             paused=updates.paused() if updates is not None else False,
             health_at=raw.get("at") if isinstance(raw, dict) else None,
             health_items=[i for i in (raw.get("items") or []) if isinstance(i, dict)] if isinstance(raw, dict) else [],
+            health_handled=[h for h in (raw.get("handled") or []) if isinstance(h, dict)]
+            if isinstance(raw, dict)
+            else [],
             redact=cached[1].redact,
             acting=self.options.acting,
         )
@@ -957,12 +967,15 @@ class Daemon:
             acked.add(ack.key)
         write_json_atomic(self.paths.baseline_file, baseline.to_json())
 
+        # The critical push goes out for every critical item, acked in the run or not.
         notify_outcome = await self._notify(items, triage, core_up=core_up, now=now)
         if effects.notify_outcomes:
             notify_outcome = "+".join([*effects.notify_outcomes, *([notify_outcome] if notify_outcome else [])])
         if pushed_outcome:
             notify_outcome = "+".join(o for o in (notify_outcome, pushed_outcome) if o)
-        self._save_open_items([*items, *pushed], now)
+        # What the run acked is handled (shown resolved), not open: it never enters Needs you.
+        handled = [_handled(by_key[k], baseline, "agent") for k in sorted(acked)]
+        self._save_open_items([*(i for i in items if i.key not in acked), *pushed], now, handled=handled)
 
         summary = (
             triage.summary
@@ -1026,10 +1039,14 @@ class Daemon:
         self._expected_refused |= set(refused)
         return expected
 
-    def _save_open_items(self, items: list[Item], now: datetime) -> None:
+    def _save_open_items(self, items: list[Item], now: datetime, *, handled: list[dict[str, Any]] | None = None,
+                         ) -> None:  # fmt: skip
+        """The check's open items, and the ones acked since it ran (`handled`: shown resolved, never open)."""
         write_json_atomic(
-            self.paths.open_items_file, {"at": now.isoformat(timespec="seconds"), "items": [i.to_json() for i in items]}
-        )
+            self.paths.open_items_file,
+            {"at": now.isoformat(timespec="seconds"), "items": [i.to_json() for i in items],
+             "handled": handled or []},
+        )  # fmt: skip
         if self.items is None:
             return
         # The health items are items too: cleared ones resolve, new ones enter Needs you.
@@ -1058,7 +1075,10 @@ class Daemon:
             )  # fmt: skip
             write_json_atomic(self.paths.baseline_file, baseline.to_json())
             remaining = [i for i in self.open_items() if i.key != key]
-            self._save_open_items(remaining, now)
+            raw_open = read_json(self.paths.open_items_file, {})
+            earlier = [h for h in (raw_open.get("handled") or []) if isinstance(h, dict)
+                       and (h.get("item") or {}).get("key") != key] if isinstance(raw_open, dict) else []  # fmt: skip
+            self._save_open_items(remaining, now, handled=[*earlier, _handled(item, baseline, "you")])
             self.state.pending_items = len(remaining)
             self.state.save(self.paths.state_file)
         _LOGGER.info("user ack", extra={"key": key, "days": days, "accept": accept})

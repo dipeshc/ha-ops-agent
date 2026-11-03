@@ -212,6 +212,8 @@ class Context:
     paused: bool = False
     health_at: str | None = None
     health_items: list[dict[str, Any]] = field(default_factory=list)
+    # Health items acked since the check ran (by the agent in its run, or by you): shown resolved.
+    health_handled: list[dict[str, Any]] = field(default_factory=list)
     redact: Callable[[str], str] = lambda text: text
     # Act mode: a dashboard plan can be applied (observe mode shows it without the action).
     acting: bool = False
@@ -764,7 +766,30 @@ class Composer:
                 spec.actions = [act("snooze", "Snooze 7 days"), act("accept", "Accept as normal", "text")]
                 spec.source["recheck_at"] = _iso(after)
             specs.append(spec)
+        open_keys = {spec.key for spec in specs}
+        for handled in ctx.health_handled:
+            done = self._handled(handled)
+            if done is not None and done.key not in open_keys:
+                specs.append(done)
         return specs
+
+    def _handled(self, handled: Mapping[str, Any]) -> Spec | None:
+        """A health item acked since the check (by the agent or you): resolved, with who, until when and why."""
+        ctx = self.ctx
+        raw = _dict(handled.get("item"))
+        if not raw.get("key"):
+            return None
+        who = "you" if handled.get("by") == "you" else "agent"
+        until = _parse(handled.get("until"))
+        verb = ("accepted as normal" if handled.get("accepted")
+                else f"snoozed until {until.astimezone(self.tz):%Y-%m-%d %H:%M}" if until is not None
+                else "snoozed")  # fmt: skip
+        reason = ctx.redact(clean_text(str(handled.get("reason") or ""), 160))
+        gist = f"{verb} by {'you' if who == 'you' else 'the agent'}" + (f": {reason}" if reason else "")
+        title = ctx.redact(clean_text(str(raw.get("summary") or raw.get("key")), 120))
+        return Spec(key=f"health:{raw.get('key')}", kind="check", title=title, state="done", kicker="Health check",
+                    gist=gist, since=ctx.health_at, created=ctx.health_at, as_of=ctx.health_at,
+                    source={"health": str(raw.get("key"))}, actor=who, pushes=False)  # fmt: skip
 
     # ------------------------------------------------------------ maintenance
 

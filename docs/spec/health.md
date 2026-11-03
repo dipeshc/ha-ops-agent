@@ -149,6 +149,13 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   failed run. Tests `test_health_baseline.py:123-153`,
   `test_daemon.py:498-538`,
   `test_access_hardware_is_its_own_critical_item_the_agent_cannot_accept`.
+- H13a. An item acked since the check ran, by the AI in its run or by the
+  admin in the panel, is handled, not open: it leaves the open items (the
+  panel's health list, the status sensor's count, Needs you) and its item is
+  shown resolved with who acked it, until when and why ("snoozed until … by
+  the agent: <reason>", "accepted as normal by you"). The safety net (H17)
+  still pushes every critical item of the check, acked in the run or not.
+  Tests `test_in_run_effects`, `test_user_ack_from_panel_can_accept`.
 
 ## Triage
 

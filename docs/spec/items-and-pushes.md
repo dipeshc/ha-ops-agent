@@ -113,8 +113,13 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   items are `waiting` with an `ack` (`snooze` 7 days, `accept` 30 days),
   urgent when critical, and never pushed by the item book (the health check
   pushes its own); a health item whose `needs_after` is in the future is
-  `proposed` without a need. Tests `test_health_items_wait_and_clear`,
-  `test_the_items_engine_asks_only_once_remote_access_stays_down`.
+  `proposed` without a need. A health item acked since the check ran (by
+  the agent in its run, or by the admin) is `done` without a need, actor
+  `agent` or `you`, with a gist that says who acked it, until when and why
+  ([health.md](health.md) H13a); it never enters Needs you. Tests
+  `test_health_items_wait_and_clear`,
+  `test_the_items_engine_asks_only_once_remote_access_stays_down`,
+  `test_in_run_effects`.
 - I11. Follows: the host-reboot health item follows the OS update whose job
   rebooted the host, and the `reboot_required` repair follows the OS update
   pending its reboot; the follower has no need and resolves with its parent.

@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 from opsd.guard import Reads, readable_rel, searchable
-from opsd.safegit import UnsafeRepoConfigError, git_argv, git_env
+from opsd.safegit import UnsafeRepoConfigError, git_argv, git_env, status_lines
 
 REV_RE = re.compile(r"(HEAD|[0-9a-f]{7,40})(~[0-9]{1,3}|\^{1,3})?")
 PATH_RE = re.compile(r"[A-Za-z0-9_@+][A-Za-z0-9._@+/-]{0,200}")
@@ -78,7 +78,13 @@ def _readable_names(names: str, reads: Reads | None) -> tuple[list[str], int]:
 
 
 def status(repo: Path) -> str:
-    return _git(repo, "status", "--porcelain=v1", "--untracked-files=no", "--no-renames")
+    """Tracked changes in `git status --porcelain=v1` form, computed without running any filter."""
+    try:
+        return "".join(f"{line}\n" for line in status_lines(repo, untracked=False))
+    except UnsafeRepoConfigError as err:
+        raise HistoryError(str(err)) from err
+    except (subprocess.SubprocessError, OSError) as err:
+        raise HistoryError(f"git status failed: {str(err)[:200]}") from err
 
 
 def log(repo: Path, count: int, path: str | None, reads: Reads | None = None) -> str:
@@ -92,7 +98,8 @@ def log(repo: Path, count: int, path: str | None, reads: Reads | None = None) ->
 def diff(repo: Path, rev_range: str, path: str | None, reads: Reads | None = None) -> str:
     parts = rev_range.split("..")
     if len(parts) == 1:
-        revs = [resolve_commit(repo, parts[0])]
+        # REV against the index, never the work tree: comparing with work-tree files would run filters.
+        revs = ["--cached", resolve_commit(repo, parts[0])]
     elif len(parts) == 2:
         revs = [f"{resolve_commit(repo, parts[0])}..{resolve_commit(repo, parts[1])}"]
     else:

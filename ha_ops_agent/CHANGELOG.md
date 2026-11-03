@@ -63,8 +63,14 @@ Config proposals:
 - Git runs with signing, credential helpers, askpass and every repository
   filter, diff and merge driver neutralised, over SSH only, and refuses to
   run when the repository config sets includes, URL rewrites, a proxy
-  command or another work tree. Fetch and push use `remote.origin.url`,
-  which must be a GitHub SSH URL (`git@github.com:<owner>/<repo>`).
+  command, another work tree or a remote other than `origin`. The agent no
+  longer runs any git command that converts work-tree files (`add`,
+  `commit`, `status`, a work-tree diff): it stages with `hash-object
+  --no-filters` and `update-index`, commits with `write-tree`,
+  `commit-tree` and `update-ref`, and finds changed files by hashing them
+  without filters. `opsctl git-diff REV` now compares REV with the index.
+  Fetch and push use `remote.origin.url`, which must be a GitHub SSH URL
+  (`git@github.com:<owner>/<repo>`).
 
 Updates and approvals:
 

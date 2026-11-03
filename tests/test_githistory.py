@@ -253,6 +253,7 @@ def test_push_names_a_checked_remote_url_never_the_config(tmp_path: Path) -> Non
         ("remote.origin.uploadpack", "PROGRAM"),
         ("remote.origin.receivepack", "PROGRAM"),
         ("remote.origin.vcs", "evil"),
+        ("remote.mirror.url", "PATH"),
     ],
 )
 def test_repo_config_a_override_cannot_neutralise_refuses_git(tmp_path: Path, key: str, value: str) -> None:
@@ -315,3 +316,59 @@ def test_editor_and_hooks_never_run(tmp_path: Path) -> None:
     (ha / "automations" / "a.yaml").write_text("- id: two\n")
     Repo(ha, tmp_path / "k", tmp_path / "kh").commit_paths(["automations/a.yaml"], "fix(a): test")
     assert not _markers(tmp_path)
+
+
+def test_a_filter_driver_added_after_the_overrides_were_built_never_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The config snapshot and the git call are two processes: a driver added in between must find nothing to run."""
+    from opsd import gitops, health, safegit
+    from opsd.gitops import Repo
+
+    ha, script = _hostile(tmp_path)
+    git(ha, "config", "remote.origin.url", "git@github.com:acme/house.git")
+    git(ha, "update-ref", "refs/remotes/origin/main", "HEAD")
+    real = safegit.git_argv
+
+    def racing(repo: Path, *args: str) -> list[str]:
+        argv = real(repo, *args)
+        # The race: written after the overrides were computed, before git runs.
+        (repo / ".git" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "info" / "attributes").write_text("* filter=late\n")
+        with (repo / ".git" / "config").open("a") as config:
+            config.write(f'[filter "late"]\n\tclean = {script}\n\tsmudge = {script}\n\trequired = false\n')
+        return argv
+
+    # The reproduction: under the same race, `add` (what the agent used to run) does run the driver.
+    (ha / "automations" / "a.yaml").write_text("- id: two\n")
+    subprocess.run(racing(ha, "add", "-A", "--", "automations/a.yaml"), capture_output=True, env=safegit.git_env(),
+                   check=False)  # fmt: skip
+    assert _markers(tmp_path), "the race reproduction should run the late driver through add"
+    for marker in _markers(tmp_path):
+        marker.unlink()
+    subprocess.run(["git", "-C", str(ha), "-c", "filter.late.clean=cat", "reset", "-q"], check=True)
+    git(ha, "config", "--remove-section", "filter.late")
+
+    for module in (safegit, gitops, githistory, health):
+        monkeypatch.setattr(module, "git_argv", racing)
+    repo = Repo(ha, tmp_path / "k", tmp_path / "kh")
+    (ha / "automations" / "a.yaml").write_text("- id: three\n")
+    assert repo.dirty_paths() == ["automations/a.yaml"]
+    assert githistory.status(ha) == " M automations/a.yaml\n"
+    assert health.git_status(ha)["dirty"] == ["automations/a.yaml"]
+    githistory.diff(ha, "HEAD", None)
+    head = repo.commit_paths(["automations/a.yaml"], "fix(automations): bump a")
+    assert repo.file_at(head, "automations/a.yaml") == b"- id: three\n"
+    assert not _markers(tmp_path), _markers(tmp_path)
+
+
+def test_status_lines_match_git_status_on_a_plain_repo(tmp_path: Path) -> None:
+    from opsd.safegit import status_lines
+
+    ha, _ = _hostile(tmp_path)
+    (ha / "automations" / "b.yaml").write_text("- id: b\n")
+    git(ha, "add", "automations/b.yaml")
+    (ha / "automations" / "a.yaml").write_text("- id: changed\n")
+    (ha / "new.yaml").write_text("x: 1\n")
+    (ha / "automations" / "b.yaml").unlink()
+    assert sorted(status_lines(ha)) == sorted(git(ha, "status", "--porcelain", "--untracked-files=all").splitlines())

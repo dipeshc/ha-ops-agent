@@ -278,7 +278,7 @@ REGISTRY: tuple[Capability, ...] = (
     Capability(
         "git.diff",
         "git-diff",
-        "diff of readable files: REV (vs working tree) or REV..REV",
+        "diff of readable files: REV (vs the index) or REV..REV",
         "opsd.queries:cmd_git_diff",
         {"range": Arg(str, "HEAD", pattern=TEXT_RE, positional=True), "path": Arg(str, None, pattern=TEXT_RE)},
         requires=frozenset({"git"}),

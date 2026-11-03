@@ -14,7 +14,7 @@ from opsd import policy
 from opsd.access import access_kind, acts_on_the_house
 from opsd.config import Options, Paths
 from opsd.fingerprint import fingerprint, normalize
-from opsd.safegit import git_argv, git_env
+from opsd.safegit import git_argv, git_env, status_lines
 from opsd.supervisor import ApiError
 
 _LOGGER = logging.getLogger(__name__)
@@ -509,10 +509,11 @@ def git_status(repo: Path) -> dict[str, Any]:
         ).stdout
 
     try:
-        dirty = [line[3:] for line in run("status", "--porcelain").splitlines() if line.strip()]
+        # Never `git status`: it can run a filter driver from the repository config (`safegit.status_lines`).
+        dirty = [line[3:] for line in status_lines(repo)]
         counts = run("rev-list", "--left-right", "--count", "HEAD...origin/main").split()
         branch = run("rev-parse", "--abbrev-ref", "HEAD").strip()
-    except (subprocess.SubprocessError, FileNotFoundError) as err:
+    except (subprocess.SubprocessError, OSError) as err:
         return {"error": str(err)[:200]}
     ahead, behind = (int(counts[0]), int(counts[1])) if len(counts) == 2 else (0, 0)
     return {"dirty": dirty, "ahead": ahead, "behind": behind, "branch": branch}

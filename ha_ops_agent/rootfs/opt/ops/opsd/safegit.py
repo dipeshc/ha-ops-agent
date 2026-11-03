@@ -16,13 +16,25 @@ another work tree). Every git call the agent makes goes through
 - before each call the repository's own config is listed (`--no-includes`,
   which runs nothing) and the call is refused when it holds a key a `-c`
   override cannot neutralise: `include.*`, `includeIf.*`, `url.*`,
-  `core.gitProxy`, `core.worktree`, `core.alternateRefsCommand`, a remote's
-  `uploadpack`/`receivepack`/`vcs`, or a driver name that cannot be
-  written as a `-c` key.
+  `core.gitProxy`, `core.worktree`, `core.alternateRefsCommand`, any
+  remote other than `origin`, a remote's `uploadpack`/`receivepack`/`vcs`,
+  or a driver name that cannot be written as a `-c` key.
+
+That listing and the call are two processes, so a driver added to the
+repository config between them would escape the overrides. The agent
+therefore never runs a git command that converts work-tree content, the
+only place a filter driver runs: nothing is staged with `add` or committed
+with `commit`, and nothing is compared with `status` or a work-tree `diff`.
+Files are staged with `hash-object -w --no-filters` and `update-index
+--cacheinfo`, committed with `write-tree`, `commit-tree` and `update-ref`,
+and the work tree is compared with the index by hashing each file with
+`hash-object --no-filters` (`status_lines`). Every other command the agent
+runs reads only the object store, the index or the refs.
 """
 
 import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 
@@ -121,6 +133,8 @@ def config_overrides(keys: list[str]) -> list[str]:
         section, subsection, variable = _split_key(key)
         if section in _UNSAFE_SECTIONS or key.lower() in _UNSAFE_KEYS:
             raise UnsafeRepoConfigError(f"refusing to run git: the repository config sets {key.split('.')[0]}.*")
+        if section == "remote" and subsection != "origin":
+            raise UnsafeRepoConfigError("refusing to run git: the repository config defines a remote other than origin")
         if section == "remote" and variable in _REMOTE_PROGRAMS:
             raise UnsafeRepoConfigError(f"refusing to run git: the repository config sets remote.*.{variable}")
         if section in drivers and subsection:
@@ -174,3 +188,77 @@ def git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     )
     env.update(extra or {})
     return env
+
+
+def _run(repo: Path, *args: str, data: bytes | None = None, timeout: float = 60) -> bytes:
+    done = subprocess.run(git_argv(repo, *args), input=data, capture_output=True, timeout=timeout, env=git_env(),
+                          check=False)  # fmt: skip
+    if done.returncode != 0:
+        raise subprocess.CalledProcessError(done.returncode, ["git", args[0]], done.stdout, done.stderr)
+    return done.stdout
+
+
+def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
+    """`git status --porcelain=v1`-style lines (`XY path`), computed without running any filter.
+
+    X compares the index with `HEAD` (`diff-index --cached`, objects only); Y compares the work tree with the
+    index by hashing each tracked file as it is (`hash-object --no-filters`; a link by its target, a missing
+    file as deleted); untracked files are listed by `ls-files --others --exclude-standard` (`??`). Unlike
+    `git status`, nothing is refreshed and no clean filter runs, whatever the repository config says.
+    """
+    lines: dict[str, list[str]] = {}
+    head = subprocess.run(git_argv(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"), capture_output=True,
+                          timeout=60, env=git_env(), check=False)  # fmt: skip
+    staged: dict[str, str] = {}
+    if head.returncode == 0:
+        fields = _run(repo, "diff-index", "--cached", "--no-renames", "--name-status", "-z", "HEAD").split(b"\0")
+        for code, name in zip(fields[0::2], fields[1::2], strict=False):
+            if code and name:
+                staged[name.decode(errors="surrogateescape")] = code.decode()[:1]
+    index: dict[str, tuple[str, str]] = {}
+    for record in _run(repo, "ls-files", "--stage", "-z").split(b"\0"):
+        if not record:
+            continue
+        meta, _, name = record.partition(b"\t")
+        mode, sha, _stage = meta.decode().split(" ")
+        path = name.decode(errors="surrogateescape")
+        index[path] = (mode, sha)
+        if head.returncode != 0:
+            staged[path] = "A"
+    regular: list[str] = []
+    worktree: dict[str, str] = {}
+    for path, (mode, sha) in index.items():
+        if mode == "160000":
+            continue
+        try:
+            info = os.lstat(repo / path)
+        except FileNotFoundError:
+            worktree[path] = "D"
+            continue
+        except OSError:
+            worktree[path] = "M"
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            target = os.readlink(repo / path).encode(errors="surrogateescape")
+            found = _run(repo, "hash-object", "--no-filters", "--stdin", data=target).decode().strip()
+            if mode != "120000" or found != sha:
+                worktree[path] = "M"
+        elif stat.S_ISREG(info.st_mode) and mode in ("100644", "100755") and "\n" not in path:
+            regular.append(path)
+        else:
+            worktree[path] = "M"
+    if regular:
+        names = "".join(f"{p}\n" for p in regular).encode(errors="surrogateescape")
+        hashes = _run(repo, "hash-object", "--no-filters", "--stdin-paths", data=names).decode().split()
+        if len(hashes) != len(regular):
+            raise subprocess.SubprocessError("git hash-object: unexpected output")
+        for path, found in zip(regular, hashes, strict=True):
+            if found != index[path][1]:
+                worktree[path] = "M"
+    for path in sorted({*staged, *worktree}):
+        lines.setdefault(path, []).append(f"{staged.get(path, ' ')}{worktree.get(path, ' ')} {path}")
+    out = [line for path in sorted(lines) for line in lines[path]]
+    if untracked:
+        others = _run(repo, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0")
+        out += [f"?? {n.decode(errors='surrogateescape')}" for n in others if n]
+    return out

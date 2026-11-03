@@ -235,8 +235,8 @@ much harm.
   you apply them, after a config check; pushes are fast-forward only, over
   SSH to the GitHub repository in `remote.origin.url`
   (`git@github.com:<owner>/<repo>`). Git refuses to run when the
-  repository's own config sets includes, URL rewrites, a proxy command or
-  another work tree.
+  repository's own config sets includes, URL rewrites, a proxy command,
+  another work tree or a remote other than `origin`.
 
 Trust assumptions: the agent's admin is the Home Assistant user who owns
 the push device in `notify.service`, and must be an active administrator.

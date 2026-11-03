@@ -9,12 +9,14 @@ with `commit_paths`, which commits exactly the named paths on a clean tree.
 """
 
 import logging
+import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from opsd.safegit import UnsafeRepoConfigError, git_argv, git_env
+from opsd.safegit import UnsafeRepoConfigError, git_argv, git_env, status_lines
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -80,9 +82,11 @@ class Repo:
         return done.stdout
 
     def dirty_paths(self) -> list[str]:
-        # Every untracked file by name (not just its directory), so a new file can be matched exactly.
-        out = self.run("status", "--porcelain", "--untracked-files=all")
-        return [line[3:] for line in out.splitlines() if line.strip()]
+        """Changed, staged, deleted and untracked paths (every untracked file by name), without running a filter."""
+        try:
+            return [line[3:] for line in status_lines(self.path)]
+        except (subprocess.SubprocessError, OSError) as err:
+            raise GitError(f"git status: {str(err)[:200]}") from err
 
     # ------------------------------------------------------- proposal plumbing
 
@@ -199,12 +203,36 @@ class Repo:
         others = [p for p in self.dirty_paths() if p not in paths]
         if others:
             raise GitBusyError(f"working tree has other changes: {others[:5]}")
-        self.run("add", "-A", "--", *paths)
-        self.run(
-            "-c", f"user.name={self.author[0]}", "-c", f"user.email={self.author[1]}",
-            "commit", "-m", message, "--", *paths,
-        )  # fmt: skip
+        # Staged and committed with plumbing that never converts work-tree content, so no filter driver can run
+        # (`add` and `commit` would, and a driver added to the config after the overrides were built escapes them).
+        parent = self.main_head()
+        for path in paths:
+            self._stage(path)
+        tree = self.run("write-tree").strip()
+        if tree == self.run("rev-parse", f"{parent}^{{tree}}").strip():
+            raise GitError("nothing to commit")
+        commit = self.commit_tree(tree, parent, message)
+        self.run("update-ref", "-m", f"commit: {message}", "refs/heads/main", commit, parent)
         return self.main_head()
+
+    def _stage(self, path: str) -> None:
+        """Put the work tree's file at `path` in the index as it is (`--no-filters`), or remove it if gone."""
+        full = self.path / path
+        try:
+            info = os.lstat(full)
+        except FileNotFoundError:
+            self.run("update-index", "--force-remove", "--", path)
+            return
+        if not stat.S_ISREG(info.st_mode):
+            raise GitError(f"{path} is not a regular file")
+        found = self.run("ls-files", "--stage", "-z", "--", path).split("\0")[0]
+        mode = found.split(" ", 1)[0] if found else ""
+        if mode not in ("100644", "100755"):
+            mode = "100755" if info.st_mode & 0o111 else "100644"
+        sha = self.run("hash-object", "-w", "--no-filters", "--", path).strip()
+        if not SHA_RE.fullmatch(sha):
+            raise GitError(f"git hash-object: unexpected output for {path}")
+        self.run("update-index", "--add", "--cacheinfo", f"{mode},{sha},{path}")
 
     def remote_url(self) -> str:
         """`remote.origin.url`, refused unless it is a GitHub SSH URL."""

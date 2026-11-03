@@ -37,9 +37,19 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   `GIT_OPTIONAL_LOCKS=0`. Before each call the repository's own config is
   listed without following includes, and git is refused (`refusing to run
   git: ...`) when it sets `include.*`, `includeIf.*`, `url.*`,
-  `core.gitProxy`, `core.worktree`, `core.alternateRefsCommand`, a remote's
-  `uploadpack`, `receivepack` or `vcs`, or a driver name no `-c` key can
-  name. Fetch and push name the remote by URL, never `origin`: the
+  `core.gitProxy`, `core.worktree`, `core.alternateRefsCommand`, any
+  remote other than `origin`, a remote's `uploadpack`, `receivepack` or
+  `vcs`, or a driver name no `-c` key can name. That listing and the call
+  are separate processes, so the overrides are defence in depth: the agent
+  never runs a git command that converts work-tree content, the only place
+  a filter driver runs. It never runs `add`, `commit`, `status`, `checkout`
+  or a diff against the work tree: a change is staged with `hash-object -w
+  --no-filters` and `update-index --cacheinfo` (or `--force-remove`) and
+  committed with `write-tree`, `commit-tree` and `update-ref` on
+  `refs/heads/main` (compare-and-swap with the old head); dirty paths come
+  from `diff-index --cached`, `ls-files --stage` with each work-tree file
+  hashed by `hash-object --no-filters`, and `ls-files --others`
+  (`safegit.status_lines`). Fetch and push name the remote by URL, never `origin`: the
   `remote.origin.url` of the repository, refused unless it is a GitHub SSH
   URL (`git@github.com:<owner>/<repo>` or `ssh://git@github.com/...`). SSH
   uses the deploy key, the shipped `known_hosts` and
@@ -50,7 +60,9 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   `test_repo_config_a_override_cannot_neutralise_refuses_git`,
   `test_filter_and_diff_drivers_of_any_name_never_run`,
   `test_credential_helpers_and_askpass_never_run`,
-  `test_hostile_filter_driver_never_runs`),
+  `test_hostile_filter_driver_never_runs`,
+  `test_a_filter_driver_added_after_the_overrides_were_built_never_runs`,
+  `test_status_lines_match_git_status_on_a_plain_repo`),
   `test_paths_use_the_shipped_known_hosts`.
 
 ## Paths
@@ -160,7 +172,9 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
 ## Reading history
 
 - C10. `git.status/log/diff/show`: revisions `HEAD` or 7..40 hex with `~N`
-  and `^` only; paths `[A-Za-z0-9_@+][A-Za-z0-9._@+/-]{0,200}` without `..`
+  and `^` only; `diff REV` compares REV with the index (never the work
+  tree) and `status` lists tracked changes as `safegit.status_lines`
+  computes them (C2); paths `[A-Za-z0-9_@+][A-Za-z0-9._@+/-]{0,200}` without `..`
   and within the readable set; diff and show output limited to readable
   paths, others counted as withheld; log at most 50 entries; 30-second
   timeout. Tests `test_githistory.py:51-150`.

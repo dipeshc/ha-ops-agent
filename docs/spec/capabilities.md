@@ -109,3 +109,7 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   it. The save itself passes the self-guard only inside its approved scope
   ([selfguard.md](selfguard.md) G8). See [maintenance.md](maintenance.md)
   M20–M23. Test `test_dashboard_save_is_an_approval_only_daemon_capability`.
+- K13. **`logs host --identifier`** names one journal identifier,
+  `[A-Za-z0-9_.@-]+`, never containing `..` and never only dots; it is
+  percent-encoded as one segment of `/host/logs/identifiers/<id>`.
+  Test `test_logs_literal_grep_and_redaction`.

@@ -198,6 +198,12 @@ def test_logs_literal_grep_and_redaction(env: FakeClient, capsys: pytest.Capture
     assert "error" in json.loads(run(capsys, "logs", "addon")[1])
     code, out = run(capsys, "logs", "host", "--identifier", "../../etc")
     assert code == 1 and "invalid characters" in out
+    for dots in ("..", ".", "...", "a..b"):
+        env.last_logs = None
+        assert json.loads(run(capsys, "logs", "host", "--identifier", dots)[1]) == {"error": "invalid identifier"}
+        assert env.last_logs is None
+    run(capsys, "logs", "host", "--identifier", "user@1000.service")
+    assert env.last_logs[0] == "/host/logs/identifiers/user%401000.service"
     run(capsys, "logs", "addon", "--slug", "core_example_broker")
     assert env.last_logs[0] == "/addons/core_example_broker/logs"
 

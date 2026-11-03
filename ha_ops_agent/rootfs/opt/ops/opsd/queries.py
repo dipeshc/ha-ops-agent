@@ -11,6 +11,7 @@ import asyncio
 import re
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 from opsd import __version__, githistory, privacy
 from opsd.api import LiveAPI
@@ -175,21 +176,23 @@ def cmd_logs(ctx: ExecContext, args: Args) -> Any:
     slug = args.opt_text("slug")
     grep = args.opt_text("grep")
     source = args.text("source")
+    # One path segment: never a dot segment, and percent-encoded so it cannot leave identifiers/.
+    if identifier and (not re.fullmatch(r"[A-Za-z0-9_.@-]+", identifier) or ".." in identifier
+                       or not identifier.strip(".")):  # fmt: skip
+        return {"error": "invalid identifier"}
     match source:
         case "core":
             path = "/core/logs"
         case "supervisor":
             path = "/supervisor/logs"
         case "host":
-            path = f"/host/logs/identifiers/{identifier}" if identifier else "/host/logs"
+            path = f"/host/logs/identifiers/{quote(identifier, safe='')}" if identifier else "/host/logs"
         case "addon":
             if not slug or not re.fullmatch(r"[a-z0-9_]+", slug):
                 return {"error": "--slug is required for addon logs"}
             path = f"/addons/{slug}/logs"
         case _:
             return {"error": f"unknown source {source}"}
-    if identifier and not re.fullmatch(r"[A-Za-z0-9_.@-]+", identifier):
-        return {"error": "invalid identifier"}
     text = ctx.client.logs(path, lines)
     out = text.splitlines()
     if grep:

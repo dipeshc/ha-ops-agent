@@ -232,7 +232,11 @@ much harm.
 - **Bounded.** Daily run caps, turn and time limits, a memory guard and a
   kill switch in the panel. Pushes have a daily budget.
 - **Git is plumbing only.** Proposals are commits on a separate ref. Only
-  you apply them, after a config check; pushes are fast-forward only.
+  you apply them, after a config check; pushes are fast-forward only, over
+  SSH to the GitHub repository in `remote.origin.url`
+  (`git@github.com:<owner>/<repo>`). Git refuses to run when the
+  repository's own config sets includes, URL rewrites, a proxy command or
+  another work tree.
 
 Trust assumptions: the agent's admin is the Home Assistant user who owns
 the push device in `notify.service`, and must be an active administrator.

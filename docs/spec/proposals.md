@@ -23,15 +23,35 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   gated by `limits.git_push` (default on). The deploy key
   (`/data/ssh/github_deploy`) is generated at start when git is on.
 - C2. **safegit.** Every git call runs with `--no-pager`, an empty
-  attribute source, `-C <repo>`, `safe.directory`, and configuration that
-  neutralises fsmonitor, hooks, pagers, attribute files, external diff,
-  colour, signature display and every in-repo filter driver; the
-  environment holds only `PATH`, `HOME`, `LANG`, `TZ` plus
+  attribute source, `-C <repo>`, `safe.directory`, and `-c` configuration
+  (which wins over the repository's) that neutralises fsmonitor, hooks,
+  pagers, editors, askpass, credential helpers, attribute files, external
+  diff, signing (`commit`/`tag`/`push.gpgSign` off and every `gpg.*`
+  program), submodule recursion, colour, signature display, and every
+  filter, diff and merge driver the repository config defines, whatever its
+  name; the environment holds only `PATH`, `HOME`, `LANG`, `TZ` plus
   `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`,
-  `GIT_ATTR_NOSYSTEM`, `GIT_TERMINAL_PROMPT=0`, `GIT_LITERAL_PATHSPECS=1`,
-  `GIT_OPTIONAL_LOCKS=0`; SSH uses the deploy key, the shipped
-  `known_hosts` and `StrictHostKeyChecking=yes`. Tests
-  `test_githistory.py:152-178`, `test_paths_use_the_shipped_known_hosts`.
+  `GIT_ATTR_NOSYSTEM`, `GIT_TERMINAL_PROMPT=0`, `GIT_ALLOW_PROTOCOL=ssh`
+  (the only transport, whatever `protocol.*` says), empty `GIT_ASKPASS` and
+  `SSH_ASKPASS`, a no-op `GIT_EDITOR`, `GIT_LITERAL_PATHSPECS=1`,
+  `GIT_OPTIONAL_LOCKS=0`. Before each call the repository's own config is
+  listed without following includes, and git is refused (`refusing to run
+  git: ...`) when it sets `include.*`, `includeIf.*`, `url.*`,
+  `core.gitProxy`, `core.worktree`, `core.alternateRefsCommand`, a remote's
+  `uploadpack`, `receivepack` or `vcs`, or a driver name no `-c` key can
+  name. Fetch and push name the remote by URL, never `origin`: the
+  `remote.origin.url` of the repository, refused unless it is a GitHub SSH
+  URL (`git@github.com:<owner>/<repo>` or `ssh://git@github.com/...`). SSH
+  uses the deploy key, the shipped `known_hosts` and
+  `StrictHostKeyChecking=yes`. Tests `test_githistory.py`
+  (`test_repo_config_cannot_set_a_signing_program`,
+  `test_only_ssh_transport_is_allowed`,
+  `test_push_names_a_checked_remote_url_never_the_config`,
+  `test_repo_config_a_override_cannot_neutralise_refuses_git`,
+  `test_filter_and_diff_drivers_of_any_name_never_run`,
+  `test_credential_helpers_and_askpass_never_run`,
+  `test_hostile_filter_driver_never_runs`),
+  `test_paths_use_the_shipped_known_hosts`.
 
 ## Paths
 

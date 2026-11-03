@@ -124,7 +124,7 @@ class World:
 
 
 @pytest.fixture
-def w(tmp_path: Path) -> Iterator[World]:
+def w(tmp_path: Path, local_git_remote: None) -> Iterator[World]:
     origin = tmp_path / "origin.git"
     repo = tmp_path / "config"
     git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))

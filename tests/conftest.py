@@ -235,6 +235,17 @@ def isolated_git_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 
+@pytest.fixture
+def local_git_remote(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let `Repo.push` reach a bare repository on disk: the file transport and a path as the remote URL."""
+    import re
+
+    from opsd import gitops, safegit
+
+    monkeypatch.setattr(safegit, "ALLOWED_PROTOCOLS", "file")
+    monkeypatch.setattr(gitops, "REMOTE_RE", re.compile(r"/[^\n]+"))
+
+
 @pytest.fixture(autouse=True)
 def no_cloud_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cloud fetches (opsd.evidence) never reach the network in tests: they fail like an offline house."""

@@ -55,7 +55,7 @@ def git(cwd: Path, *args: str) -> str:
 
 
 @pytest.fixture
-def repos(tmp_path: Path) -> tuple[Path, Path]:
+def repos(tmp_path: Path, local_git_remote: None) -> tuple[Path, Path]:
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
     work = tmp_path / "work"

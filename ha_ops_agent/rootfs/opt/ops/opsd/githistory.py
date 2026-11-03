@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 from opsd.guard import Reads, readable_rel, searchable
-from opsd.safegit import git_argv, git_env
+from opsd.safegit import UnsafeRepoConfigError, git_argv, git_env
 
 REV_RE = re.compile(r"(HEAD|[0-9a-f]{7,40})(~[0-9]{1,3}|\^{1,3})?")
 PATH_RE = re.compile(r"[A-Za-z0-9_@+][A-Za-z0-9._@+/-]{0,200}")
@@ -34,6 +34,8 @@ def _git(repo: Path, *args: str) -> str:
         )
     except subprocess.TimeoutExpired as err:
         raise HistoryError("git timed out") from err
+    except UnsafeRepoConfigError as err:
+        raise HistoryError(str(err)) from err
     if done.returncode != 0:
         raise HistoryError(f"git {args[0]} failed: {done.stderr.strip()[:200]}")
     return done.stdout

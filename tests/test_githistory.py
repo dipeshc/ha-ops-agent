@@ -176,3 +176,142 @@ def test_hostile_filter_driver_never_runs(tmp_path: Path) -> None:
     (ha / ".gitattributes").unlink()
     Repo(ha, tmp_path / "k", tmp_path / "kh").commit_paths(["notes.md"], "docs(notes): record test")
     assert not list(tmp_path.glob("PWNED*")), list(tmp_path.glob("PWNED*"))
+
+
+def _hostile(tmp_path: Path) -> tuple[Path, Path]:
+    """A committed repo and a script that leaves a marker file when anything runs it."""
+    ha = tmp_path / "ha"
+    (ha / "automations").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(ha)], check=True)
+    (ha / "automations" / "a.yaml").write_text("- id: one\n")
+    git(ha, "add", "-A")
+    git(ha, "commit", "-q", "-m", "init")
+    script = tmp_path / "program.sh"
+    script.write_text(f'#!/bin/sh\ntouch "{tmp_path}/PWNED_$(basename "$0")_$$"\nexit 1\n')
+    script.chmod(0o755)
+    return ha, script
+
+
+def _markers(tmp_path: Path) -> list[Path]:
+    return list(tmp_path.glob("PWNED*"))
+
+
+def test_repo_config_cannot_set_a_signing_program(tmp_path: Path) -> None:
+    from opsd.gitops import Repo
+
+    ha, script = _hostile(tmp_path)
+    git(ha, "config", "commit.gpgSign", "true")
+    git(ha, "config", "gpg.program", str(script))
+    git(ha, "config", "gpg.format", "ssh")
+    git(ha, "config", "gpg.ssh.program", str(script))
+    repo = Repo(ha, tmp_path / "k", tmp_path / "kh")
+    head = repo.main_head()
+    commit = repo.commit_tree(repo.run("rev-parse", f"{head}^{{tree}}").strip(), head, "fix(a): test")
+    assert "gpgsig" not in repo.run("cat-file", "commit", commit)
+    (ha / "automations" / "a.yaml").write_text("- id: two\n")
+    repo.commit_paths(["automations/a.yaml"], "fix(a): test")
+    assert not _markers(tmp_path)
+
+
+def test_only_ssh_transport_is_allowed(tmp_path: Path) -> None:
+    from opsd.safegit import git_argv, git_env
+
+    ha, _ = _hostile(tmp_path)
+    git(ha, "config", "protocol.ext.allow", "always")
+    git(ha, "config", "protocol.file.allow", "always")
+    other = tmp_path / "other.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(other)], check=True)
+    for url in (f"ext::sh -c touch% {tmp_path}/PWNED_ext", str(other)):
+        done = subprocess.run(git_argv(ha, "fetch", url, "main"), capture_output=True, env=git_env(), check=False)
+        assert done.returncode != 0 and b"not allowed" in done.stderr
+    assert not _markers(tmp_path)
+
+
+def test_push_names_a_checked_remote_url_never_the_config(tmp_path: Path) -> None:
+    from opsd.gitops import GitError, Repo
+
+    ha, _ = _hostile(tmp_path)
+    git(ha, "remote", "add", "origin", f"ext::sh -c touch% {tmp_path}/PWNED_ext")
+    git(ha, "config", "protocol.ext.allow", "always")
+    with pytest.raises(GitError, match="not a GitHub SSH URL"):
+        Repo(ha, tmp_path / "k", tmp_path / "kh").push()
+    git(ha, "remote", "set-url", "origin", "git@github.com:example/config.git")
+    assert Repo(ha, tmp_path / "k", tmp_path / "kh").remote_url() == "git@github.com:example/config.git"
+    assert not _markers(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("core.gitProxy", "PROGRAM"),
+        ("include.path", "PATH/extra.cfg"),
+        ("includeIf.gitdir:/.path", "PATH/extra.cfg"),
+        ("url.ext::sh -c touch% x #.insteadOf", "git@github.com:"),
+        ("url.PATH/.pushInsteadOf", "git@github.com:"),
+        ("core.worktree", "PATH"),
+        ("core.alternateRefsCommand", "PROGRAM"),
+        ("remote.origin.uploadpack", "PROGRAM"),
+        ("remote.origin.receivepack", "PROGRAM"),
+        ("remote.origin.vcs", "evil"),
+    ],
+)
+def test_repo_config_a_override_cannot_neutralise_refuses_git(tmp_path: Path, key: str, value: str) -> None:
+    from opsd.gitops import GitError, Repo
+
+    ha, script = _hostile(tmp_path)
+    git(ha, "config", key, value.replace("PROGRAM", str(script)).replace("PATH", str(tmp_path)))
+    with pytest.raises(GitError, match="refusing to run git"):
+        Repo(ha, tmp_path / "k", tmp_path / "kh").main_head()
+    with pytest.raises(HistoryError, match="refusing to run git"):
+        githistory.status(ha)
+    assert not _markers(tmp_path)
+
+
+def test_filter_and_diff_drivers_of_any_name_never_run(tmp_path: Path) -> None:
+    from opsd.gitops import Repo
+
+    ha, script = _hostile(tmp_path)
+    (ha / ".git" / "info").mkdir(exist_ok=True)
+    (ha / ".git" / "info" / "attributes").write_text("*.yaml filter=a:b diff=c:d\n")
+    for variable in ("clean", "smudge", "process"):
+        git(ha, "config", f"filter.a:b.{variable}", str(script))
+    git(ha, "config", "filter.a:b.required", "true")
+    git(ha, "config", "diff.c:d.command", str(script))
+    git(ha, "config", "diff.c:d.textconv", str(script))
+    (ha / "automations" / "a.yaml").write_text("- id: two\n")
+    githistory.diff(ha, "HEAD", None)
+    Repo(ha, tmp_path / "k", tmp_path / "kh").commit_paths(["automations/a.yaml"], "fix(a): test")
+    githistory.show(ha, "HEAD", None)
+    assert not _markers(tmp_path)
+
+
+def test_credential_helpers_and_askpass_never_run(tmp_path: Path) -> None:
+    from opsd.safegit import git_argv, git_env
+
+    ha, script = _hostile(tmp_path)
+    git(ha, "config", "credential.helper", f"!{script}")
+    git(ha, "config", "core.askPass", str(script))
+    done = subprocess.run(
+        git_argv(ha, "credential", "fill"),
+        input=b"protocol=https\nhost=example.invalid\n\n",
+        capture_output=True,
+        env=git_env({"SSH_ASKPASS": str(script)}) | {"GIT_ASKPASS": ""},
+        check=False,
+        timeout=30,
+    )
+    assert done.returncode != 0
+    assert not _markers(tmp_path)
+
+
+def test_editor_and_hooks_never_run(tmp_path: Path) -> None:
+    from opsd.gitops import Repo
+
+    ha, script = _hostile(tmp_path)
+    git(ha, "config", "core.editor", str(script))
+    git(ha, "config", "sequence.editor", str(script))
+    hook = ha / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\ntouch {tmp_path}/PWNED_hook\n")
+    hook.chmod(0o755)
+    (ha / "automations" / "a.yaml").write_text("- id: two\n")
+    Repo(ha, tmp_path / "k", tmp_path / "kh").commit_paths(["automations/a.yaml"], "fix(a): test")
+    assert not _markers(tmp_path)

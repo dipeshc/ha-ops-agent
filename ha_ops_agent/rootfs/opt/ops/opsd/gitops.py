@@ -3,7 +3,8 @@
 Proposals are built with plumbing only (`hash-object`, `mktree`,
 `commit-tree`, `update-ref`) on `refs/ops/proposals/<id>`: the working tree
 and the index are never touched, and those refs are never pushed (`push`
-names `HEAD:refs/heads/main` explicitly). An applied change is committed
+names `HEAD:refs/heads/main` explicitly, to the checked GitHub URL rather than
+the remote name). An applied change is committed
 with `commit_paths`, which commits exactly the named paths on a clean tree.
 """
 
@@ -13,13 +14,16 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from opsd.safegit import git_argv, git_env
+from opsd.safegit import UnsafeRepoConfigError, git_argv, git_env
 
 _LOGGER = logging.getLogger(__name__)
 
 REF_PREFIX = "refs/ops/proposals/"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 _ZERO = "0" * 40
+# The remote is always given to fetch and push as this URL, never by the name `origin`: GitHub over
+# SSH (the shipped known_hosts holds only GitHub's keys), read from `remote.origin.url` and checked.
+REMOTE_RE = re.compile(r"(?:git@github\.com:|ssh://git@github\.com/)[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 COMMIT_RE = re.compile(r"^(feat|fix|docs|style|refactor|test|chore)(\([a-z0-9-]+\))?: [a-z0-9].{0,70}$")
 
 
@@ -66,7 +70,7 @@ class Repo:
                 env={**self._env(), **(env or {})},
                 check=False,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError) as err:
+        except (subprocess.TimeoutExpired, FileNotFoundError, UnsafeRepoConfigError) as err:
             raise GitError(f"git {args[0]}: {err}") from err
         if done.returncode != 0:
             message = (done.stderr or done.stdout).decode(errors="replace").strip()[:300]
@@ -202,10 +206,22 @@ class Repo:
         )  # fmt: skip
         return self.main_head()
 
+    def remote_url(self) -> str:
+        """`remote.origin.url`, refused unless it is a GitHub SSH URL."""
+        try:
+            url = self.run("config", "--get", "remote.origin.url").strip()
+        except GitError as err:
+            raise GitError("no remote.origin.url; not pushing") from err
+        if not REMOTE_RE.fullmatch(url) or url.startswith("-"):
+            raise GitError("remote.origin.url is not a GitHub SSH URL; not pushing")
+        return url
+
     def push(self) -> None:
         """Fast-forward push to origin/main; never forces, stops if the remote moved."""
-        self.run("fetch", "--quiet", "origin", "main")
-        behind = int(self.run("rev-list", "--count", "HEAD..origin/main").strip() or "0")
+        url = self.remote_url()
+        self.run("fetch", "--quiet", "--no-recurse-submodules", "--end-of-options", url,
+                 "+refs/heads/main:refs/remotes/origin/main")  # fmt: skip
+        behind = int(self.run("rev-list", "--count", "HEAD..refs/remotes/origin/main").strip() or "0")
         if behind:
             raise GitError(f"origin/main is {behind} commit(s) ahead; not pushing")
-        self.run("push", "origin", "HEAD:refs/heads/main")
+        self.run("push", "--no-recurse-submodules", "--end-of-options", url, "HEAD:refs/heads/main")

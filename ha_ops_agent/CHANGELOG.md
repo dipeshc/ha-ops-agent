@@ -7,8 +7,9 @@ Hardening and fixes. No store change; upgrading from 0.19.0 needs nothing.
 Health check and pushes:
 
 - Each piece of access hardware that goes down (a lock, an alarm panel, a
-  cover that is not positively a blind or the like, anything named like a
-  door, gate or lock) is its own critical item, `access:<entity_id>`,
+  cover that is not positively a blind or the like, a switch, button,
+  script, input boolean or valve named like a door, gate or lock; never a
+  sensor, binary sensor, camera or light) is its own critical item, `access:<entity_id>`,
   instead of part of its integration's `entities:<platform>` item. Only
   your accept in the panel silences it, until it recovers; the agent can
   snooze it for 3 days at most and never accept it, and the first run never

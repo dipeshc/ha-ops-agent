@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from opsd.access import opens_the_house
+from opsd.access import acts_on_the_house, opens_the_house
 from opsd.health import Snapshot, hours_since, parse_time
 
 FLAP_HOURS = 6.0
@@ -93,8 +93,8 @@ def honoured_expected(listed: Iterable[str], unavailable: Mapping[str, Mapping[s
 
 
 def is_access(entity_id: str, info: Mapping[str, Any]) -> bool:
-    """Whether a down entity (a snapshot's `unavailable` entry) opens the house (`opsd.access.opens_the_house`)."""
-    return opens_the_house(entity_id, device_class=info.get("device_class"), names=info.get("names") or ())
+    """Whether a down entity (a snapshot's `unavailable` entry) is access hardware (`opsd.access.acts_on_the_house`)."""
+    return acts_on_the_house(entity_id, device_class=info.get("device_class"), names=info.get("names") or ())
 
 
 def access_down(snapshot: Snapshot) -> list[str]:

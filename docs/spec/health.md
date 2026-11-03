@@ -49,13 +49,19 @@ diff, acks), `opsd/triage.py` (prompt and result), `opsd/fingerprint.py`,
   only, fingerprinted by logger and normalised message (12 hex characters).
 - H8. A backup is "complete" when it holds the config, the database and
   every installed add-on; the Core backup manager is preferred, the
-  Supervisor list is the fallback. Access hardware is what opens the house
-  (`opsd.access.opens_the_house`, the rule of H11a and [reload.md](reload.md)
-  L3): a lock, an alarm panel, a cover that is not positively a blind, shade,
-  curtain, awning or shutter, or anything whose id, friendly name or registry
-  names say access. It is "exposed" when Assist exposure lists it with
-  `conversation: true`; a malformed answer makes exposure unknown. Test
-  `test_assist_exposure_covers_everything_that_opens_the_house`.
+  Supervisor list is the fallback. Access hardware
+  (`opsd.access.acts_on_the_house`) is a lock or an alarm panel by domain, a
+  cover that is not positively a blind, shade, curtain, awning or shutter,
+  or a switch, button, script, input boolean, valve or cover whose id,
+  friendly name or registry names say access. Only domains that act count by
+  name: a binary sensor, sensor, camera, light, event or device tracker
+  named like a door observes it and is never access hardware here. (The
+  expected list, H11a, and reloads, [reload.md](reload.md) L3, keep the
+  wider `opens_the_house`, which counts names in any domain.) It is
+  "exposed" when Assist exposure lists it with `conversation: true`; a
+  malformed answer makes exposure unknown. Tests
+  `test_assist_exposure_covers_everything_that_opens_the_house`,
+  `test_only_entities_that_act_are_access_hardware_by_name`.
 - H9. A config check (Supervisor `POST /core/check`, 180 seconds) runs in the
   daily cycle only (not for `opsctl health`). A timeout leaves `ok` unknown;
   an answered failure sets it false.

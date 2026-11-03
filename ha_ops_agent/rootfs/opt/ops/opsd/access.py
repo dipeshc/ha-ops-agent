@@ -50,6 +50,26 @@ def opens_by_kind(entity_id: str, device_class: Any) -> bool:
     return domain in PROTECTED_DOMAINS or (domain == "cover" and str(device_class) not in SAFE_COVER_CLASSES)
 
 
+# Domains whose entities do something (a call opens, starts or switches it): only these can be access hardware by
+# their names in the health check and the Assist exposure check. A sensor, binary sensor, camera, light, event
+# or tracker named "front door" observes the door; it opens nothing.
+ACTING_DOMAINS = frozenset({"switch", "button", "script", "input_boolean", "valve", "cover"})
+
+
+def acts_on_the_house(entity_id: str, *, device_class: Any = None, names: Iterable[Any] = ()) -> bool:
+    """Access hardware for the health check and Assist exposure: a lock or an alarm panel by domain, a cover that is
+    not positively a blind or the like, and a switch, button, script, input boolean, valve or cover whose id or
+    names say access. Never a sensor, camera, light, event or tracker, whatever it is called.
+
+    Reloads and the expected list keep the wider `opens_the_house` (fail closed there)."""
+    domain = entity_id.split(".", 1)[0]
+    if domain in PROTECTED_DOMAINS:
+        return True
+    if domain not in ACTING_DOMAINS:
+        return False
+    return opens_the_house(entity_id, device_class=device_class, names=names)
+
+
 def opens_the_house(entity_id: str, *, device_class: Any = None, names: Iterable[Any] = ()) -> bool:
     """`opens_by_kind`, or its id, friendly name or registry names say access hardware (fail closed: without a
     device class a cover counts)."""

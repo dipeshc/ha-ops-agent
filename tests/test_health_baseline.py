@@ -448,3 +448,28 @@ def test_assist_exposure_covers_everything_that_opens_the_house() -> None:
     assert derive_assist_exposure(exposure, states, registry) == {
         "button.garage_door_open": "access", "cover.driveway": "cover", "cover.front_door": "cover",
         "switch.gate_opener": "access", "switch.relay_4": "access"}  # fmt: skip
+
+
+def test_only_entities_that_act_are_access_hardware_by_name() -> None:
+    from opsd.access import acts_on_the_house, opens_the_house
+
+    for entity_id in ("binary_sensor.side_entrance_door", "sensor.side_entrance_battery", "camera.front_door",
+                      "light.front_door", "event.doorbell_lock", "device_tracker.gate_tag"):  # fmt: skip
+        assert not acts_on_the_house(entity_id), entity_id
+    for entity_id in ("switch.gate_opener", "cover.driveway", "button.garage_door_open", "script.unlock_side",
+                      "input_boolean.gate_open", "valve.gate", "lock.side", "alarm_control_panel.home"):  # fmt: skip
+        assert acts_on_the_house(entity_id), entity_id
+    assert not acts_on_the_house("cover.lounge_blind", device_class="blind")
+    # Reloads and the expected list keep the wider rule.
+    assert opens_the_house("binary_sensor.side_entrance_door")
+    # A door sensor or entrance battery going down is a plain integration warning, never an access item.
+    snapshot = _snap({**_down("binary_sensor.side_entrance_door", "acme_locks"),
+                      **_down("sensor.side_entrance_battery", "acme_locks"),
+                      **_down("camera.front_door", "acme_cams"),
+                      **_down("switch.gate_opener", "acme_io")})  # fmt: skip
+    keys = [i.key for i in diff(snapshot, Baseline(created_at=NOW.isoformat()), NOW)]
+    assert keys == ["access:switch.gate_opener", "entities:acme_cams", "entities:acme_locks"]
+    exposure = {"exposed_entities": {e: {"conversation": True} for e in (
+        "binary_sensor.side_entrance_door", "sensor.side_entrance_battery", "camera.front_door",
+        "switch.gate_opener", "cover.driveway")}}  # fmt: skip
+    assert set(derive_assist_exposure(exposure, [])) == {"switch.gate_opener", "cover.driveway"}

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from opsd import policy
-from opsd.access import access_kind, opens_the_house
+from opsd.access import access_kind, acts_on_the_house
 from opsd.config import Options, Paths
 from opsd.fingerprint import fingerprint, normalize
 from opsd.safegit import git_argv, git_env
@@ -344,10 +344,10 @@ def derive_assist_exposure(exposure: Any, states: Iterable[dict[str, Any]],
                            registry: Iterable[dict[str, Any]] = ()) -> dict[str, str]:  # fmt: skip
     """Entities that open the house exposed to Assist, from `homeassistant/expose_entity/list`.
 
-    "Opens the house" is `opsd.access.opens_the_house`, the rule reloads and the expected list use: a lock, an
-    alarm panel, any cover that is not positively a blind or the like (a cover without a device class counts),
-    or anything whose id, friendly name or registry names say access hardware. The value is the kind (`lock`,
-    `alarm`, `garage`, `cover`, or `access` for one only its names identify).
+    Access hardware is `opsd.access.acts_on_the_house`: a lock, an alarm panel, any cover that is not positively
+    a blind or the like (a cover without a device class counts), or a switch, button, script, input boolean or
+    valve whose id, friendly name or registry names say access hardware (never a sensor, camera or light). The
+    value is the kind (`lock`, `alarm`, `garage`, `cover`, or `access` for one only its names identify).
 
     Expected shape `{"exposed_entities": {entity_id: {"conversation": bool, ...}}}`
     (to verify live). Raises ValueError on anything else so a format change
@@ -365,7 +365,7 @@ def derive_assist_exposure(exposure: Any, states: Iterable[dict[str, Any]],
         entry = reg.get(entity_id, {})
         names = [n for n in (attrs.get("friendly_name"), entry.get("name"), entry.get("original_name"))
                  if isinstance(n, str) and n]  # fmt: skip
-        if not opens_the_house(entity_id, device_class=attrs.get("device_class"), names=names):
+        if not acts_on_the_house(entity_id, device_class=attrs.get("device_class"), names=names):
             continue
         kind = access_kind(entity_id, attrs)
         found[entity_id] = kind or ("cover" if entity_id.startswith("cover.") else "access")

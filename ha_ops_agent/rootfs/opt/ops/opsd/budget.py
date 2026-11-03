@@ -159,10 +159,11 @@ def _raw_utilisation(info: Mapping[str, object] | None, window: str) -> float | 
         value = info.get("utilization")
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
-    # A percent (the provider reports whole percents, 0..100); anything else is not a reading.
-    if not math.isfinite(value) or not 0 <= value <= 100:
+    # A percent (the provider reports whole percents, 0..100). Over 100 is a full window (capped, never
+    # dropped: dropping it would read a saturated account as no reading); negative or not finite is no reading.
+    if not math.isfinite(value) or value < 0:
         return None
-    return float(value)
+    return min(float(value), 100.0)
 
 
 def utilisation(info: Mapping[str, object] | None, window: str) -> float | None:
@@ -170,7 +171,7 @@ def utilisation(info: Mapping[str, object] | None, window: str) -> float | None:
 
     The provider reports the utilisation in percent (whole percents in practice), so 1 is 1 %, never the
     whole window. The payload carries no unit to say otherwise, so every value is read as a percent; a value
-    outside 0..100 or not finite is no reading.
+    over 100 counts as 100, and a negative or non-finite one is no reading.
     """
     value = _raw_utilisation(info, window)
     return None if value is None else value / 100

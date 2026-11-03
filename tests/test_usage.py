@@ -69,7 +69,6 @@ def test_utilisation_parsing() -> None:
     assert utilisation({"rateLimitType": "five_hour", "utilization": 30}, "five_hour") == 0.3
     for bad in (None, {}, {"unifiedWindows": {"five_hour": {"utilization": "x"}}}, {"rateLimitType": "five_hour",
                 "utilization": -1}, {"rateLimitType": "five_hour", "utilization": True},
-                {"rateLimitType": "five_hour", "utilization": 100.5},
                 {"rateLimitType": "five_hour", "utilization": float("nan")},
                 {"rateLimitType": "five_hour", "utilization": float("inf")}):  # fmt: skip
         assert utilisation(bad, "five_hour") is None
@@ -509,6 +508,9 @@ def test_utilisation_is_always_read_as_percent() -> None:
     assert utilisation(info(1), "five_hour") == pytest.approx(0.01)
     assert (utilisation(info(1), "five_hour") or 0) < Caps.from_options(Options()).account_busy  # not "busy"
     assert utilisation(info(0), "five_hour") == 0.0 and utilisation(info(100), "five_hour") == 1.0
+    # Over 100 is a saturated window, capped (never dropped as "no reading").
+    assert utilisation(info(100.5), "five_hour") == 1.0 and utilisation(info(250), "five_hour") == 1.0
+    assert run_share(info(99), info(130), "five_hour") == pytest.approx(0.01)
     # A 0 -> 1 tick during a run is 1 % of the window, not all of it.
     assert run_share(info(0), info(1), "five_hour") == pytest.approx(0.01)
     assert run_share(info(0.9), info(1.4), "five_hour") == pytest.approx(0.005)

@@ -28,7 +28,8 @@ Health check and pushes:
   another device with the same name.
 - Account utilisation is read as a percent, as the provider reports it:
   1 % is no longer taken for the whole window, so the agent no longer
-  yields or stops runs for a week after a small reading.
+  yields or stops runs for a week after a small reading. A reading over
+  100 counts as a full window.
 
 The panel:
 

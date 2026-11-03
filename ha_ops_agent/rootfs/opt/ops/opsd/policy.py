@@ -110,6 +110,8 @@ class Decision:
     reason: str
     # A candidate still soaking: APPROVE (the admin may approve it early) without asking him.
     waits: bool = False
+    # Its release age is unknown: it soaks without an end until the plan asks (`updates.apply_unknown_age`).
+    age_unknown: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +206,8 @@ def soak_days(bump: Bump, min_age_days: float) -> float:
 def _candidate(label: str, bump: Bump, age: float | None, min_age_days: float) -> Decision:
     soak = soak_days(bump, min_age_days)
     if age is None:
-        return Decision(Tier.APPROVE, bump, f"{label} {bump}: release age unknown, so it waits", waits=True)
+        return Decision(Tier.APPROVE, bump, f"{label} {bump}: release age unknown, so it waits (checked again daily)",
+                        waits=True, age_unknown=True)  # fmt: skip
     if age < soak:
         return Decision(Tier.APPROVE, bump, f"{label} {bump}: soaking for {soak:g} days ({int(age)} so far)",
                         waits=True)  # fmt: skip

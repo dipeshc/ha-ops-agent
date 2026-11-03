@@ -482,6 +482,7 @@ def derive_updates(
                 "reason": decision.reason,
                 # Soaking: approvable early, never asks (policy.classify).
                 "waits": decision.waits,
+                "age_unknown": decision.age_unknown,
                 "slug": slug,
                 "hacs_category": info.hacs_category,
                 "hacs_repo": info.hacs_repo,

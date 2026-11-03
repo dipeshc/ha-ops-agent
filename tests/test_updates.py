@@ -1610,6 +1610,43 @@ async def test_a_repair_raised_by_a_hacs_integration_asks(rig: Rig) -> None:
     assert rig.ops.installs() == []
 
 
+async def test_an_unknown_release_age_waits_quietly_then_asks_after_30_days(rig: Rig) -> None:
+    rig.ages = {INTEGRATION: None}
+    only_auto(rig, INTEGRATION)
+    await rig.manager.run_window()
+    [found] = [i for i in rig.run()["plan"] if i["entity_id"] == INTEGRATION]
+    assert (found["tier"], found["waits"], found["age_unknown"]) == ("approve", True, True)
+    assert "release age unknown" in found["reason"] and rig.ops.installs() == []
+    item = rig.item(INTEGRATION, "2.0.1")
+    assert item["state"] == "proposed" and item["need"] is None and "every nightly plan" in item["about"]
+    assert not [m for m in await rig.flush() if m.tag == item["id"]]
+    # Still waiting the next nights: it is checked again daily and never asks inside the 30 days.
+    rig.now += timedelta(days=29)
+    await rig.manager.run_window()
+    assert rig.item(INTEGRATION, "2.0.1")["state"] == "proposed"
+    rig.now += timedelta(days=1, hours=1)
+    await rig.manager.run_window()
+    [found] = [i for i in rig.run()["plan"] if i["entity_id"] == INTEGRATION]
+    assert found["waits"] is False and "still unknown after 30 days" in found["reason"]
+    item = rig.item(INTEGRATION, "2.0.1")
+    assert item["state"] == "waiting" and item["need"]["kind"] == "approval"
+    assert [m for m in await rig.flush() if m.tag == item["id"]]
+    assert rig.ops.installs() == []
+
+
+async def test_an_unknown_release_age_asks_at_once_when_a_repair_touches_it(rig: Rig) -> None:
+    rig.ages = {INTEGRATION: None, CORE: None}
+    only_auto(rig, INTEGRATION, CORE)
+    rig.repairs = {"some_integration:config_flow": {"severity": "error", "breaks_in_ha_version": None}}
+    # Notes that cannot be read touch nothing: Core in the soak-unknown hold keeps waiting.
+    rig.domains = None
+    await rig.manager.run_window()
+    plan = {i["entity_id"]: i for i in rig.run()["plan"]}
+    assert plan[INTEGRATION]["waits"] is False and "repair for some_integration" in plan[INTEGRATION]["reason"]
+    assert rig.item(INTEGRATION, "2.0.1")["state"] == "waiting"
+    assert plan[CORE]["waits"] is True and "release age unknown" in plan[CORE]["reason"]
+
+
 def test_removed_options_and_capabilities_in_saved_options_are_ignored() -> None:
     """An install upgraded from an older version keeps its saved options: removed keys are dropped (the Supervisor
     warns), and a removed capability name in a tighten list (e.g. change.autofix) is simply unused."""

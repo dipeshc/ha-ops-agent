@@ -69,6 +69,7 @@ from opsd.updates import (
     FAILED_KEY,
     PAUSED_KEY,
     REBOOT_HELP,
+    UNKNOWN_AGE_ASK_DAYS,
     needs_admin,
     waits_quietly,
 )
@@ -478,6 +479,12 @@ class Composer:
                 f"It installs on its own once it has soaked, unless a repair or a breaking change touches this "
                 f"house. Approve it early and it installs tonight at {ctx.window} through the normal pipeline."
             )
+            if item.get("age_unknown"):
+                base.about = (
+                    "Its release age is unknown, so it waits and every nightly plan checks it again. It asks you "
+                    f"after {UNKNOWN_AGE_ASK_DAYS} days, or at once if a repair or a breaking change touches this "
+                    f"house. Approve it early and it installs tonight at {ctx.window} through the normal pipeline."
+                )
             base.actions = [act("approve", "Approve early"), *secondary, act("reject", "Reject", "text")]
             if approval is not None:
                 base.source["approval"] = approval["id"]

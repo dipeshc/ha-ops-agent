@@ -47,6 +47,16 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   number of days since the agent first saw the version pending. Tests
   `test_a_core_addon_minor_soaks_14_days_then_installs`,
   `test_every_kind_needs_a_known_age`, `test_first_seen_age_is_remembered`.
+- U5a. **Soak-unknown hold.** A candidate whose release age is unknown
+  (`age_unknown`) waits like a soaking one (proposed, never pushed,
+  approvable early) and every nightly plan checks it again. It asks (an
+  approval in Needs you) only once the agent has seen that version pending
+  for 30 days (`UNKNOWN_AGE_ASK_DAYS`), or at once when a repair, a
+  breaking change in Home Assistant's own Core notes or a removal still in
+  use touches it (the U7 checks, run on it as on an AUTO candidate; Core
+  notes that could not be read touch nothing here). Tests
+  `test_an_unknown_release_age_waits_quietly_then_asks_after_30_days`,
+  `test_an_unknown_release_age_asks_at_once_when_a_repair_touches_it`.
 - U6. `updates.need_approval` is the union of the option and the profile;
   options only tighten. Test `test_option_schema_is_tighten_only`.
 

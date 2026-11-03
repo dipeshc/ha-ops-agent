@@ -10,7 +10,9 @@ At the update window (default 04:00 local) the daemon:
    house uses (`opsd.evidence`, read-only; unreadable notes ask too), or
    when its version reaches the removal of something this install still uses,
    named by a repair or the release notes (`maintenance.removal_block`; the maintenance scan runs first when its
-   last one is older than a day). A
+   last one is older than a day). A candidate whose release age is unknown
+   waits (the soak-unknown hold, checked again every night) and asks only
+   after `UNKNOWN_AGE_ASK_DAYS`, or when one of these checks touches it. A
    capability-free AI `update_review` run then reads the candidates'
    release notes as fenced, untrusted data and can only hold an update back.
    For a Core update held by its notes or a repair, the same run may write
@@ -128,6 +130,8 @@ SEEN_KEY = "update_seen:"
 # A night aborted by a failure (backup, health before it), `<prefix><run id>`: its item needs the admin.
 ABORT_FAILED_KEY = "updates.abort_failed:"
 REVIEW_KEY = "update_review:"
+# A candidate whose release age stays unknown asks after this many days pending (else it waits quietly).
+UNKNOWN_AGE_ASK_DAYS = 30
 TIER_ORDER = {"auto": 0, "approve": 1, "pinned": 3, "never": 4, "manual": 5}
 # HAOS last: it reboots the host (the daemon resumes the run afterwards).
 KIND_ORDER = {"addon": 0, "hacs": 1, "core": 2, "firmware": 3, "os": 4}
@@ -147,7 +151,8 @@ REBOOT_HELP = "Settings > System > Restart Home Assistant (top-right menu) > Reb
 
 def plan_item(update: Mapping[str, Any]) -> dict[str, Any]:
     keys = ("entity_id", "title", "kind", "installed", "latest", "tier", "bump", "reason", "slug", "hacs_category",
-            "hacs_domain", "release_age_days", "supported_features", "waits", "platform", "hacs_repo")  # fmt: skip
+            "hacs_domain", "release_age_days", "supported_features", "waits", "platform", "hacs_repo",
+            "age_unknown")  # fmt: skip
     return {k: update.get(k) for k in keys} | {"review": None}
 
 
@@ -250,6 +255,28 @@ def repair_block(item: Mapping[str, Any], repairs: Mapping[str, Mapping[str, Any
         if item.get("kind") == "hacs" and item.get("hacs_domain") and domain == item.get("hacs_domain"):
             return f"Home Assistant reports a repair for {domain} ({clean_text(key, 80)})", domain
     return None
+
+
+def unknown_age(item: Mapping[str, Any]) -> bool:
+    """A candidate that waits only because its release age is unknown (`policy.classify`): the soak-unknown hold."""
+    return item.get("age_unknown") is True and item.get("tier") == Tier.APPROVE and item.get("waits") is True
+
+
+def apply_unknown_age(plan: list[dict[str, Any]], seen_days: Callable[[str, str], float]) -> list[dict[str, Any]]:
+    """The soak-unknown hold ends in a question once the version has waited `UNKNOWN_AGE_ASK_DAYS` (days since the
+    agent first saw it pending); until then it waits quietly and every nightly plan checks it again."""
+    result = []
+    for item in plan:
+        if not unknown_age(item):
+            result.append(item)
+            continue
+        days = seen_days(str(item.get("entity_id")), str(item.get("latest")))
+        if days < UNKNOWN_AGE_ASK_DAYS:
+            result.append(item)
+            continue
+        reason = f"its release age is still unknown after {int(days)} days, so it asks you"
+        result.append(item | {"waits": False, "reason": reason})
+    return result
 
 
 def apply_holds(plan: list[dict[str, Any]], holds: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -750,6 +777,7 @@ class UpdateManager:
         # Home Assistant's notes are read for the plans that decide (the nightly one, and "plan now"); a refresh
         # (at start, after a run) only reads the repairs and the held versions.
         plan = await self._house_check(plan, snapshot, notes=trigger in ("window", "manual"))
+        plan = apply_unknown_age(plan, self.seen_age)
         # Only the nightly plan may void an approval; a refresh (at start, after a reboot, while HACS
         # may still be loading), "Plan now" and an approved-now run only read them.
         plan = self.approvals.annotate(plan, now_only=trigger == "approved", void=trigger == "window")
@@ -801,11 +829,12 @@ class UpdateManager:
     async def _house_check(self, plan: list[dict[str, Any]], snapshot: Snapshot, *,
                            notes: bool) -> list[dict[str, Any]]:  # fmt: skip
         """The update rule: an AUTO candidate asks instead when a repair touches it, or (`notes`) when
-        Home Assistant's own Core notes list a breaking change for an integration this house uses."""
+        Home Assistant's own Core notes list a breaking change for an integration this house uses. A candidate in
+        the soak-unknown hold (`unknown_age`) is checked the same way: touched, it asks now."""
         domains: frozenset[str] | None = None
         result = []
         for item in plan:
-            if item.get("tier") != Tier.AUTO:
+            if item.get("tier") != Tier.AUTO and not unknown_age(item):
                 result.append(item)
                 continue
             found = repair_block(item, snapshot.repairs)
@@ -818,6 +847,9 @@ class UpdateManager:
             if block is None and notes and item.get("kind") == "core":
                 domains = domains if domains is not None else await self._domains()
                 block = await self._core_breaks(item, domains)
+                if block is not None and block[1] is None and unknown_age(item):
+                    # Notes that could not be read touch nothing: the soak-unknown hold keeps waiting.
+                    block = None
             result.append(item if block is None else self._held_for_change(item, *block))
         return result
 
@@ -828,7 +860,7 @@ class UpdateManager:
         record = updatefix.fix_record(self.store, str(item["entity_id"]), str(item["latest"]))
         if needs is not None and record is not None and record["state"] == "applied":
             return item | {"fix": record}
-        held = item | {"tier": str(Tier.APPROVE), "reason": why}
+        held = item | {"tier": str(Tier.APPROVE), "reason": why, "waits": False}
         if record is not None and record["state"] in ("open", "applying"):
             return held | {"fix": record, "waits": True,
                            "reason": f"needs config change #{record['change']} first ({why})"}  # fmt: skip

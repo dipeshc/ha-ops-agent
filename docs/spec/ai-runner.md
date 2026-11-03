@@ -188,8 +188,11 @@ dispatch on `llm.provider`.
 - AP4. **Managed settings** at `/etc/claude-code/managed-settings.json`
   (0644): managed permission rules and hooks only, default mode `dontAsk`,
   bypass disabled, allow `Read(//run/ops-claude/config/**)`,
-  `Bash(opsctl *)`, `Edit(//run/ops-drafts/**)`, the same environment, and
-  the `PreToolUse` guard hook with a 10-second timeout on every tool.
+  `Bash(opsctl *)`, `Edit(//run/ops-drafts/**)` (Claude Code matches the
+  Write tool against `Edit(...)` rules; the guard hook still denies the
+  Edit tool itself), the same environment, and the `PreToolUse` guard hook
+  with a 60-second timeout on every tool, long enough for a cold Python
+  start on a loaded host (a hook that times out does not block the call).
 - AP5. **Package.** The image installs a pinned `claude-code` package from
   the provider's signed apk repository, whose key is verified against a
   pinned SHA-256 before install; the build runs `claude --version`.

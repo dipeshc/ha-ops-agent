@@ -127,6 +127,8 @@ def test_static_files_are_valid() -> None:
     ]
     assert "onFailure" not in json.dumps(managed)
     assert managed["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "/opt/ops/bin/guard-hook"
+    # A hook that times out does not block the call: leave room for a cold start on a loaded host.
+    assert managed["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] >= 60
     json.loads((OPT / "prompts/triage-result.schema.json").read_text())
     config = (ADDON_ROOT / "config.yaml").read_text()
     for needle in (
@@ -143,6 +145,16 @@ def test_static_files_are_valid() -> None:
                    "rootfs/etc/s6-overlay/s6-rc.d/opsd/run",
                    "rootfs/etc/s6-overlay/scripts/init-ops.sh"):  # fmt: skip
         assert (ADDON_ROOT / script).stat().st_mode & 0o111, script
+
+
+def test_init_recreates_the_ops_directory_instead_of_following_links() -> None:
+    script = (ADDON_ROOT / "rootfs/etc/s6-overlay/scripts/init-ops.sh").read_text()
+    lines = [line.strip() for line in script.splitlines() if "claude-ops" in line and not line.lstrip().startswith("#")]
+    assert lines[0].startswith("find /data ")
+    assert lines[1:] == [
+        "rm -rf /data/claude-ops",
+        "install -d -o ops -g ops -m 0700 /data/claude-ops /data/claude-ops/home",
+    ]
 
 
 def _glob_re(glob: str) -> re.Pattern[str]:

@@ -16,13 +16,15 @@ Implementation: `rootfs/etc/s6-overlay/scripts/init-ops.sh`,
   `/sbin/nologin`, home `/data/claude-ops/home`), strips every setuid and
   setgid bit, and runs the daemon as root with `python3 -I` and umask 077.
 - V2. `init-ops.sh` at every start: `/data` is 0711 and every entry in it
-  except `claude-ops` loses group and other bits; `/data/claude-ops` and its
-  `home` are `ops:ops` 0700; `/mnt/ha` and `/run/ops` are 0700;
+  except `claude-ops` loses group and other bits; `/data/claude-ops` is
+  removed (without following links) and recreated empty with its `home`,
+  both `ops:ops` 0700, so nothing `ops` left there is chowned or chmodded; `/mnt/ha` and `/run/ops` are 0700;
   `/run/s6/container_environment` is 0700; `/run/ops-claude` is root 0755
   and `/run/ops-sock` root:ops 0750; `/run/ops-drafts` is removed; a deploy
   key is generated only when the profile enables git. The config mount is
   `/mnt/ha/config` (read-write) and the backup mount `/mnt/ha/backup`
-  (read-only); neither is reachable by `ops`.
+  (read-only); neither is reachable by `ops`. Test
+  `test_init_recreates_the_ops_directory_instead_of_following_links`.
 - V3. The AI process is started as `ops` with no supplementary groups, a
   new session, `no_new_privs`, `nice 10`, and the environment allowlist in
   [ai-runner.md](ai-runner.md) AP3. Test `test_runner_passes_user_and_group`.

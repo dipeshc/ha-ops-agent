@@ -11,9 +11,11 @@ mkdir -p /data/secrets /data/ssh /data/runs /data/snapshots /run/ops
 # reach its own AI client config directory.
 chmod 0711 /data
 find /data -mindepth 1 -maxdepth 1 ! -name claude-ops -exec chmod go-rwx {} +
-mkdir -p /data/claude-ops/home
-chown -R ops:ops /data/claude-ops
-chmod 0700 /data/claude-ops /data/claude-ops/home
+# `ops` owns this directory and could have left links in it: recreate it empty (the AI
+# client's state is disposable and rebuilt before every run) instead of chown/chmod-ing
+# whatever is there. `rm -rf` removes links without following them.
+rm -rf /data/claude-ops
+install -d -o ops -g ops -m 0700 /data/claude-ops /data/claude-ops/home
 
 # The HA config and backups are mapped below /mnt/ha (see config.yaml);
 # `ops` cannot traverse into it at all.

@@ -127,7 +127,11 @@ These hold at every stage; each has tests named in the owning document.
 - D5. The add-on image is built on the user's machine from a per-architecture
   pinned base image (`aarch64`, `amd64`), pinned Alpine packages and the
   pinned AI provider package; a rotated upstream package fails the build
-  rather than changing silently. The add-on runs with `hassio_role:
+  rather than changing silently. The packages that come with the base image
+  are checked weekly in CI (`.github/workflows/packages.yml`), which fails
+  when any installed package is older than its Alpine branch. The
+  `build.yaml` digests mirror the Dockerfile's, which ignores `BUILD_FROM`.
+  The add-on runs with `hassio_role:
   manager`, `init: false` (s6 as PID 1), ingress on 8099, an admin-only
   panel, and a hot backup with a pre-backup checkpoint. Tests
   `test_every_apk_package_is_pinned`,

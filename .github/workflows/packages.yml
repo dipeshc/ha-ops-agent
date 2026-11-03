@@ -1,0 +1,39 @@
+name: Outdated packages
+
+# The Dockerfile pins the packages it installs, so a security update there fails the build. The
+# packages that come with the pinned base image are not listed there: this job builds the image
+# weekly and fails when any installed package is older than the Alpine branch offers.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  outdated:
+    name: apk version (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ha_ops_agent
+          platforms: linux/amd64
+          build-args: BUILD_ARCH=amd64
+          tags: ha-ops-agent:check
+          load: true
+          push: false
+      - name: List packages older than the branch
+        run: |
+          outdated="$(docker run --rm --entrypoint /bin/sh ha-ops-agent:check -c "apk update -q >/dev/null && apk version -l '<'" | tail -n +2)"
+          if [ -n "$outdated" ]; then
+            echo "Outdated packages in the image:"
+            echo "$outdated"
+            exit 1
+          fi
+          echo "No outdated packages."

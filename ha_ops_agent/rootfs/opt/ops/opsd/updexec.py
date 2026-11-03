@@ -87,6 +87,8 @@ SERVICE_CALL_S = 900.0
 EXECUTABLE_KINDS = frozenset({"core", "addon", "hacs", "os", "firmware"})
 # Kinds that can only ever run with an approval (never AUTO, whatever the plan says).
 APPROVAL_ONLY_KINDS = frozenset({"os", "firmware"})
+# Kinds installed by their own Supervisor call (every other kind goes through Core's `update.install`).
+SUPERVISOR_KINDS = frozenset({"core", "addon", "os"})
 # Kinds the agent never rolls back (a regression is escalated).
 NO_ROLLBACK_KINDS = frozenset({"os", "firmware"})
 OS_ENTITY = "update.home_assistant_operating_system_update"
@@ -114,6 +116,10 @@ def os_log_lines(text: str, limit: int) -> list[str]:
 
 class ExecutorRefused(RuntimeError):
     """Policy, the hard limits or the audit log refused the call; nothing was changed."""
+
+
+class ExecutorStale(ExecutorRefused):
+    """What Home Assistant would install is no longer the planned version; nothing was called."""
 
 
 class UpdateOps(Protocol):
@@ -486,6 +492,9 @@ class Executors:
                 raise ExecutorRefused("bad or forbidden add-on slug")
         if job.kind == "os" and job.entity_id != OS_ENTITY:
             raise ExecutorRefused("not the operating system update")
+        if job.kind not in SUPERVISOR_KINDS and job.target.get("platform") == "hassio":
+            # Supervisor-managed updates go through their own Supervisor calls, never `update.install`.
+            raise ExecutorRefused("a Supervisor update entity is never installed through update.install")
 
     async def _call(self, audit_id: int, call: Any) -> str:
         """`done`, or `unknown` when the call timed out or the connection dropped. Other errors refuse."""
@@ -541,6 +550,7 @@ class Executors:
             case "core":
                 return await self._call(audit_id, self.ops.update_core(job.to_version))
             case "addon":
+                await self._addon_still_planned(audit_id, job)
                 return await self._call(audit_id, self.ops.update_addon(str(job.target["slug"])))
             case "os":
                 with selfguard.approved_os_flow(selfguard.OS_UPDATE_PATH):
@@ -552,6 +562,20 @@ class Executors:
                 return await self._call(audit_id, self.ops.install_entity(job.entity_id, version))
             case _:
                 return await self._call(audit_id, self.ops.install_entity(job.entity_id, job.to_version))
+
+    async def _addon_still_planned(self, audit_id: int, job: UpdateJob) -> None:
+        """The add-on update call takes no version: the Supervisor installs its own latest. Read it right
+        before the call and refuse unless it is still the planned (and, if approved, the approved) version."""
+        try:
+            info = await self.ops.addon_info(str(job.target["slug"]))
+        except (ApiError, OSError, ValueError) as err:
+            self.finish(audit_id, "refused", f"add-on unreadable: {str(err)[:200]}")
+            raise ExecutorRefused(f"add-on unreadable: {str(err)[:200]}") from err
+        installed, latest = info.get("version"), info.get("version_latest")
+        if not same_version(str(installed), job.from_version) or not same_version(str(latest), job.to_version):
+            why = f"the Supervisor offers {str(installed)[:40]} → {str(latest)[:40]}, not the planned {job.to_version}"
+            self.finish(audit_id, "refused", why)
+            raise ExecutorStale(why)
 
     async def restart_core(self, job: UpdateJob, decision: Decision, *, purpose: str) -> str:
         """Load a HACS integration (after install or rollback): config check, then a Core restart."""

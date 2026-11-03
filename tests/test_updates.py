@@ -1,6 +1,7 @@
 """Updates: plan/report, backup, install, health diff, rollback, resume, and the policy around them."""
 
 import copy
+import dataclasses
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -106,6 +107,8 @@ class FakeOps:
         }
         self.addons = {"core_example_broker": BROKER, SELF_SLUG: SELF}
         self.addon_state = {"core_example_broker": "started", SELF_SLUG: "started"}
+        # The Supervisor store's latest version per add-on when it is ahead of the polled update entity.
+        self.store_latest: dict[str, str] = {}
         self.busy = False
         self.manager: dict[str, Any] = {"state": "idle", "next_automatic_backup": "2026-01-28T05:16:50+00:00"}
         self.saved: list[dict[str, Any]] = []
@@ -202,7 +205,9 @@ class FakeOps:
         return not self.core_down
 
     async def addon_info(self, slug: str) -> dict[str, Any]:
-        return {"version": self._version(self.addons[slug]), "state": self.addon_state[slug]}
+        eid = self.addons[slug]
+        latest = self.store_latest.get(slug, self.entities[eid]["attributes"]["latest_version"])
+        return {"version": self._version(eid), "version_latest": latest, "state": self.addon_state[slug]}
 
     async def entity_state(self, entity_id: str) -> dict[str, Any] | None:
         found = self.entities.get(entity_id)
@@ -218,7 +223,9 @@ class FakeOps:
     async def update_addon(self, slug: str) -> None:
         self.calls.append(("update_addon", slug))
         eid = self.addons[slug]
-        self._maybe(eid, str(self.entities[eid]["attributes"]["latest_version"]), self.fail)
+        # Like the Supervisor: the store's own latest version, whatever the (polled) entity still says.
+        latest = self.store_latest.get(slug, self.entities[eid]["attributes"]["latest_version"])
+        self._maybe(eid, str(latest), self.fail)
 
     async def install_entity(self, entity_id: str, version: str) -> None:
         self.calls.append(("install_entity", (entity_id, version)))
@@ -671,6 +678,38 @@ async def test_a_changed_update_is_not_installed(rig: Rig) -> None:
     assert jobs[BROKER].state == "succeeded"
 
 
+async def test_an_addon_installs_only_when_the_supervisor_offers_the_planned_version(rig: Rig) -> None:
+    """The add-on update call takes no version: a newer store version than the polled entity's is not installed."""
+    only_auto(rig, BROKER)
+    rig.ops.store_latest["core_example_broker"] = "4.2.2"
+    await rig.manager.run_window()
+    broker = rig.jobs()[BROKER]
+    assert broker.state == "skipped" and "4.2.2" in broker.detail and "changed since the plan" in broker.detail
+    assert rig.ops.installs() == [] and rig.ops._version(BROKER) == "4.2.0"
+
+
+async def test_an_addon_store_version_that_moves_right_before_the_call_is_not_installed(rig: Rig) -> None:
+    """The executor reads the Supervisor's latest version again right before the call."""
+    only_auto(rig, BROKER)
+    ex = rig.manager.executors
+    real = rig.ops.addon_info
+    reads = 0
+
+    async def moving(slug: str) -> dict[str, Any]:
+        nonlocal reads
+        reads += 1
+        info = await real(slug)
+        # The pre-check sees the planned version; the store moves before the executor's own read.
+        return info | ({"version_latest": "4.2.2"} if reads > 1 else {})
+
+    rig.ops.addon_info = moving  # type: ignore[method-assign]
+    await rig.manager.run_window()
+    broker = rig.jobs()[BROKER]
+    assert broker.state == "skipped" and "4.2.2" in broker.detail and rig.ops.installs() == []
+    assert rig.audit("update.install")[-1]["outcome"] == "refused"
+    assert not rig.manager.paused() and ex is rig.manager.executors
+
+
 # ------------------------------------------------------- health and rollback
 
 
@@ -897,6 +936,14 @@ async def test_executors_follow_the_update_rule_and_hard_limits(rig: Rig) -> Non
         await ex.install(job("hacs", SELF), AUTO_PATCH)
     with pytest.raises(ExecutorRefused, match="encryption key"):
         await ex.rollback(job("addon", BROKER, "core_example_broker"))
+    # A Supervisor-managed entity never goes through Core's update.install, whatever kind it was given.
+    hassio = job("firmware", "update.renamed_update")
+    hassio.target["platform"] = "hassio"
+    hassio.target["approval"] = "x"
+    with pytest.raises(ExecutorRefused, match="Supervisor update entity"):
+        await ex.install(hassio, AUTO_PATCH)
+    with pytest.raises(ExecutorRefused, match="Supervisor update entity"):
+        await ex.install(dataclasses.replace(job("hacs", CARD), target={"platform": "hassio"}), AUTO_PATCH)
     assert rig.ops.installs() == []
     tightened = Rig(rig.store.path.parent / "t", capabilities__never=["update.install"])
     with pytest.raises(ExecutorRefused, match="never"):

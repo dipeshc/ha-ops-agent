@@ -95,7 +95,8 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   `updates.auto_install: on`, no failed-night block and not paused;
   otherwise the run only reports. Executors additionally refuse the agent
   itself and the Supervisor, kinds outside core/addon/hacs/os/firmware, OS
-  and firmware without a consumed and proven approval, and anything
+  and firmware without a consumed and proven approval, a `hassio`-platform
+  (Supervisor-managed) entity through `update.install`, and anything
   `capabilities.never` names. Tests
   `test_observe_mode_plans_and_reports_without_backup_or_install`,
   `test_auto_updates_option_gates_execution`,
@@ -126,10 +127,17 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   deadline (core 30, add-on and HACS 15, firmware 20, OS 40 minutes), quiet,
   still AUTO in the plan or a proven approval, the update entity still `on`
   with the same installed and latest versions, not in progress, an add-on in
-  the backup at the same version. A changed update is not installed; a
-  skipped approved job says so. Test `test_a_changed_update_is_not_installed`.
+  the backup at the same version and the Supervisor's `version_latest`
+  (`/addons/<slug>/info`) equal to the planned version. A changed update is
+  not installed; a skipped approved job says so. Tests
+  `test_a_changed_update_is_not_installed`,
+  `test_an_addon_installs_only_when_the_supervisor_offers_the_planned_version`.
 - U17. **Install.** Core `POST /core/update {version, backup: false}`;
-  add-on `POST /store/addons/<slug>/update {backup: false}`; HACS
+  add-on `POST /store/addons/<slug>/update {backup: false}`, which takes no
+  version, so the executor reads `/addons/<slug>/info` again right before
+  the call and refuses unless `version` and `version_latest` are still the
+  planned ones (the job is then `skipped`, nothing called; test
+  `test_an_addon_store_version_that_moves_right_before_the_call_is_not_installed`); HACS
   `update.install` with the version; firmware `update.install` (version only
   with the specific-version feature); OS `POST /os/update {version}` inside
   the approved OS flow. A timeout or dropped connection is "unknown" and is

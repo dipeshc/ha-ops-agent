@@ -92,7 +92,7 @@ from opsd.redact import Redactor
 from opsd.runctx import ExecContext
 from opsd.store import JOB_FINAL, Store, StoreError, UpdateJob
 from opsd.supervisor import ApiError, supervisor_jobs_busy
-from opsd.updexec import ExecutorRefused, Executors, verify_backup
+from opsd.updexec import ExecutorRefused, Executors, ExecutorStale, verify_backup
 from opsd.updiff import Comparison, HealthPoint, compare
 
 _LOGGER = logging.getLogger(__name__)
@@ -318,7 +318,7 @@ def job_spec(item: Mapping[str, Any]) -> dict[str, Any]:
         "title": str(item.get("title") or item["entity_id"])[:120],
         "from_version": str(item["installed"]),
         "to_version": str(item["latest"]),
-        "target": {k: item.get(k) for k in ("slug", "hacs_category", "hacs_domain", "supported_features")}
+        "target": {k: item.get(k) for k in ("slug", "hacs_category", "hacs_domain", "supported_features", "platform")}
         | ({"approval": item["approval"]} if item.get("approved") and item.get("approval") else {}),
     }
 
@@ -1362,6 +1362,10 @@ class UpdateManager:
                 return f"add-on unreadable: {str(err)[:100]}"
             if not same_version(str(info.get("version")), job.from_version):
                 return f"add-on version changed: {info.get('version')}"
+            # The Supervisor installs its own latest version (the call takes none), so that must be the planned one.
+            if not same_version(str(info.get("version_latest")), job.to_version):
+                return (f"changed since the plan: the Supervisor now offers "
+                        f"{clean_text(str(info.get('version_latest')), 40)}, not {job.to_version}")  # fmt: skip
             self.store.set_job_target(job.id, job.target | {"state_before": info.get("state")})
         if job.kind == "core":
             # A Core downgrade is only safe if the recorder did not migrate its database.
@@ -1381,6 +1385,15 @@ class UpdateManager:
         job = self.store.update_job(job.id) or job
         try:
             outcome = await self.executors.install(job, decision_of(ctx.plan.get(job.entity_id, {})))
+        except ExecutorStale as err:
+            # Nothing was called: the version on offer moved after the plan, so it waits for the next plan.
+            self._move(
+                job,
+                "skipped",
+                f"changed since the plan: {err}"
+                + ("; not installed, so approve it again in the panel" if job.target.get("approval") else ""),
+            )
+            return
         except ExecutorRefused as err:
             version, _ = await self._version(job)
             if version is None or not same_version(version, job.from_version):

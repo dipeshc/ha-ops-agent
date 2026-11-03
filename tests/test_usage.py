@@ -63,20 +63,23 @@ def test_plan_resolution() -> None:
 
 
 def test_utilisation_parsing() -> None:
-    info = {"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.42, "resetsAt": 1},
+    info = {"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 42, "resetsAt": 1},
                                                     "seven_day": {"utilization": 12.5, "resetsAt": 2}}}  # fmt: skip
     assert utilisation(info, "five_hour") == 0.42 and utilisation(info, "seven_day") == 0.125
-    assert utilisation({"rateLimitType": "five_hour", "utilization": 0.3}, "five_hour") == 0.3
+    assert utilisation({"rateLimitType": "five_hour", "utilization": 30}, "five_hour") == 0.3
     for bad in (None, {}, {"unifiedWindows": {"five_hour": {"utilization": "x"}}}, {"rateLimitType": "five_hour",
-                "utilization": -1}, {"rateLimitType": "five_hour", "utilization": True}):  # fmt: skip
+                "utilization": -1}, {"rateLimitType": "five_hour", "utilization": True},
+                {"rateLimitType": "five_hour", "utilization": 100.5},
+                {"rateLimitType": "five_hour", "utilization": float("nan")},
+                {"rateLimitType": "five_hour", "utilization": float("inf")}):  # fmt: skip
         assert utilisation(bad, "five_hour") is None
     assert run_share(
-        {"rateLimitType": "five_hour", "utilization": 0.40},
-        {"rateLimitType": "five_hour", "utilization": 0.43},
+        {"rateLimitType": "five_hour", "utilization": 40},
+        {"rateLimitType": "five_hour", "utilization": 43},
         "five_hour",
     ) == pytest.approx(0.03)
     assert run_share(None, info, "five_hour") is None
-    assert run_share(info, {"rateLimitType": "five_hour", "utilization": 0.1}, "five_hour") == 0.0
+    assert run_share(info, {"rateLimitType": "five_hour", "utilization": 10}, "five_hour") == 0.0
 
 
 # ------------------------------------------------------------ reservation
@@ -240,10 +243,10 @@ import json
 def out(x): print(json.dumps(x), flush=True)
 out({{"type": "system", "subtype": "init", "rateLimitTier": "default_claude_max_5x"}})
 out({{"type": "rate_limit_event", "rate_limit_info": {{"status": "allowed", "unifiedWindows": {{
-    "five_hour": {{"utilization": 0.20, "resetsAt": 1}}, "seven_day": {{"utilization": 0.10, "resetsAt": 2}}}}}}}})
+    "five_hour": {{"utilization": 20, "resetsAt": 1}}, "seven_day": {{"utilization": 10, "resetsAt": 2}}}}}}}})
 out({{"type": "rate_limit_event", "rate_limit_info": {{"status": "{status}", "resetsAt": 1793000000,
-    "unifiedWindows": {{"five_hour": {{"utilization": 0.23, "resetsAt": 1}},
-                       "seven_day": {{"utilization": 0.105, "resetsAt": 2}}}}}}}})
+    "unifiedWindows": {{"five_hour": {{"utilization": 23, "resetsAt": 1}},
+                       "seven_day": {{"utilization": 10.5, "resetsAt": 2}}}}}}}})
 out({{"type": "result", "subtype": "success", "is_error": {is_error}, "result": "x", "num_turns": 2}})
 """
 
@@ -498,16 +501,19 @@ async def test_kill_switch_stops_a_running_triage_but_not_the_safety_push(
             daemon.close()
 
 
-def test_unit_is_fixed_per_run_and_errs_toward_more_usage() -> None:
+def test_utilisation_is_always_read_as_percent() -> None:
     def info(value: float) -> dict[str, Any]:
         return {"rateLimitType": "five_hour", "utilization": value}
 
-    # Both readings at or below 1: fraction (records more than reading them as percent).
-    assert run_share(info(0.5), info(0.8), "five_hour") == pytest.approx(0.3)
-    # Any reading above 1: both are percent, never a mix.
+    # The provider reports whole percents: 1 is 1 % of the window, never the whole of it.
+    assert utilisation(info(1), "five_hour") == pytest.approx(0.01)
+    assert (utilisation(info(1), "five_hour") or 0) < Caps.from_options(Options()).account_busy  # not "busy"
+    assert utilisation(info(0), "five_hour") == 0.0 and utilisation(info(100), "five_hour") == 1.0
+    # A 0 -> 1 tick during a run is 1 % of the window, not all of it.
+    assert run_share(info(0), info(1), "five_hour") == pytest.approx(0.01)
     assert run_share(info(0.9), info(1.4), "five_hour") == pytest.approx(0.005)
     assert run_share(info(40), info(43), "five_hour") == pytest.approx(0.03)
-    assert utilisation(info(0.7), "five_hour") == 0.7 and utilisation(info(70), "five_hour") == 0.7
+    assert utilisation(info(0.7), "five_hour") == pytest.approx(0.007) and utilisation(info(70), "five_hour") == 0.7
 
 
 def test_prune_keeps_the_rolling_week(db: Store) -> None:

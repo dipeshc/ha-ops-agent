@@ -45,11 +45,15 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
 ## Measurement
 
 - B6. A run's share is the difference between the last and first
-  utilisation readings of the provider's rate-limit events (values over 1
-  read as percent, otherwise as a fraction), one unit per run. When both
+  utilisation readings of the provider's rate-limit events. Every reading
+  is a percent (the provider reports whole percents: 1 is 1 % of the
+  window); a value that is not a finite number from 0 to 100 is no
+  reading. The account utilisation that B3's `account_busy` compares is the last
+  reading as a percent too. When both
   readings exist and did not move, the share is estimated as the run's
   duration over the window and flagged `share_estimated`. Tests
-  `test_usage.py:64-78,454-463`, `test_usage_estimates.py:32-65`.
+  `test_utilisation_parsing`, `test_utilisation_is_always_read_as_percent`,
+  `test_usage_estimates.py:32-65`.
 - B7. **Reservation.** One transaction inserts the `runs` row with reserved
   turns, seconds and share before the provider starts; `finish_run`
   replaces them with actuals; an aborted run with no tokens keeps a quarter

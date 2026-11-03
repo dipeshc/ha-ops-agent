@@ -25,6 +25,7 @@ reservation is replaced by the actual figures when it ends. The kill switch
 and the usage-limit backoff are in `aicontrol`.
 """
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
@@ -156,7 +157,10 @@ def _raw_utilisation(info: Mapping[str, object] | None, window: str) -> float | 
         value = windows[window].get("utilization")
     elif info.get("rateLimitType") == window:
         value = info.get("utilization")
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    # A percent (the provider reports whole percents, 0..100); anything else is not a reading.
+    if not math.isfinite(value) or not 0 <= value <= 100:
         return None
     return float(value)
 
@@ -164,27 +168,23 @@ def _raw_utilisation(info: Mapping[str, object] | None, window: str) -> float | 
 def utilisation(info: Mapping[str, object] | None, window: str) -> float | None:
     """Account utilisation (0..1) of `five_hour` or `seven_day` from a `rate_limit_info`.
 
-    The unit is not documented. A value above 1 can only be a percentage; a
-    value of 1 or less is read as a fraction, the reading that records more
-    usage (failing toward the agent using less).
+    The provider reports the utilisation in percent (whole percents in practice), so 1 is 1 %, never the
+    whole window. The payload carries no unit to say otherwise, so every value is read as a percent; a value
+    outside 0..100 or not finite is no reading.
     """
     value = _raw_utilisation(info, window)
-    if value is None:
-        return None
-    return value / 100 if value > 1.0 else value
+    return None if value is None else value / 100
 
 
 def run_share(first: Mapping[str, object] | None, last: Mapping[str, object] | None, window: str) -> float | None:
-    """The window utilisation added while the run was going (None if not reported twice).
+    """The window utilisation (0..1) added while the run was going (None if not reported twice).
 
-    One unit for the whole run, chosen from both readings: percent only if
-    either is above 1, otherwise fraction (the larger, conservative reading).
+    Both readings are percents (`utilisation`), so a 0 -> 1 tick is 1 % of the window.
     """
     start, end = _raw_utilisation(first, window), _raw_utilisation(last, window)
     if start is None or end is None:
         return None
-    scale = 0.01 if max(start, end) > 1.0 else 1.0
-    return max(0.0, end - start) * scale
+    return max(0.0, end - start) / 100
 
 
 def share_inconclusive(first: Mapping[str, object] | None, last: Mapping[str, object] | None, window: str) -> bool:

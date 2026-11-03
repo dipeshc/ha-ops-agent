@@ -170,7 +170,8 @@ def check_content(path: str, old: bytes | None, new: bytes, *, notify_service: s
         if fix_domains is None:
             raise ChangeRefused(f"{path} can only be changed by an update's breaking-change fix")
         try:
-            configcheck.check_configuration_edit(old_text, text, domains=fix_domains)
+            configcheck.check_configuration_edit(old_text, text, domains=fix_domains, entities=entities,
+                                                 admin_notify=notify_service)  # fmt: skip
         except configcheck.ConfigRefused as err:
             raise ChangeRefused(str(err)) from err
         return summary

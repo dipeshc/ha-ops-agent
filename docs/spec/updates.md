@@ -206,7 +206,18 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   at most 2000 characters, at most 3 files, paths limited to
   `configuration.yaml`, `automations/**`, `alerts/*`, `templates/**.yaml`,
   `custom_templates/**.jinja` (never docs or self paths), all proposal rules
-  applied. The update then waits for change `#N`: open or applying waits
+  applied. In `configuration.yaml`, every mapping of a changed block that
+  the old block does not hold verbatim passes the proposal call allowlist:
+  literal allowed actions, literal targets in the entity registry, no
+  templated `action`, `service`, `entity_id` or `target`, no device, area,
+  event or scene keys. A macro (`.jinja`) changes only when no `*.yaml` in
+  the config directory (hidden directories and `secrets.yaml` skipped, links
+  not followed) picks an action or its target with a template, and every
+  one of them parses (fail closed). The same rules apply to a maintenance
+  YAML migration ([maintenance.md](maintenance.md) M17). Tests
+  `test_an_updates_configuration_change_is_checked_like_a_proposal`,
+  `test_a_macro_changes_only_when_no_file_picks_an_action_with_a_template`.
+  The update then waits for change `#N`: open or applying waits
   quietly, applied lets it go ahead (re-reviewed), rejected asks again.
   Nothing is applied automatically; the admin applies the proposal on its
   item ([proposals.md](proposals.md)). Tests

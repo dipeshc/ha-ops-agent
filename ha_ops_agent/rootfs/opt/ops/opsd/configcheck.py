@@ -764,13 +764,58 @@ def _blocks(lines: list[str]) -> list[str | None]:
     return owner
 
 
-def check_configuration_edit(old: str, new: str, *, domains: frozenset[str]) -> None:
+def _mappings(value: Any) -> list[dict[Any, Any]]:
+    """Every mapping at any depth (bounded), except an event trigger's match data (compared, never executed)."""
+    found: list[dict[Any, Any]] = []
+    stack = [value]
+    while stack:
+        if len(found) > MAX_NODES:
+            raise ConfigRefused("configuration.yaml: the block is too complex to check")
+        item = stack.pop()
+        if isinstance(item, dict):
+            found.append(item)
+            trigger = item.get("platform") == "event" or item.get("trigger") == "event"
+            stack.extend(v for k, v in item.items() if not (trigger and k == "event_data"))
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return found
+
+
+def _changed_calls(before: Any, after: Any, walker: _Walker) -> None:
+    """Every mapping of a changed block that the old block does not hold verbatim is checked like a proposal's:
+    no forbidden key, every call a literal allowed action with literal, registered targets, no templated target."""
+    old = {repr(m) for m in _mappings(before)}
+    for item in _mappings(after):
+        if repr(item) in old:
+            continue
+        keys = {str(k) for k in item}
+        bad = FORBIDDEN_KEYS & keys
+        if bad:
+            raise walker.refuse(f"{', '.join(sorted(bad))} is not allowed in a fix")
+        link = item.get("action") == "URI" and keys <= {"action", "title", "uri"}
+        for key in ("action", "service"):
+            if key in item and not link:
+                if isinstance(item[key], str):
+                    walker.call(item, item[key])
+                elif not isinstance(item[key], (list, dict)):
+                    # A list or mapping is an action sequence: its steps are mappings of their own.
+                    raise walker.refuse(f"`{key}:` must name one action")
+        for key in ("entity_id", "target"):
+            if key in item and _has_template(item[key]):
+                raise walker.refuse(f"a fix may not choose `{key}` with a template")
+
+
+def check_configuration_edit(old: str, new: str, *, domains: frozenset[str],
+                             entities: frozenset[str] | None = None, admin_notify: str = "") -> None:  # fmt: skip
     """An update fix's edit of configuration.yaml: in place, inside the blocks of `domains` only.
 
     The top-level keys stay exactly the same (no block added, removed or renamed); every changed
     line lies inside a block named by one of `domains` and outside `CONFIGURATION_DENY`; at most
     `CONFIGURATION_MAX_LINES` lines change; added lines carry no URL, credential, host, YAML tag,
-    anchor or alias; the result has no duplicate keys at the top level.
+    anchor or alias; the result has no duplicate keys at the top level. Inside the changed blocks,
+    every new or changed mapping passes the proposal allowlist for calls (`_changed_calls`): literal
+    allowed actions only, literal targets in `entities`, no templated `action`, `service`,
+    `entity_id` or `target`, none of `FORBIDDEN_KEYS`.
     """
     old_lines, new_lines = old.splitlines(), new.splitlines()
     old_keys = [m.group(1) for line in old_lines if (m := _TOP_KEY_RE.match(line))]
@@ -813,3 +858,29 @@ def check_configuration_edit(old: str, new: str, *, domains: frozenset[str]) -> 
         raise ConfigRefused(f"configuration.yaml: a fix may not change the {str(outside[0])[:40]} block")
     if before == after:
         raise ConfigRefused("configuration.yaml: the fix changes nothing once parsed")
+    walker = _Walker("configuration.yaml", entities=entities, admin_notify=admin_notify, guarded=None)
+    for key in after:
+        if before[key] != after[key]:
+            _changed_calls(before[key], after[key], walker)
+
+
+# Keys whose templated value decides what an action does or what it targets.
+_STEERED_KEYS = frozenset({"action", "service", "service_template", "entity_id", "target", "device_id", "area_id",
+                           "floor_id", "label_id", "data_template"})  # fmt: skip
+
+
+def steered_by_template(text: str) -> bool | None:
+    """Whether an existing YAML file picks an action or its target with a template (None: unreadable).
+
+    A template macro (`custom_templates/*.jinja`) can feed such a value, so a change to a macro can change
+    what that action does; an update fix may only change macros when no file does this.
+    """
+    try:
+        data = yaml.load(text, Loader=_Loader)  # noqa: S506 - a SafeLoader subclass
+    except yaml.YAMLError, RecursionError, ValueError:
+        return None
+    try:
+        found = _mappings(data)
+    except ConfigRefused:
+        return None
+    return any(_has_template(m[k]) for m in found for k in _STEERED_KEYS & {str(x) for x in m})

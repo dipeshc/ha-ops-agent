@@ -38,6 +38,7 @@ from opsd.updexec import ExecutorRefused, Executors, verify_backup
 from opsd.updiff import HealthPoint, compare
 from tests.conftest import WATCHED as WATCHED_ENTITIES
 from tests.conftest import make_options
+from tests.test_changes import w  # noqa: F401
 from tests.test_panel import Panel, h, local_ingress, p  # noqa: F401
 
 CORE = "update.home_assistant_core_update"
@@ -1667,3 +1668,98 @@ async def test_a_listed_lock_going_down_after_an_update_still_rolls_it_back(tmp_
     assert job.state == "rolled_back" and any("lock.front_door" in r for r in job.regressions)
     assert not any("light.garden" in r for r in job.regressions)  # an ordinary listed entity stays expected
     rig.store.close()
+
+
+# ------------------------------------------------- the checks on an update's config change
+
+
+FIX_CONFIGURATION = """homeassistant:
+  name: Home
+template:
+  - trigger:
+      - trigger: time_pattern
+        minutes: "/5"
+    action:
+      - action: logbook.log
+        data:
+          message: tick
+    sensor:
+      - name: Tick
+        state: "{{ 1 }}"
+"""
+CORE_ITEM = {"entity_id": CORE, "title": "Home Assistant Core", "latest": "2026.11.1"}
+
+
+def commit_files(w: Any, files: dict[str, str]) -> None:  # noqa: F811
+    from tests.test_changes import git
+
+    for path, text in files.items():
+        (w.repo_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (w.repo_path / path).write_text(text)
+    git(w.repo_path, "add", "-f", *files)
+    git(w.repo_path, "commit", "-q", "-m", "chore: fixture")
+
+
+def propose_fix(w: Any, edits: list[dict[str, str]]) -> dict[str, Any]:  # noqa: F811
+    from opsd import updatefix
+    from tests.test_changes import REGISTRY
+
+    return updatefix.propose(w.store, w.repo, w.options, item=CORE_ITEM, why="w", edits=updatefix.parse_edits(edits),
+                             domains=frozenset({"template"}), day="2026-01-28", now=w.now,
+                             entities=REGISTRY)  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "refusal"),
+    [
+        ("action: logbook.log", "action: \"{{ 'lo' ~ 'ck.unl' ~ 'ock' }}\"", "literal names"),
+        ("action: logbook.log", "action: switch.turn_on", "not an action the agent may propose"),
+        (
+            "action: logbook.log\n        data:\n          message: tick",
+            'action: light.turn_on\n        target:\n          entity_id: "{{ states.light'
+            " | map(attribute='entity_id') | first }}\"",
+            "literal",
+        ),
+        ("action: logbook.log", "action: light.turn_on\n        entity_id: light.garage_side", "registry"),
+        ("        data:\n          message: tick", "        device_id: abc", "device_id"),
+    ],
+)
+def test_an_updates_configuration_change_is_checked_like_a_proposal(
+    w: Any,  # noqa: F811
+    old: str,
+    new: str,
+    refusal: str,
+) -> None:
+    """Inside the integration's block, every new or changed call passes the proposal allowlist."""
+    from opsd.changes import ChangeRefused
+
+    commit_files(w, {"configuration.yaml": FIX_CONFIGURATION})
+    with pytest.raises(ChangeRefused, match=refusal):
+        propose_fix(w, [{"path": "configuration.yaml", "old": old, "new": new}])
+
+
+def test_an_updates_configuration_change_inside_its_block_is_allowed(w: Any) -> None:  # noqa: F811
+    commit_files(w, {"configuration.yaml": FIX_CONFIGURATION})
+    row = propose_fix(w, [{"path": "configuration.yaml", "old": "message: tick", "new": "message: tock"}])
+    assert row["state"] == "open"
+
+
+def test_a_macro_changes_only_when_no_file_picks_an_action_with_a_template(w: Any) -> None:  # noqa: F811
+    """A macro can feed a templated action or target elsewhere, so then a fix may not change it."""
+    from opsd.changes import ChangeRefused
+
+    macro = "custom_templates/status.jinja"
+    commit_files(w, {macro: "{% macro status() %}ok{% endmacro %}\n"})
+    row = propose_fix(w, [{"path": macro, "old": "ok", "new": "fine"}])
+    assert row["state"] == "open"
+    commit_files(w, {"automations/steered.yaml": 'alias: Steered\naction:\n  - action: "{{ x }}"\n'})
+    with pytest.raises(ChangeRefused, match=r"automations/steered\.yaml chooses an action"):
+        propose_fix(w, [{"path": macro, "old": "ok", "new": "done"}])
+    commit_files(w, {"automations/steered.yaml": "alias: Steered\naction:\n  - action: light.turn_on\n"
+                                                 "    target:\n      entity_id: >\n        {{ y }}\n"})  # fmt: skip
+    with pytest.raises(ChangeRefused, match="target with a template"):
+        propose_fix(w, [{"path": macro, "old": "ok", "new": "done"}])
+    # Unparseable YAML is not read as "nothing steers": the macro stays as it is.
+    commit_files(w, {"automations/steered.yaml": "alias: [unclosed\n"})
+    with pytest.raises(ChangeRefused, match="could not be parsed"):
+        propose_fix(w, [{"path": macro, "old": "ok", "new": "done"}])

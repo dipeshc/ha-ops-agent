@@ -11,12 +11,15 @@ is applied the update is no longer held by it, and installs in the next window. 
 anything; the admin can always approve the update itself instead.
 """
 
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from opsd import configcheck
 from opsd.changepaths import fix_path
 from opsd.changes import ChangeRefused, FileChange, build_proposal
 from opsd.config import Options
@@ -28,6 +31,9 @@ PREFIX = "update-fix:"
 MAX_EDITS = 6
 MAX_FILES = 3
 MAX_EDIT_CHARS = 2000
+# The YAML files read to decide whether a macro may change (`macro_consumer`).
+SCAN_MAX_FILES = 3000
+SCAN_MAX_BYTES = 1 << 20
 _SUBJECT_RE = re.compile(r"[a-z0-9 ():._-]{1,70}")
 
 
@@ -82,7 +88,42 @@ def apply_edits(repo: Repo, edits: list[Edit]) -> list[FileChange]:
         if texts[edit.path].count(edit.old) != 1:
             raise ChangeRefused(f"{edit.path}: the text to replace must occur exactly once")
         texts[edit.path] = texts[edit.path].replace(edit.old, edit.new, 1)
+    if any(path.endswith(".jinja") for path in texts):
+        why = macro_consumer(repo.path)
+        if why is not None:
+            raise ChangeRefused(f"template macros cannot be changed by a fix here: {why}")
     return [FileChange(path, text.encode()) for path, text in sorted(texts.items())]
+
+
+def macro_consumer(root: Path) -> str | None:
+    """Why a macro may not change (None: it may): some YAML file in the config directory picks an action or its
+    target with a template, which a macro can feed, or the files could not all be read (fail closed).
+
+    Walks every `*.yaml` below `root` without following links, skipping hidden directories and `secrets.yaml`.
+    """
+    seen = 0
+    for top, dirs, names in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for name in sorted(names):
+            if not name.endswith(".yaml") or name == "secrets.yaml":
+                continue
+            seen += 1
+            path = Path(top) / name
+            relative = path.relative_to(root).as_posix()
+            if seen > SCAN_MAX_FILES:
+                return "too many YAML files to check"
+            try:
+                if path.is_symlink() or path.stat().st_size > SCAN_MAX_BYTES:
+                    return f"{relative} could not be checked"
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return f"{relative} could not be read"
+            steered = configcheck.steered_by_template(text)
+            if steered is None:
+                return f"{relative} could not be parsed"
+            if steered:
+                return f"{relative} chooses an action or its target with a template"
+    return None
 
 
 def propose(store: Store, repo: Repo, options: Options, *, item: Mapping[str, Any], why: str, edits: list[Edit],

@@ -1,8 +1,9 @@
 """Which config files a change proposal may touch. Stdlib only: the guard hook imports it.
 
-At most these, nothing else: the house facts document (`docs/<name>.md`, from the house
-profile), `automations/**/*.yaml`, `alerts/*.yaml` and `templates/*.yaml`, each kind only when
-the house profile turns it on (`ProposalRules`; with git off, nothing). Path parts are
+At most these, nothing else: `automations/**/*.yaml`, `alerts/*.yaml` and `templates/*.yaml`,
+each kind only when the house profile turns it on (`ProposalRules`; with git off, nothing).
+The house facts document (`docs/<name>.md`, from the house profile) is never a draft: it
+changes only through `facts.propose`, one fact appended by the daemon. Path parts are
 lower-case letters, digits, `_` and `-` (no dots, so no `..`, hidden files or other
 extensions), at most four directories deep under `automations/`. `configuration.yaml`,
 secrets, `custom_components/`, `custom_templates/`, the add-ons, `.storage/`, `ops/`,
@@ -64,10 +65,10 @@ class ProposalRules:
         return bool(self.kinds or self.facts)
 
     def describe(self) -> str:
-        """The allowed paths in words, for refusals and prompts."""
-        found = [self.facts] if self.facts else []
-        found += [GLOBS[k] for k in KINDS if k in self.kinds]
-        return ", ".join(found) or "nothing (git proposals are off)"
+        """The allowed draft paths in words, for refusals and prompts (house facts: `propose-fact` only)."""
+        found = [GLOBS[k] for k in KINDS if k in self.kinds]
+        text = ", ".join(found) or "nothing (git proposals are off)"
+        return f"{text}; {self.facts} through propose-fact only" if self.facts else text
 
 
 # What an update's config fix may touch besides `_FIX` (opsd.updatefix): every kind, never a document.
@@ -81,9 +82,7 @@ def allowed_path(path: str, rules: ProposalRules) -> bool:
     # The agent never modifies itself (opsd.selfguard), whatever the allowlist below would say.
     if self_path(path):
         return False
-    return (bool(rules.facts) and path == rules.facts) or any(
-        KINDS[kind].fullmatch(path) for kind in rules.kinds if kind in KINDS
-    )
+    return any(KINDS[kind].fullmatch(path) for kind in rules.kinds if kind in KINDS)
 
 
 # The files an update's config change proposal (opsd.updatefix) may name; the admin approves each one.

@@ -19,6 +19,15 @@ The whole file is walked, not just the added lines:
 - `device_id`, `area_id`, `floor_id`, `label_id`, `event`, `scene`,
   `service_template` and `data_template` are refused anywhere.
 - Alert `notifiers` are only the admin's.
+- `repeat` runs a literal `count` of at most `MAX_REPEAT` or a literal
+  `for_each` list of at most `MAX_REPEAT` items (no `while`/`until` loops);
+  no `webhook` trigger; a `time_pattern` trigger fires at most once a
+  minute (no `seconds`).
+
+The old version of a file is checked too (`does_more`, `alerts_removed`):
+a file that already does more than the allowlist (an action outside it,
+devices, areas, events, scenes, YAML tags) is never changed by a proposal,
+and an alerts file never loses an alert or an alert's notifier.
 """
 
 import difflib
@@ -66,6 +75,10 @@ ALERT_KEYS = frozenset({"name", "done_message", "entity_id", "state", "repeat", 
 _ENTITY_RE = re.compile(r"[a-z_][a-z0-9_]*\.[a-z0-9_]+")
 _NAME_RE = re.compile(r"[a-z_][a-z0-9_]*\.[a-z0-9_]+")
 MAX_NODES = 20_000
+# A repeat runs at most this many times (a literal count or a literal for_each list).
+MAX_REPEAT = 10
+# Triggers a proposal may not add: an inbound URL anyone holding it can fire.
+FORBIDDEN_TRIGGERS = frozenset({"webhook"})
 # Media players: volume and transport only (no URLs, sources or groups to steer).
 MEDIA_ACTIONS = frozenset({"media_player.volume_set", "media_player.volume_mute", "media_player.volume_up",
                            "media_player.volume_down", "media_player.media_play", "media_player.media_pause",
@@ -321,12 +334,21 @@ class _Walker:
                 for key in ("action", "service"):
                     if isinstance(item.get(key), str) and not link:
                         self.call(item, item[key])
+                self.trigger(item)
                 # An event trigger's match data (`event_data: {action: released}`) is compared, never
                 # executed; anywhere else an `event_data` value is scanned like everything else.
                 trigger = item.get("platform") == "event" or item.get("trigger") == "event"
                 stack.extend(v for k, v in item.items() if not (trigger and k == "event_data"))
             elif isinstance(item, list):
                 stack.extend(item)
+
+    def trigger(self, item: dict[Any, Any]) -> None:
+        """No webhook trigger (an inbound URL), and a time pattern at most once a minute."""
+        kind = next((item[k] for k in ("platform", "trigger") if isinstance(item.get(k), str)), None)
+        if kind in FORBIDDEN_TRIGGERS:
+            raise self.refuse(f"{kind} triggers are not allowed")
+        if kind == "time_pattern" and "seconds" in item:
+            raise self.refuse("time_pattern triggers may fire at most once a minute (no seconds)")
 
     # ------------------------------------------------------------- steps
 
@@ -360,6 +382,7 @@ class _Walker:
         elif kind == "repeat":
             if not isinstance(step["repeat"], dict):
                 raise self.refuse("repeat must be a mapping")
+            self.repeat(step["repeat"])
             self.steps(step["repeat"].get("sequence"))
         elif kind == "parallel":
             branches = step["parallel"]
@@ -370,6 +393,21 @@ class _Walker:
                     self.step(branch)
         elif kind == "sequence":
             self.steps(step["sequence"])
+
+    def repeat(self, loop: dict[Any, Any]) -> None:
+        """A bounded loop: a literal count or a literal list, at most `MAX_REPEAT` runs."""
+        if "while" in loop or "until" in loop:
+            raise self.refuse("repeat may use a literal count or for_each list only (no while/until loops)")
+        if "count" in loop:
+            count = loop["count"]
+            if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_REPEAT:
+                raise self.refuse(f"repeat count must be a literal number from 1 to {MAX_REPEAT}")
+        elif "for_each" in loop:
+            items = loop["for_each"]
+            if not isinstance(items, list) or len(items) > MAX_REPEAT:
+                raise self.refuse(f"repeat for_each must be a literal list of at most {MAX_REPEAT} items")
+        else:
+            raise self.refuse("repeat needs a literal count or for_each list")
 
     # -------------------------------------------------------------- calls
 
@@ -571,6 +609,94 @@ def guarded_helpers(texts: Iterable[str | None], *, admin_notify: str) -> frozen
         if any(not checker.allowed_action(a) for a in calls.actions):
             guarded.update(_HELPER_ID_RE.findall(text))
     return frozenset(guarded)
+
+
+def _lenient(text: str) -> Any:
+    """An existing file as HA reads it (tags as plain values); ValueError if it does not parse."""
+    try:
+        return yaml.load(text, Loader=_Loader)  # noqa: S506 - a SafeLoader subclass
+    except (yaml.YAMLError, RecursionError) as err:
+        raise ValueError(str(err)[:200]) from err
+
+
+def does_more(text: str, *, admin_notify: str) -> str | None:
+    """Why an existing file does more than a proposal may (so a proposal may not change it at all), or None.
+
+    A file that calls an action outside the allowlist (a lock, the alarm, a cover, a switch, a script),
+    uses devices, areas, events, scenes or blueprints, or carries YAML tags would otherwise be rewritten
+    into something that no longer does it; only the admin edits such a file.
+    """
+    if line_problem(text) is not None:
+        return "it uses YAML tags or directives"
+    try:
+        data = _lenient(text)
+    except ValueError:
+        return "it does not parse"
+    stack: list[Any] = [data]
+    seen = 0
+    while stack:
+        seen += 1
+        if seen > MAX_NODES:
+            return "it is too complex to check"
+        item = stack.pop()
+        if isinstance(item, dict):
+            bad = FORBIDDEN_KEYS & {str(k) for k in item}
+            if bad:
+                return f"it uses {', '.join(sorted(bad))}"
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    checker = _Walker("", entities=None, admin_notify=admin_notify)
+    outside = sorted(a for a in collect(text).actions if not checker.allowed_action(a))
+    if outside:
+        return f"it calls {', '.join(outside[:5])}"
+    return None
+
+
+def _alerts(text: str) -> dict[str, Any]:
+    data = _lenient(text) if text else {}
+    alerts = data.get("alert") if isinstance(data, dict) else None
+    return {str(k): v for k, v in alerts.items()} if isinstance(alerts, dict) else {}
+
+
+def alerts_removed(old: str, new: str) -> list[str]:
+    """Alerts of an alerts package that a change removes, or whose notifiers it removes (both refused)."""
+    try:
+        before, after = _alerts(old), _alerts(new)
+    except ValueError:
+        return ["(the old file does not parse)"]
+    lost: list[str] = []
+    for name, alert in before.items():
+        if name not in after:
+            lost.append(name)
+            continue
+        was = alert.get("notifiers") if isinstance(alert, dict) else None
+        now = after[name].get("notifiers") if isinstance(after[name], dict) else None
+        had = {n for n in (was if isinstance(was, list) else [was]) if isinstance(n, str)}
+        has = {n for n in (now if isinstance(now, list) else [now]) if isinstance(n, str)}
+        if had - has:
+            lost.append(f"{name} (notifiers {', '.join(sorted(had - has))})")
+    return lost
+
+
+def automation_names(text: str | None) -> tuple[set[str], set[str]]:
+    """The `id`s and `alias`es of the automations in a file (one mapping or a list), best effort."""
+    ids: set[str] = set()
+    aliases: set[str] = set()
+    if not text:
+        return ids, aliases
+    try:
+        data = _lenient(text)
+    except ValueError:
+        return ids, aliases
+    for item in data if isinstance(data, list) else [data]:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("id"), (str, int)) and not isinstance(item.get("id"), bool):
+            ids.add(str(item["id"]))
+        if isinstance(item.get("alias"), str) and item["alias"].strip():
+            aliases.add(item["alias"].strip().casefold())
+    return ids, aliases
 
 
 def collect(text: str | None) -> Calls:

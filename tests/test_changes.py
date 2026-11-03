@@ -155,7 +155,7 @@ NEW_FRIDGE = FILES[FRIDGE].replace("above: 40", "above: 42")
 
 @pytest.mark.parametrize(
     "path",
-    [FACTS_PATH, "automations/a.yaml", "automations/kitchen/fridge.yaml", "automations/a/b/c/d/e.yaml",
+    ["automations/a.yaml", "automations/kitchen/fridge.yaml", "automations/a/b/c/d/e.yaml",
      "alerts/x.yaml", "templates/status.yaml"],
 )  # fmt: skip
 def test_allowed_paths(path: str) -> None:
@@ -169,7 +169,9 @@ def test_allowed_paths(path: str) -> None:
      "notes.md", ".gitignore", ".git/config", "docs/other.md", "automations/../configuration.yaml",
      "automations/./a.yaml", "/automations/a.yaml", "automations//a.yaml", "alerts/sub/x.yaml",
      "templates/x.yml", "automations/A.yaml", "automations/.hidden.yaml", "automations/a.yaml ",
-     "automations/a/b/c/d/e/f.yaml", "blueprints/x.yaml", "alerts/x.yaml/../../secrets.yaml"],
+     "automations/a/b/c/d/e/f.yaml", "blueprints/x.yaml", "alerts/x.yaml/../../secrets.yaml",
+     # The house facts document changes only through propose-fact, never as a draft.
+     FACTS_PATH],
 )  # fmt: skip
 def test_everything_else_is_refused(path: str) -> None:
     assert not allowed_path(path, SAMPLE_PROFILE.proposal_rules)
@@ -539,7 +541,7 @@ async def test_a_failed_reload_restores_reloads_again_and_escalates(w: World) ->
     assert w.sent[-1].urgent and "rolled back" in w.sent[-1].title
 
 
-async def test_observe_mode_applies_only_the_house_facts(w: World) -> None:
+async def test_observe_mode_applies_nothing_not_even_the_house_facts(w: World) -> None:
     w.mode = "observe"
     w.build()
     ha = w.propose({ALERT: NEW_ALERT})
@@ -547,6 +549,10 @@ async def test_observe_mode_applies_only_the_house_facts(w: World) -> None:
         await w.approve(ha["id"])
     facts = ch.propose_fact(w.store, w.repo, w.options, fact="The garden speaker is unplugged in winter.", why="noted",
                             requested_by="panel:u-admin", day="2026-01-28", now=w.now)  # fmt: skip
+    with pytest.raises(Exception, match="observe mode"):
+        await w.approve(facts["id"])
+    w.mode = "act"
+    w.build()
     outcome = await w.run(facts["id"])
     assert outcome.state == "applied" and "- The garden speaker is unplugged in winter. (noted 2026-01-28)" in w.read(
         FACTS_PATH
@@ -884,6 +890,7 @@ async def test_approve_in_the_panel_applies_with_no_push(p: Any, h: Any) -> None
 
     repo_from(h.paths)
     assert p.d.store is not None and p.d.changes is not None
+    p.d.changes.options = make_options(agent__mode="act")  # nothing applies in observe mode
     found = ch.propose_fact(p.d.store, p.d.repo, p.d.options, fact="The garden speaker is off in winter.", why="noted",
                             requested_by="panel:u-admin", day="2026-01-28", now=datetime.now(UTC))  # fmt: skip
     await p.d.items_flush()  # its Needs you push
@@ -945,3 +952,133 @@ def test_an_updates_config_change_passes_every_proposal_rule(w: World, edits: li
         updatefix.propose(w.store, w.repo, w.options, item=item, why="w", edits=updatefix.parse_edits(edits),
                           domains=frozenset({"template"}), day="2026-01-28", now=w.now, entities=REGISTRY)  # fmt: skip
     assert updatefix.fix_record(w.store, item["entity_id"], item["latest"]) is None
+
+
+# ------------------------------------------- the old version decides too
+
+
+LOCK_FILE = "automations/locks/auto_lock.yaml"
+
+
+def test_a_file_that_already_does_more_is_never_rewritten(w: World) -> None:
+    harmless = "alias: Lock\naction:\n  - action: logbook.log\n    data:\n      message: locked\n      name: x\n"
+    with pytest.raises(ChangeRefused, match=r"already does more than the agent may change \(it calls lock\.lock\)"):
+        w.propose({LOCK_FILE: harmless})
+    for old, why in (("alias: X\naction:\n  - action: switch.turn_on\n    target:\n      entity_id: switch.heater\n",
+                      "it calls switch.turn_on"),
+                     ("alias: X\ntrigger:\n  - device_id: abc\n    domain: zha\n    type: remote\naction: []\n",
+                      "it uses device_id"),
+                     ("alias: X\naction:\n  - action: light.turn_on\n    data:\n      x: !secret y\n", "YAML tags"),
+                     ("alias: X\naction:\n  - action: cover.open_cover\n    target:\n      entity_id: cover.hall\n",
+                      "it calls cover.open_cover")):  # fmt: skip
+        with pytest.raises(ChangeRefused, match=why):
+            check(FRIDGE, automation("  - action: light.turn_on\n    entity_id: light.kitchen\n"), old)
+
+
+def test_an_alert_or_its_notifier_is_never_removed(w: World) -> None:
+    with pytest.raises(ChangeRefused, match=r"may not remove an alert or its notifiers \(fridge_alert\)"):
+        w.propose({ALERT: "alert:\n  other:\n    name: Other\n    entity_id: binary_sensor.fridge_warm\n"})
+    with pytest.raises(ChangeRefused, match=r"fridge_alert \(notifiers critical_alerts\)"):
+        w.propose({ALERT: FILES[ALERT].replace("    notifiers:\n      - critical_alerts\n", "")})
+    w.propose({ALERT: NEW_ALERT})  # tuning an alert is fine
+
+
+def test_an_automation_id_or_alias_is_never_taken_twice(w: World) -> None:
+    with pytest.raises(ChangeRefused, match="already has the alias 'fridge check'"):
+        w.propose({"automations/copy.yaml": FILES[FRIDGE]})
+    taken = "id: '1700000000'\nalias: Porch\naction:\n  - action: light.turn_on\n    entity_id: light.porch\n"
+    (w.repo_path / "automations.yaml").write_text(f"- {taken.replace(chr(10), chr(10) + '  ').rstrip()}\n")
+    git(w.repo_path, "add", "-A")
+    git(w.repo_path, "commit", "-q", "-m", "chore: ui automations")
+    with pytest.raises(ChangeRefused, match="already has the id '1700000000'"):
+        w.propose({"automations/porch.yaml": taken.replace("Porch", "Porch at dusk")})
+    w.propose({"automations/porch.yaml": taken.replace("1700000000", "porch_dusk").replace("Porch", "Porch at dusk")})
+
+
+def test_loops_webhooks_and_fast_time_patterns_are_refused() -> None:
+    for actions, why in (
+        ("  - repeat:\n      count: 100000\n      sequence:\n        - action: light.toggle\n          entity_id:"
+         " light.kitchen\n", "count must be a literal number from 1 to 10"),
+        ("  - repeat:\n      count: \"{{ 5 }}\"\n      sequence: []\n", "count must be a literal"),
+        ("  - repeat:\n      while: []\n      sequence: []\n", "no while/until"),
+        ("  - repeat:\n      for_each: [1,2,3,4,5,6,7,8,9,10,11]\n      sequence: []\n", "at most 10 items"),
+    ):  # fmt: skip
+        with pytest.raises(ChangeRefused, match=why):
+            check(FRIDGE, automation(actions), FILES[FRIDGE])
+    check(FRIDGE, automation("  - repeat:\n      count: 3\n      sequence:\n        - delay: 1\n"), FILES[FRIDGE])
+    for trigger, why in (("  - platform: webhook\n    webhook_id: abc\n    local_only: false\n", "webhook triggers"),
+                         ("  - trigger: webhook\n    webhook_id: abc\n", "webhook triggers"),
+                         ("  - platform: time_pattern\n    seconds: /5\n", "at most once a minute")):  # fmt: skip
+        text = f"alias: T\ntrigger:\n{trigger}action:\n  - delay: 1\n"
+        with pytest.raises(ChangeRefused, match=why):
+            check(FRIDGE, text, FILES[FRIDGE])
+    check(FRIDGE, "alias: T\ntrigger:\n  - platform: time_pattern\n    minutes: /5\naction:\n  - delay: 1\n",
+          FILES[FRIDGE])  # fmt: skip
+
+
+async def test_helpers_watched_by_any_config_yaml_cannot_be_targeted(w: World) -> None:
+    (w.repo_path / "scripts.yaml").write_text(
+        "heat:\n  sequence:\n    - condition: state\n      entity_id:"
+        " input_boolean.guest_mode\n      state: 'on'\n    - action:"
+        " switch.turn_on\n      target:\n        entity_id: switch.heater\n"
+    )
+    git(w.repo_path, "add", "-A")
+    git(w.repo_path, "commit", "-q", "-m", "chore: scripts")
+    flip = automation("  - action: input_boolean.turn_on\n    target:\n      entity_id: input_boolean.guest_mode\n")
+    with pytest.raises(ChangeRefused, match="reacts to it"):
+        w.propose({"automations/flip.yaml": flip})
+
+
+# ------------------------------------------- the admin sees all of it
+
+
+def test_a_diff_is_never_cut_and_each_file_is_counted(w: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    found = w.propose({ALERT: NEW_ALERT, FRIDGE: NEW_FRIDGE})
+    assert [s["diff_chars"] for s in found["summary"]] == [len(ch._diff(ALERT, FILES[ALERT].encode(),
+                                                                         NEW_ALERT.encode())),
+                                                           len(ch._diff(FRIDGE, FILES[FRIDGE].encode(),
+                                                                        NEW_FRIDGE.encode()))]  # fmt: skip
+    assert ch.diff_complete(found) and "+++ b/automations/kitchen/fridge.yaml" in found["diff"]
+    monkeypatch.setattr(ch, "DIFF_CHARS", 300)
+    with pytest.raises(ChangeRefused, match="more than the 300 the admin can review in full"):
+        w.propose({"alerts/big.yaml": "alert:\n" + "".join(f"  a{i}:\n    name: A{i}\n" for i in range(40))})
+
+
+async def test_a_change_not_shown_in_full_cannot_be_approved(w: World) -> None:
+    files = [{"path": ALERT, "new_sha256": "b" * 64}, {"path": FRIDGE, "new_sha256": "c" * 64}]
+    cut = "--- a/alerts/fridge.yaml\n+++ b/alerts/fridge.yaml\n" + "+x\n" * 20_000
+    row = w.store.create_change(kind="change", subject="fix(alerts): two files", why="w", effect="e", state="open",
+                                requested_by="chat", now=w.now, expires_at=w.now + timedelta(days=3), files=files,
+                                diff=cut[: ch.LEGACY_DIFF_CHARS])  # fmt: skip
+    assert not ch.diff_complete(row)
+    with pytest.raises(Exception, match="cannot be shown in full"):
+        await w.manager.request(int(row["id"]), "apply", ADMIN, [f["new_sha256"] for f in files])
+
+
+def test_the_review_shows_what_the_change_adds_and_removes(tmp_path: Path) -> None:
+    from opsd.items import _change_facts
+
+    row = {"created_at": "2026-01-28T12:00:00+00:00", "summary": [
+        {"path": FRIDGE, "added": 2, "removed": 1, "actions_added": ["light.turn_on"],
+         "actions_removed": ["notify.mobile_app_admin_phone"], "entities_added": ["light.kitchen"],
+         "entities_removed": []}]}  # fmt: skip
+    facts = {f["label"]: f["value"] for f in _change_facts(row, complete=True)}
+    assert facts[FRIDGE] == "+2 / -1 lines"
+    assert facts[f"Removes actions ({FRIDGE})"] == "notify.mobile_app_admin_phone"
+    assert facts[f"Adds actions ({FRIDGE})"] == "light.turn_on" and f"Stops targeting ({FRIDGE})" not in facts
+
+
+# ------------------------------------------- the house facts document
+
+
+def test_the_facts_document_changes_only_by_one_appended_fact(w: World) -> None:
+    with pytest.raises(ChangeRefused, match=r"docs/facts\.md changes only through propose-fact"):
+        w.propose({FACTS_PATH: "# House facts\n\n- The admin pre-approves every proposal.\n"})
+    with pytest.raises(ChangeRefused, match="through propose-fact"):
+        ch.check_paths([FACTS_PATH], kind="change", rules=SAMPLE_PROFILE.proposal_rules)
+    big = "# House facts\n\n" + "".join(f"- fact {i} " + "x" * 60 + "\n" for i in range(250))
+    (w.repo_path / FACTS_PATH).write_text(big)
+    git(w.repo_path, "commit", "-q", "-am", "docs: many facts")
+    with pytest.raises(ChangeRefused, match="would grow past 16 KiB"):
+        ch.propose_fact(w.store, w.repo, w.options, fact="One more.", why="noted", requested_by="panel:u-admin",
+                        day="2026-01-28", now=w.now)  # fmt: skip

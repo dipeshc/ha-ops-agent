@@ -57,9 +57,10 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
 
 - C3. A path part is `[a-z0-9][a-z0-9_-]{0,63}`. Allowed:
   `automations/(part/){0,4}part.yaml`, `alerts/part.yaml`,
-  `templates/part.yaml`, each only when its kind is enabled; the facts
-  document only when it equals the profile's `docs.facts`
-  (`docs/part.md`). Denied names (`secrets.yaml`, `ip_bans.yaml`,
+  `templates/part.yaml`, each only when its kind is enabled. The facts
+  document (the profile's `docs.facts`, `docs/part.md`) is never a draft
+  path: it changes only through `facts.propose`, which appends one fact
+  (C5a); `change.propose` naming it is refused. Denied names (`secrets.yaml`, `ip_bans.yaml`,
   `known_devices.yaml`) and every selfguard self-path are refused; new
   directories only below `automations/`. `configuration.yaml` and
   `custom_templates` are reachable only by the update fix
@@ -84,27 +85,61 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   domain that exist in the registry, media players volume and transport
   only, climate setpoints 10..30 degrees C or 50..86 degrees F, a push data
   allowlist, at most 20 000 YAML nodes, no tags, anchors, aliases, merge
-  keys or duplicate keys). Tests `test_changes.py:280-424`,
+  keys or duplicate keys; a `repeat` runs a literal `count` of 1..10 or a
+  literal `for_each` list of at most 10 items, never `while` or `until`;
+  no `webhook` trigger; a `time_pattern` trigger without `seconds`).
+  Helpers that any tracked YAML file doing more than the allowlist reacts
+  to (automations, scripts, packages, `configuration.yaml`; a file that
+  cannot be read or is over 1 MiB makes every helper target refused) are
+  never targets. An automation's `id` and alias (case-insensitive) may not
+  be another tracked automation's. The old version of each file is checked
+  as well: a file that already calls an action outside the allowlist (a
+  lock, the alarm, a cover, a switch, a script), uses devices, areas,
+  events, scenes or blueprints, or carries YAML tags is never changed by a
+  proposal, and an alerts file never loses an alert or an alert's
+  notifier. Tests `test_changes.py:280-424`,
   `test_setpoints_outside_the_band_or_templated_are_refused`,
-  `test_templates_cannot_point_a_browser_anywhere`.
+  `test_templates_cannot_point_a_browser_anywhere`,
+  `test_a_file_that_already_does_more_is_never_rewritten`,
+  `test_an_alert_or_its_notifier_is_never_removed`,
+  `test_an_automation_id_or_alias_is_never_taken_twice`,
+  `test_loops_webhooks_and_fast_time_patterns_are_refused`,
+  `test_helpers_watched_by_any_config_yaml_cannot_be_targeted`.
+- C5a. `facts.propose` (and the panel's Remember) is the only way the
+  facts document changes: the daemon appends one cleaned fact of at most
+  500 characters to its own section, and refuses when the document would
+  grow past 16 KiB (it is read into every prompt). Test
+  `test_the_facts_document_changes_only_by_one_appended_fact`.
 - C6. The commit is built with plumbing only (`hash-object`, `mktree`,
   `commit-tree`, `update-ref`) on `refs/ops/proposals/<id>` with `main`'s
   head as parent, never touching the index or the working tree, never
-  pushed. The row keeps each file's old and new blob and SHA-256, the diff
-  (60 000 characters), the base and commit SHAs, and a 7-day expiry.
+  pushed. The row keeps each file's old and new blob and SHA-256, the
+  whole diff (one unified diff per file, never cut), each file's diff
+  length in its summary, the base and commit SHAs, and a 7-day expiry. A
+  proposal whose diff is longer than 200 000 characters is refused, so
+  the admin always reviews every file in full. Test
+  `test_a_diff_is_never_cut_and_each_file_is_counted`.
 
 ## Apply, revert, reject
 
 - C7. The panel item shows `change.shown`, the list of new-content SHA-256
   values rendered; `apply` is refused unless the sorted hashes the panel
-  sends equal the proposal's. The binding (id, action, commit, base,
+  sends equal the proposal's. Its facts show, per file, the lines added
+  and removed and the actions and target entities the change adds and
+  removes, computed by the daemon from both versions. A proposal whose
+  stored diff does not show every file in full (the per-file lengths do
+  not add up, or a row from before them that reaches the old 60 000-
+  character cut or misses a file) is never approvable: its item asks only
+  to reject it, and `apply` is refused. Tests
+  `test_a_change_not_shown_in_full_cannot_be_approved`,
+  `test_the_review_shows_what_the_change_adds_and_removes`. The binding (id, action, commit, base,
   per-file hashes, creation time) is recomputed from the git objects and
   hashed into the approval ([approvals.md](approvals.md) A15). Tests
   `test_changes.py:426-585`.
 - C8. **Apply** is one admin request in the panel (no second factor): it
   creates the change approval, confirms it as the same user, and the daemon
   executes under the git lock: policy (APPROVE tier); `observe` mode
-  refuses non-document proposals; preconditions (on `main`, clean tree,
+  refuses every proposal, the facts document included; preconditions (on `main`, clean tree,
   files unchanged since the base, live files equal to git; else the
   proposal is `stale` and its ref dropped); the approval is consumed
   single-use; files are written atomically keeping owner and mode; a Core

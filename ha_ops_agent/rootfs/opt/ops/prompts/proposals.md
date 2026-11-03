@@ -33,9 +33,19 @@ The daemon checks the whole file and refuses all other content:
   `push: {interruption-level: ...}` and in-app links
   `{action: URI, title: ..., uri: /path...}`. No images, attachments, URLs,
   other buttons or templates.
-- No helpers that a bigger existing automation reacts to.
-- The agent cannot change a file that already does more (switches, covers,
-  locks, tags).
+- No helpers that existing config doing more than this (switches, covers,
+  locks, scripts) reacts to.
+- A `repeat` runs a literal `count` of at most 10 or a literal `for_each`
+  list of at most 10 items; no `while` or `until` loops. No `webhook`
+  triggers, and `time_pattern` triggers at most once a minute (no
+  `seconds`).
+- An automation's `id` and `alias` must not be used by another automation.
+- The daemon also reads the current file. You cannot change a file that
+  already does more than the list above allows (for example a lock,
+  switch or cover action, devices or areas, or tags). You cannot remove an
+  alert or an alert's notifier.
+- The admin sees the whole diff of every file. A proposal whose diff is too
+  long to show in full is refused: propose smaller changes.
 
 Only the admin can apply a change. The admin reviews the diff on the
 proposal's item in Needs you on Home and approves or rejects it. After the approval the daemon checks the

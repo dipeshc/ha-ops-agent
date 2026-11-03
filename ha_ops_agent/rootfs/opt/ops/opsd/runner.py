@@ -255,11 +255,13 @@ def _proposals(prompts_dir: Path, rules: ProposalRules) -> str:
     """The "Proposing config changes" section (chat and investigate `<<PROPOSALS>>`): the house's paths, or off."""
     if not rules.on:
         return (prompts_dir / "proposals-off.md").read_text().rstrip()
-    paths = [f"`{rules.facts}`"] if rules.facts else []
-    paths += [f"`{GLOBS[k]}`" for k in GLOBS if k in rules.kinds]
-    fact = "For one plain house fact, use `opsctl propose-fact --text '...' --why\n'...'`.\n\n" if rules.facts else ""
+    paths = [f"`{GLOBS[k]}`" for k in GLOBS if k in rules.kinds]
+    fact = (f"For one plain house fact, use `opsctl propose-fact --text '...' --why\n'...'`. It is the only way to"
+            f" change `{rules.facts}`: one fact appended at a time.\n\n") if rules.facts else ""  # fmt: skip
     text = (prompts_dir / "proposals.md").read_text().rstrip()
-    return text.replace("<<PROPOSAL_PATHS>>", _words(paths)).replace("<<FACT_LINE>>\n", fact)
+    return text.replace("<<PROPOSAL_PATHS>>", _words(paths) if paths else "no config file").replace(
+        "<<FACT_LINE>>\n", fact
+    )
 
 
 def _fragile(house: HouseProfile) -> str:

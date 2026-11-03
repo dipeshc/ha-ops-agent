@@ -23,9 +23,14 @@ reloads by path (automations and templates; alerts take effect at the next
 restart, which the agent never does); and only then commits exactly those
 paths on `main` and pushes fast-forward. A failed check, reload or commit
 restores the previous contents exactly (and reloads again); a reload that
-fails twice is escalated. HA config paths need `mode: act`; the facts
-document may be applied in observe mode (still the admin's approval). A revert is the
-same pipeline writing the contents the change replaced.
+fails twice is escalated. Every change needs `mode: act`, the house facts
+document included. A revert is the same pipeline writing the contents the
+change replaced.
+
+The house facts document changes only through `facts.propose` (one fact
+appended); `change.propose` never names it. The admin reviews every file's
+whole diff: a proposal whose diff is longer than `DIFF_CHARS` is refused,
+never cut.
 """
 
 import asyncio
@@ -75,7 +80,12 @@ MAX_PER_DAY = 5
 MAX_OPEN = 5
 MAX_REFUSALS_PER_DAY = 20
 PROPOSAL_TTL = timedelta(days=7)
-DIFF_CHARS = 60_000
+# The whole diff the admin reviews, every file in full; a longer proposal is refused, never cut.
+DIFF_CHARS = 200_000
+# Before this release the stored diff was cut at this length: such a row is never approvable.
+LEGACY_DIFF_CHARS = 60_000
+# The house facts document stays small: it is read into every prompt.
+FACTS_DOC_BYTES = 16 * 1024
 WHY_CHARS = 600
 EFFECT_CHARS = 300
 FACT_CHARS = 500
@@ -182,6 +192,18 @@ def check_content(path: str, old: bytes | None, new: bytes, *, notify_service: s
         return summary | {"rules": [f"{r.key} while {r.verifier} {r.params}" for r in rules]}
     if not path.endswith(".yaml"):
         return summary
+    if old_text:
+        # The old version decides too: a file that already does more than a proposal may is never rewritten
+        # (into something that no longer does it), and an alert is never dropped or silenced.
+        reason = configcheck.does_more(old_text, admin_notify=notify_service)
+        if reason is not None:
+            raise ChangeRefused(f"{path} already does more than the agent may change ({reason}); only the admin"
+                                " can edit it")  # fmt: skip
+        lost = configcheck.alerts_removed(old_text, text) if path.startswith("alerts/") else []
+        if lost:
+            raise ChangeRefused(
+                f"{path}: a proposal may not remove an alert or its notifiers ({', '.join(lost)[:200]})"
+            )
     try:
         configcheck.check_file(path, text, entities=entities, admin_notify=notify_service, guarded=guarded)
     except configcheck.ConfigRefused as err:
@@ -388,6 +410,8 @@ def check_paths(paths: list[str], *, kind: str, rules: ProposalRules, fix: bool 
     if kind == "facts" and ((rules.facts and paths == [rules.facts]) or (suppress and paths == [SUPPRESS_PATH])):
         # Documentation the daemon writes itself (house facts, known false positives).
         return
+    if rules.facts and rules.facts in paths:
+        raise ChangeRefused(f"{rules.facts} changes only through propose-fact (one fact at a time)")
     if len(paths) > MAX_FILES:
         raise ChangeRefused(f"at most {MAX_FILES} files per proposal")
     for path in paths:
@@ -444,27 +468,34 @@ def build_proposal(store: Store, repo: Repo, options: Options, *, kind: str, fil
         diffs: list[str] = []
         summary: list[dict[str, Any]] = []
         guarded = watched_helpers(repo, head, options.notify_service)
+        names = automation_names(repo, head, skip={f.path for f in files})
         for change in files:
             entry = repo.entry(head, change.path)
             old = repo.file_at(head, change.path) if entry is not None else None
             if old == change.new:
                 raise ChangeRefused(f"{change.path} is unchanged")
-            summary.append(check_content(change.path, old, change.new, notify_service=options.notify_service,
-                                         entities=entities, guarded=guarded,
-                                         fix_domains=fix_domains))  # fmt: skip
+            found_summary = check_content(change.path, old, change.new, notify_service=options.notify_service,
+                                          entities=entities, guarded=guarded, fix_domains=fix_domains)  # fmt: skip
+            if change.path.startswith("automations/"):
+                names = _unique_names(change.path, change.new, names)
             parts = change.path.split("/")
             blob = repo.hash_blob(change.new)
             tree = repo.tree_with(tree, parts, blob, new_dirs=parts[0] == CREATABLE_ROOT)
             rows.append({"path": change.path, "old_blob": entry[2] if entry else None, "new_blob": blob,
                          "old_sha256": _sha(old), "new_sha256": _sha(change.new)})  # fmt: skip
             diffs.append(_diff(change.path, old, change.new))
+            summary.append(found_summary | {"diff_chars": len(diffs[-1])})
         commit = repo.commit_tree(tree, head, subject)
     except GitError as err:
         raise ChangeRefused(f"git: {clean_text(str(err), 200)}") from err
+    diff = "".join(diffs)
+    if len(diff) > DIFF_CHARS:
+        raise ChangeRefused(f"the diff is {len(diff)} characters, more than the {DIFF_CHARS} the admin can review in"
+                            " full: propose smaller changes, one file at a time")  # fmt: skip
     row = store.create_change(
         kind=kind, subject=subject, why=clean_text(why, WHY_CHARS), effect=clean_text(effect, EFFECT_CHARS),
         state="open", requested_by=requested_by, now=now, expires_at=now + PROPOSAL_TTL, files=rows,
-        diff="".join(diffs)[:DIFF_CHARS], base_sha=head, commit_sha=commit, thread_id=thread_id, run_id=run_id,
+        diff=diff, base_sha=head, commit_sha=commit, thread_id=thread_id, run_id=run_id,
         fact_id=fact_id, summary=summary,
     )  # fmt: skip
     ref = f"{REF_PREFIX}{row['id']}"
@@ -486,20 +517,74 @@ def build_proposal(store: Store, repo: Repo, options: Options, *, kind: str, fil
     return found
 
 
+# A tracked YAML file larger than this is not read for helper watchers: helper targets are then refused.
+WATCHED_MAX_BYTES = 1024 * 1024
+# Never read for helper watchers (secrets, and files Home Assistant writes itself).
+_UNWATCHED = frozenset({"secrets.yaml", "ip_bans.yaml", "known_devices.yaml"})
+
+
+def _tracked_yaml(repo: Repo, head: str, under: str | None = None) -> list[str]:
+    raw = repo.raw("ls-tree", "-r", "-z", "--name-only", head, *(("--", under) if under else ()))
+    names = (n.decode(errors="replace") for n in raw.split(b"\0") if n)
+    return [n for n in names if n.endswith((".yaml", ".yml")) and n.rsplit("/", 1)[-1].lower() not in _UNWATCHED]
+
+
 def watched_helpers(repo: Repo, head: str, admin_notify: str) -> frozenset[str] | None:
-    """Helpers that existing automations doing more than the allowlist react to (None: not all readable)."""
-    names = [n.decode(errors="replace") for n in repo.raw("ls-tree", "-r", "-z", "--name-only", head, "--",
-                                                          "automations").split(b"\0") if n]  # fmt: skip
+    """Helpers that existing config doing more than the allowlist reacts to (None: not all readable).
+
+    Every tracked YAML file counts (automations, scripts, packages, `configuration.yaml`, ...), not only the
+    automations directory.
+    """
     texts: list[str | None] = []
-    for name in names:
-        if not name.endswith(".yaml"):
-            continue
+    for name in _tracked_yaml(repo, head):
         try:
             data = repo.file_at(head, name)
         except GitError:
             return None
+        if data is not None and len(data) > WATCHED_MAX_BYTES:
+            return None
         texts.append(data.decode("utf-8", errors="replace") if data is not None else None)
     return configcheck.guarded_helpers(texts, admin_notify=admin_notify)
+
+
+def automation_names(repo: Repo, head: str, *, skip: set[str]) -> tuple[set[str], set[str]]:
+    """The automation `id`s and aliases (case-folded) in the tracked automation files other than `skip`."""
+    ids: set[str] = set()
+    aliases: set[str] = set()
+    names = _tracked_yaml(repo, head, "automations") + [n for n in ("automations.yaml",) if n not in skip]
+    for name in names:
+        if name in skip:
+            continue
+        try:
+            data = repo.file_at(head, name)
+        except GitError:
+            continue
+        found_ids, found_aliases = configcheck.automation_names(data.decode("utf-8", errors="replace") if data
+                                                                else None)  # fmt: skip
+        ids |= found_ids
+        aliases |= found_aliases
+    return ids, aliases
+
+
+def _unique_names(path: str, new: bytes, taken: tuple[set[str], set[str]]) -> tuple[set[str], set[str]]:
+    """Refuse an automation whose `id` or alias another automation already has; the names now taken."""
+    ids, aliases = configcheck.automation_names(new.decode("utf-8", errors="replace"))
+    if ids & taken[0]:
+        raise ChangeRefused(f"{path}: another automation already has the id {sorted(ids & taken[0])[0]!r}")
+    if aliases & taken[1]:
+        raise ChangeRefused(f"{path}: another automation already has the alias {sorted(aliases & taken[1])[0]!r}")
+    return taken[0] | ids, taken[1] | aliases
+
+
+def diff_complete(row: Mapping[str, Any]) -> bool:
+    """Whether the stored diff shows every file of the proposal in full (else it is never approvable)."""
+    diff = str(row.get("diff") or "")
+    summary = [s for s in row.get("summary") or [] if isinstance(s, dict)]
+    paths = [str(f.get("path")) for f in row.get("files") or [] if isinstance(f, dict)]
+    if summary and all(isinstance(s.get("diff_chars"), int) for s in summary):
+        return sum(int(s["diff_chars"]) for s in summary) == len(diff) and len(summary) == len(paths)
+    # A row from before the per-file count: complete only if shorter than the old cut and every file is in it.
+    return len(diff) < LEGACY_DIFF_CHARS and all(f"+++ b/{path}" in diff for path in paths)
 
 
 def record_refusal(store: Store, *, kind: str, subject: str, why: str, reason: str, requested_by: str, day: str,
@@ -671,6 +756,9 @@ def propose_fact(store: Store, repo: Repo, options: Options, *, fact: str, why: 
     except GitError as err:
         raise ChangeRefused(f"git: {clean_text(str(err), 200)}") from err
     document = with_fact(current.decode("utf-8", errors="replace"), clean_fact(fact), day)
+    if len(document.encode()) > FACTS_DOC_BYTES:
+        raise ChangeRefused(f"{path} would grow past {FACTS_DOC_BYTES // 1024} KiB (it is read into every prompt);"
+                            " the admin trims it first")  # fmt: skip
     subject = "docs(facts): add a fact noted through the ops agent"
     return build_proposal(store, repo, options, kind="facts", files=[FileChange(path, document.encode())],
                           subject=subject, why=why, effect="Documentation only: no Home Assistant behaviour changes.",
@@ -744,8 +832,10 @@ class ChangeManager:
             raise ApprovalError(f"this proposal cannot be {'applied' if action == 'apply' else 'reverted'} now")
         if sorted(shown or []) != sorted(str(f["new_sha256"]) for f in row["files"]):
             raise ApprovalError("review the current diff first (the panel did not show this version)")
-        if not self.options.acting and not all(is_doc(f["path"]) for f in row["files"]):
-            raise ApprovalError("observe mode: Home Assistant config changes apply only in agent.mode: act")
+        if action == "apply" and not diff_complete(row):
+            raise ApprovalError("the diff cannot be shown in full, so it cannot be approved: reject it")
+        if not self.options.acting:
+            raise ApprovalError("observe mode: changes apply only in agent.mode: act")
         found = await asyncio.to_thread(binding, self.repo, row, action)
         if found is None:
             raise ApprovalError("the proposal no longer matches git; it cannot be approved")
@@ -908,8 +998,8 @@ class ChangeManager:
             raise ChangeRefused(f"proposal #{change_id} is not {expect}")
         paths = [str(f["path"]) for f in row["files"]]
         doc_only = all(is_doc(p) for p in paths)
-        if not self.options.acting and not doc_only:
-            raise ChangeRefused("observe mode: Home Assistant config changes apply only in agent.mode: act")
+        if not self.options.acting:
+            raise ChangeRefused("observe mode: changes apply only in agent.mode: act")
         self._authorize(action, change_id, doc_only=doc_only)
 
         async def consume() -> bool:

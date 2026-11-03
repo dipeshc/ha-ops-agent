@@ -56,6 +56,7 @@ from typing import Any
 from opsd import dashboards
 from opsd import maintenance as maint
 from opsd.approvals import LIVE, approvable, dashboard_subject, is_change, is_dashboard
+from opsd.changes import diff_complete
 from opsd.channels import BudgetClass, Message
 from opsd.conversation import clean_text
 from opsd.live import Hub
@@ -159,6 +160,29 @@ def _dict(value: Any) -> dict[str, Any]:
 
 def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+_CHANGE_FACTS = (("actions_added", "Adds actions"), ("actions_removed", "Removes actions"),
+                 ("entities_added", "Starts targeting"), ("entities_removed", "Stops targeting"))  # fmt: skip
+
+
+def _change_facts(row: Mapping[str, Any], complete: bool) -> list[dict[str, Any]]:
+    """The daemon's summary of a proposal: per file, the lines and the actions and targets it adds or removes."""
+    found: list[dict[str, Any]] = []
+    at = str(row.get("created_at") or "") or None
+    for entry in row.get("summary") or []:
+        if not isinstance(entry, dict):
+            continue
+        path = clean_text(str(entry.get("path") or ""), 120)
+        lines = f"+{int(entry.get('added') or 0)} / -{int(entry.get('removed') or 0)} lines"
+        found.append({"label": path or "File", "value": lines, "at": at})
+        for key, label in _CHANGE_FACTS:
+            names = [clean_text(str(n), 80) for n in _list(entry.get(key))]
+            if names:
+                found.append({"label": f"{label} ({path})", "value": ", ".join(names)[:600], "at": at})
+    if not complete:
+        found.append({"label": "Diff", "value": "not shown in full: this change cannot be approved", "at": at})
+    return found
 
 
 def act(action_id: str, label: str, style: str | None = None) -> dict[str, Any]:
@@ -632,6 +656,9 @@ class Composer:
                     source={"change": cid})  # fmt: skip
         spec.change = {"diff": str(row.get("diff") or ""), "files": [str(f.get("path")) for f in files],
                        "shown": [str(f.get("new_sha256")) for f in files]}  # fmt: skip
+        complete = diff_complete(row)
+        # What the change does, computed by the daemon from both versions of each file (never the proposer's).
+        spec.facts = _change_facts(row, complete)
         why = clean_text(str(row.get("why") or ""), 300)
         effect = clean_text(str(row.get("effect") or ""), 200)
         detail = clean_text(str(row.get("detail") or ""), 200)
@@ -648,6 +675,14 @@ class Composer:
                 if approval is not None and approval["state"] == "approved":
                     spec.state, spec.gist = "running", "approved; applying"
                     spec.actor, spec.event = "you", "Approved by you"
+                    return spec
+                if not complete:
+                    # Never approvable: the admin could not see all of it.
+                    spec.gist = "the diff cannot be shown in full; reject it"
+                    spec.need = need("ack", f"Change #{cid} to {paths} cannot be shown in full, so it cannot be "
+                                     "applied. Reject it; the agent can propose it again in smaller parts.",
+                                     act("reject", "Reject"))  # fmt: skip
+                    spec.since = str(row["created_at"])
                     return spec
                 text = (f"Change #{cid} to {paths}. Apply it and the daemon checks the config, reloads, commits "
                         "and pushes, and undoes it if anything fails.")  # fmt: skip

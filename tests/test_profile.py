@@ -359,8 +359,9 @@ def test_proposal_rules_never_reach_the_agent_or_config() -> None:
     profile = parse_text("git:\n  enabled: true\n  author_name: a\n  author_email: a@b.cd\ndocs:\n"
                          "  facts: docs/facts.md\n")  # fmt: skip
     rules = profile.proposal_rules
-    assert allowed_path("docs/facts.md", rules) and allowed_path("alerts/x.yaml", rules)
+    assert allowed_path("alerts/x.yaml", rules) and rules.facts == "docs/facts.md"
     for path in (
+        "docs/facts.md",  # through propose-fact only, never a draft
         "ops/profile.yaml",
         "configuration.yaml",
         "RUNBOOK.md",

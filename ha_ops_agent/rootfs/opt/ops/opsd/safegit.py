@@ -201,6 +201,13 @@ def _run(repo: Path, *args: str, data: bytes | None = None, timeout: float = 60)
     return done.stdout
 
 
+def _trusts_filemode(repo: Path) -> bool:
+    """Whether git compares the executable bit here (`core.fileMode`, true unless the repository says false)."""
+    done = subprocess.run(git_argv(repo, "config", "--type=bool", "--get", "core.filemode"), capture_output=True,
+                          timeout=30, env=git_env(), check=False)  # fmt: skip
+    return done.stdout.strip() != b"false"
+
+
 def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
     """`git status --porcelain=v1`-style lines (`XY path`), computed without running any filter.
 
@@ -230,6 +237,7 @@ def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
             staged[path] = "A"
     regular: list[str] = []
     worktree: dict[str, str] = {}
+    filemode = _trusts_filemode(repo)
     for path, (mode, sha) in index.items():
         if mode == "160000":
             continue
@@ -247,7 +255,7 @@ def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
             if mode != "120000" or found != sha:
                 worktree[path] = "M"
         elif stat.S_ISREG(info.st_mode) and mode in ("100644", "100755") and "\n" not in path:
-            if (mode == "100755") != bool(info.st_mode & 0o111):
+            if filemode and (mode == "100755") != bool(info.st_mode & 0o111):
                 worktree[path] = "M"  # the executable bit alone changed
             else:
                 regular.append(path)

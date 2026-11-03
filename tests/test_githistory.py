@@ -443,3 +443,12 @@ def test_status_lines_report_an_executable_bit_change(tmp_path: Path) -> None:
     ha, _ = _hostile(tmp_path)
     (ha / "automations" / "a.yaml").chmod(0o755)
     assert status_lines(ha) == [" M automations/a.yaml"]
+
+
+def test_status_lines_ignore_the_executable_bit_when_git_does(tmp_path: Path) -> None:
+    from opsd.safegit import status_lines
+
+    ha, _ = _hostile(tmp_path)
+    git(ha, "config", "core.fileMode", "false")
+    (ha / "automations" / "a.yaml").chmod(0o755)
+    assert status_lines(ha) == []

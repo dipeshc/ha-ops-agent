@@ -69,7 +69,8 @@ Config proposals:
   work-tree diff): an applied change is committed from the exact approved
   contents (`hash-object --stdin --no-filters`, `mktree`, `commit-tree`,
   `update-ref`, then `read-tree`), never read back from the work tree, and
-  changed files (content or the executable bit) are found by hashing them
+  changed files (content, or the executable bit unless `core.fileMode` is
+  false) are found by hashing them
   without filters. `opsctl git-diff REV` now compares REV with the index.
   Fetch and push use `remote.origin.url`, which must be a GitHub SSH URL
   (`git@github.com:<owner>/<repo>`).

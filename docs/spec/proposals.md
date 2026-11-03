@@ -54,7 +54,7 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   <old>`, and `read-tree` brings the index level. Dirty paths come from
   `diff-index --cached`, `ls-files --stage` with each work-tree file hashed
   by `hash-object --no-filters` and its executable bit compared with the
-  index mode, and `ls-files --others` (`safegit.status_lines`). Fetch and push name the remote by URL, never `origin`: the
+  index mode (unless `core.fileMode` is false, as git does), and `ls-files --others` (`safegit.status_lines`). Fetch and push name the remote by URL, never `origin`: the
   `remote.origin.url` of the repository, refused unless it is a GitHub SSH
   URL (`git@github.com:<owner>/<repo>` or `ssh://git@github.com/...`). SSH
   uses the deploy key, the shipped `known_hosts` and

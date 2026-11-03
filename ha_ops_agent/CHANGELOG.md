@@ -1,5 +1,110 @@
 # Changelog
 
+## 0.19.1
+
+Hardening and fixes. No store change; upgrading from 0.19.0 needs nothing.
+
+Health check and pushes:
+
+- Each piece of access hardware that goes down (a lock, an alarm panel, a
+  cover that is not positively a blind or the like, anything named like a
+  door, gate or lock) is its own critical item, `access:<entity_id>`,
+  instead of part of its integration's `entities:<platform>` item. Only
+  your accept in the panel silences it, until it recovers; the agent can
+  snooze it for 3 days at most and never accept it, and the first run never
+  accepts one that is down. After the upgrade, access hardware that is down
+  now is reported once even if an earlier accept covered its integration.
+- The Assist exposure check uses the same rule: door-class and
+  unclassified covers and access-named switches and buttons exposed to
+  Assist are reported too.
+- An item the agent snoozed or accepted in its triage run, or that you
+  acked in the panel, no longer stays in Needs you: it shows as resolved
+  with who acked it, until when and why. Its critical push still goes out.
+- `sensor.ops_agent` carries daemon-written attributes only; the triage
+  and update-night summaries stay in the panel.
+- A push from the agent's own run links to the chat but has no Reply
+  button.
+- The push relay caches only the verified admin's registration, never
+  another device with the same name.
+- Account utilisation is read as a percent, as the provider reports it:
+  1 % is no longer taken for the whole window, so the agent no longer
+  yields or stops runs for a week after a small reading.
+
+The panel:
+
+- The admin is re-confirmed every 4 minutes and the panel accepts the
+  admin only within 5 minutes of the last confirmation (it was daily).
+
+Config proposals:
+
+- The current file is checked as well as the new one: a file that already
+  calls an action outside the allowlist (a lock, the alarm, a cover, a
+  switch), uses devices or areas, or carries YAML tags is never changed by
+  a proposal, and an alerts file never loses an alert or an alert's
+  notifier.
+- An automation's id and alias may not repeat another automation's;
+  `repeat` runs at most 10 times (a literal count or list, no
+  `while`/`until`); webhook triggers and sub-minute time patterns are
+  refused; helper targets are checked against every tracked YAML file.
+- You review every file's whole diff: a proposal too long to show in full
+  is refused instead of cut, and the item lists the actions and targets
+  each file adds and removes. A stored proposal whose diff is not complete
+  can only be rejected.
+- The house facts document changes only through propose-fact (one fact
+  appended), is capped at 16 KiB, and no proposal applies in observe mode,
+  documents included.
+- Git runs with signing, credential helpers, askpass and every repository
+  filter, diff and merge driver neutralised, over SSH only, and refuses to
+  run when the repository config sets includes, URL rewrites, a proxy
+  command or another work tree. Fetch and push use `remote.origin.url`,
+  which must be a GitHub SSH URL (`git@github.com:<owner>/<repo>`).
+
+Updates and approvals:
+
+- An add-on installs only while the Supervisor still offers the planned
+  version, checked at the pre-check and again right before the call;
+  otherwise the job is skipped and nothing is called.
+- An update approval is used only while unexpired and bound to its plan,
+  for the same entity, versions, kind, title, slug and HACS repository.
+- A Supervisor-managed update entity is never installed through
+  `update.install`.
+- An update's config fix passes the proposal call allowlist (no templated
+  action, service, entity id or target), a template macro changes only
+  when no YAML picks an action or target with a template, and a Core
+  update that may need a config change is reviewed in a run of its own
+  over Home Assistant's notes only.
+- With `updates.review: false`, `updates.hold_if_unreviewed` (default on)
+  now holds AUTO candidates that have no earlier assessment, as the option
+  describes. Set it off to install them unreviewed.
+
+The AI run and the add-on:
+
+- The AI's copy of the configuration is redacted with git on as well.
+  Tracked files that are not UTF-8 or over 256 KiB are left out of it.
+- `opsctl logs host --identifier` refuses dot segments and encodes the
+  identifier.
+- The guard hook gets 60 seconds instead of 10, and the AI account's
+  directory is recreated at every start.
+- A weekly CI job fails when a package from the base image is out of date.
+
+For house overlays (`opsd.house`):
+
+- Unchanged: `opsd.reload.reload_domain`, `Store.bump`, `unbump`, `count`,
+  `audit_begin`, `audit_finish`, `changes`, `ActivityLog.record`,
+  `opsd.changes.build_proposal`, `_day`, `_repo` (signatures).
+  `build_proposal` refuses more content as above, and refuses the house
+  facts document unless `kind="facts"`.
+- `opsd.notify.extract_registration(entries, service, user_id,
+  device_id=None)` and `Notifier.cache_registration(path, user_id,
+  device_id=None)` take the admin's ids.
+- `EffectSink.send_message(message, *, reply=True)`.
+- `opsd.health.derive_assist_exposure(exposure, states, registry=())`.
+- `opsd.changepaths.allowed_path` no longer accepts the house facts path.
+- `opsd.configcheck.check_configuration_edit` takes optional `entities`
+  and `admin_notify`.
+- Git calls can raise `opsd.safegit.UnsafeRepoConfigError` (a
+  `subprocess.SubprocessError`; `Repo` turns it into `GitError`).
+
 ## 0.19.0
 
 Storage consolidation and items written at the source. Nothing you see

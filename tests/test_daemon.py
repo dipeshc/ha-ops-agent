@@ -791,8 +791,27 @@ async def test_refresh_admin_requires_an_active_admin(h: Harness, monkeypatch: p
     d.inbound.verified_at -= daemon_mod.ADMIN_VERIFIED_TTL_S + 1
     assert d.admin_user() is None
     assert await d.refresh_admin() == identity and d.admin_user() == "u1"
+    # A re-check that is not answered keeps the last confirmed admin, without renewing it, for up to 15 minutes.
+    confirmed = d.inbound.verified_at
+    failing = {"on": True}
+
+    async def flaky(msg_type: str, **fields: Any) -> Any:
+        if failing["on"] and msg_type == "config/auth/list":
+            raise RuntimeError("websocket closed")
+        return await ws(msg_type, **fields)
+
+    monkeypatch.setattr(h.fake, "ws", flaky)
+    assert await d.refresh_admin() == identity and d.inbound.verified_at == confirmed
+    d.inbound.verified_at = confirmed - (daemon_mod.ADMIN_VERIFIED_TTL_S + 60)
+    assert d.admin_user() == "u1"  # within the grace while the re-check is failing
+    d.inbound.verified_at = confirmed - (daemon_mod.ADMIN_VERIFIED_GRACE_S + 1)
+    assert d.admin_user() is None
+    failing["on"] = False
+    assert await d.refresh_admin() == identity and d.admin_user() == "u1"
+    # Only a confirmed non-admin clears it.
     users[0]["group_ids"] = ["system-users"]
     assert await d.refresh_admin() is None and d.inbound.admin is None and d.admin_user() is None
+    assert 30 <= daemon_mod.ADMIN_RETRY_S <= 60
     assert daemon_mod.ADMIN_REFRESH_KNOWN_S < daemon_mod.ADMIN_VERIFIED_TTL_S
 
 

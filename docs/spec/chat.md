@@ -91,9 +91,10 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   to the configured notify service, confirmed active, not system-generated
   and a `system-admin`; otherwise every event is refused and the runtime
   problem `notify.not_admin` fails the agent closed. The identity is
-  re-confirmed every 4 minutes once known (every 10 until known); the
-  panel accepts it only within 5 minutes of the last confirmation
-  ([panel.md](panel.md) N2). Tests `test_inbound.py:121-148`.
+  re-confirmed every 4 minutes once known (every 10 until known, every 45
+  seconds while a re-check is not answered, which keeps the last confirmed
+  identity); the panel accepts it only within 5 minutes of the last
+  confirmation, 15 while re-checks fail ([panel.md](panel.md) N2). Tests `test_inbound.py:121-148`.
 - T13. An action is accepted only when: the admin is known; the event's
   `context.user_id` equals the admin id (constant time); `data.action`
   matches `OPS_(REPLY|SNOOZE|DONE)_[0-9a-f]{32}`; any source-device fields

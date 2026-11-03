@@ -23,7 +23,11 @@ Tests: `tests/test_panel.py`, `tests/test_panel_shell.py`,
   configured push device, as Home Assistant confirmed it within the last 5
   minutes (re-resolved every 4 minutes once known, every 10 until known; a
   demoted or deactivated admin loses the panel within minutes, and a
-  confirmation older than 5 minutes counts as unknown). Unknown
+  confirmation older than 5 minutes counts as unknown). A re-check that is
+  not answered (Core restarting, the websocket down) keeps the last
+  confirmed admin without renewing it, is retried every 45 seconds and is
+  logged; meanwhile the last confirmation counts for up to 15 minutes. Only
+  an answer that the user is no longer an active admin clears it. Unknown
   admin, empty or different header: 403 `admin_only`. Home Assistant's
   `panel_admin: true` limits the sidebar entry to administrators; the daemon
   narrows that to the one user. Other administrators are refused. Tests

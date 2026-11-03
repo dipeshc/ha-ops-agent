@@ -37,6 +37,9 @@ The panel:
 
 - The admin is re-confirmed every 4 minutes and the panel accepts the
   admin only within 5 minutes of the last confirmation (it was daily).
+  While Home Assistant does not answer the re-check, the last confirmed
+  admin is kept for up to 15 minutes and the check is retried every 45
+  seconds; only an answer that the user is no longer an admin clears it.
 
 Config proposals:
 

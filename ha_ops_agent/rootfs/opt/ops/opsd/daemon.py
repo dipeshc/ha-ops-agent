@@ -137,6 +137,10 @@ OVERDUE_GRACE = timedelta(hours=2)
 # The panel trusts the admin id only this long after Home Assistant last confirmed it (an active, non-system
 # `system-admin`), so a demoted or deactivated admin loses the panel within minutes; the refresh runs sooner.
 ADMIN_VERIFIED_TTL_S = 300
+# While the re-check fails (Core restarting, the websocket down), the last confirmed admin is kept this long
+# since its confirmation, and the check is retried every ADMIN_RETRY_S. Only a confirmed non-admin clears it.
+ADMIN_VERIFIED_GRACE_S = 900
+ADMIN_RETRY_S = 45
 ADMIN_REFRESH_KNOWN_S = 240
 ADMIN_REFRESH_UNKNOWN_S = 600
 
@@ -317,6 +321,7 @@ class Daemon:
             },
         )
         self.inbound = InboundGate(store=self.store, queue=self.queue)
+        self._admin_check_failing = False
         self.assistant: Assistant | None = None
         self.control = AiControl(self.store)
         self.runner = AgentRunner(
@@ -1740,8 +1745,11 @@ class Daemon:
                 else:
                     self.options.runtime.clear(NOTIFY_NOT_ADMIN)
         except (OSError, ValueError, RuntimeError) as err:
-            _LOGGER.warning("admin identity unavailable; inbound events refused", extra={"error": str(err)[:200]})
-            identity = None
+            # Not an answer: keep the last confirmed admin (without renewing its confirmation) and retry soon.
+            self._admin_check_failing = True
+            _LOGGER.warning("admin identity re-check failed; retrying", extra={"error": str(err)[:200]})
+            return self.inbound.admin
+        self._admin_check_failing = False
         if identity is None and self.inbound.admin is None:
             _LOGGER.warning("no admin identity for the notify device; inbound events refused")
         elif identity is not None and identity != self.inbound.admin:
@@ -1753,11 +1761,21 @@ class Daemon:
         return identity
 
     def admin_user(self) -> str | None:
-        """The admin's user id for the panel, only while Home Assistant confirmed it in the last 5 minutes."""
+        """The admin's user id for the panel, only while Home Assistant confirmed it in the last 5 minutes.
+
+        While the re-check is failing (not answered, as opposed to answered "not an admin") the last
+        confirmation counts for up to 15 minutes, so a Core restart does not lock the admin out.
+        """
         admin, verified = self.inbound.admin, self.inbound.verified_at
-        if admin is None or verified is None or monotonic() - verified > ADMIN_VERIFIED_TTL_S:
+        if admin is None or verified is None:
             return None
-        return admin.user_id
+        age = monotonic() - verified
+        if age <= ADMIN_VERIFIED_TTL_S:
+            return admin.user_id
+        if self._admin_check_failing and age <= ADMIN_VERIFIED_GRACE_S:
+            _LOGGER.warning("admin re-check failing; using the last confirmation", extra={"age_s": int(age)})
+            return admin.user_id
+        return None
 
     async def panel_ai(self, on: bool, admin_user: str) -> None:
         """Resume or stop AI from the panel (already checked to be the admin)."""
@@ -1776,9 +1794,14 @@ class Daemon:
             try:
                 identity = await self.refresh_admin()
             except Exception:
+                # Keep the last confirmed admin (never renewed) and retry soon, as for a failed re-check.
                 _LOGGER.exception("admin identity refresh crashed")
-                identity = None
-            await asyncio.sleep(ADMIN_REFRESH_KNOWN_S if identity is not None else ADMIN_REFRESH_UNKNOWN_S)
+                self._admin_check_failing = True
+                identity = self.inbound.admin
+            if self._admin_check_failing:
+                await asyncio.sleep(ADMIN_RETRY_S)
+            else:
+                await asyncio.sleep(ADMIN_REFRESH_KNOWN_S if identity is not None else ADMIN_REFRESH_UNKNOWN_S)
 
     async def _ws_connect(self) -> HAWebSocket:
         ws = HAWebSocket(CORE_WS_URL, self.client.token)

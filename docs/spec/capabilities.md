@@ -167,8 +167,10 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
     18 monthly releases before it, and files unused for 30 days or beyond
     800, are pruned.
   - **Local read.** Top-level regular files of
-    `custom_components/<domain>/`, read as root, never through a symbolic
-    link, at most 40 and 256 KiB each, UTF-8 only; subdirectories,
+    `custom_components/<domain>/`, read as root through one descriptor of
+    the directory reached with `O_DIRECTORY | O_NOFOLLOW` at each level
+    from the config directory (a link for `custom_components` or the
+    domain is refused), never through a symbolic link, at most 40 and 256 KiB each, UTF-8 only; subdirectories,
     `.pyc`, hidden and backup files are listed as not compared.
   - **`--fork`.** Also the fork's origin (the newest Core tag among the
     installed one and the `.0` releases of the last 18 months whose files

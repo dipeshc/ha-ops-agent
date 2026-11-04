@@ -295,17 +295,28 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   job consumed the approval and it still binds; it snapshots the files
   the proposal replaces (bytes, mode and owner, root-only under
   `/data/fork-rebase/<id>/old/`), then writes the approved bytes (each
-  checked against its recorded SHA-256) to a temporary file in the same
-  directory, fsyncs it, keeps the old file's mode and owner and renames it
-  over the old one; a link or non-regular file is never written through.
+  checked against its recorded SHA-256). Every read and write of the
+  fork goes through one descriptor of `custom_components/<domain>`,
+  reached from the config directory by opening `custom_components` and
+  then `<domain>`, each with `O_DIRECTORY | O_NOFOLLOW`: a link at either
+  level is refused, and a directory swapped for a link after it was
+  opened does not redirect anything (the writes land in the directory
+  that was opened). Inside it, each target must be a regular file
+  (`stat` without following links); the bytes go to a new temporary file
+  with a random name (`.ops-<16 hex>.tmp`, `O_CREAT | O_EXCL | O_NOFOLLOW`
+  relative to the descriptor), written in full, given the old file's mode
+  and owner, fsynced and renamed over the old file relative to the same
+  descriptor, then the directory is fsynced; a failed write removes its
+  temporary file, and a leftover temporary file never blocks a write.
   Then Core's config check (`POST /core/check`); a failure puts the old
   files back (Core has not loaded the new ones) and the job `failed`. Then
   one Core restart inside `approved_core_restart(<job>)`
   ([selfguard.md](selfguard.md) G9), only when the files on disk are
   exactly the approved result; then `verifying`. A refused or failed
-  restart, or Core not back within 15 minutes, is `rolling_back`. A job
-  found `installing` after a daemon restart is `rolling_back` (what is on
-  disk is unknown).
+  restart, or Core not back within 15 minutes, is `rolling_back`; a
+  refused write whose files on disk still match the proposal's "before"
+  hashes is `failed` ("nothing was written"). A job found `installing`
+  after a daemon restart is `rolling_back` (what is on disk is unknown).
 - U29. **Verify.** The settle and comparison of U18 (the access-hardware
   rules included: a watched lock or the alarm that goes down is a
   regression) plus: more unavailable entities of the fork's domain than
@@ -315,7 +326,10 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   rebase <domain> onto core <version>`) and pushed when `limits.git_push`
   is on; untracked files, or git off, are not committed (said on the
   item). A commit failure never undoes the rebase.
-- U30. **Rollback.** `rolling_back` restores the snapshot (only from a
+- U30. **Rollback.** With no snapshot and the fork's files on disk
+  matching the proposal's "before" hashes, nothing was written and Core
+  was not restarted: the job is `failed` ("nothing was written"), never
+  `rollback_failed`. Otherwise `rolling_back` restores the snapshot (only from a
   snapshot whose files match their own SHA-256s), restarts Core inside a
   new scope for the same job, and settles again: healthy is
   `rolled_back` and the proposal `rolled_back`; a failed restore or

@@ -2044,11 +2044,11 @@ class UpdateManager:
         try:
             await self.executors.fork_apply(job, proven=proven, write=write)
         except ExecutorRefused as err:
-            if forks.saved(record) is not None and not await asyncio.to_thread(forks.restored, record):
-                # Something was written: put the fork back and restart.
-                self._move(job, "rolling_back", f"writing failed: {err}")
+            if await asyncio.to_thread(forks.untouched, record):
+                await self._fork_failed(ctx, job, record, f"nothing was written: {err}")
                 return
-            await self._fork_failed(ctx, job, record, f"nothing was written: {err}")
+            # Something may have been written: put the fork back and restart.
+            self._move(job, "rolling_back", f"writing failed: {err}")
             return
         try:
             await self.executors.fork_check(job)
@@ -2110,6 +2110,10 @@ class UpdateManager:
         if job.rollback_attempts == 0 and not self.store.transition_job(
             job.id, expect=("rolling_back",), to="rolling_back", now=self._clock(), count_rollback=True
         ):
+            return
+        if forks.saved(record) is None and await asyncio.to_thread(forks.untouched, record):
+            # Stopped before the snapshot (so before any write): the fork is as it was, Core never restarted.
+            await self._fork_failed(ctx, job, record, "nothing was written (stopped before the files were changed)")
             return
         try:
             if forks.saved(record) is None:

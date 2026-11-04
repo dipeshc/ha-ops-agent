@@ -33,7 +33,10 @@ Custom integrations that fork a Core one:
   version, and a card in the chat when "Plan a fix" made it.
 - Approving it ("Rebase tonight" or "Rebase now") runs it as an update job:
   an encrypted backup, the old files kept, the new files written in place
-  (mode and owner kept, never through a link), Core's config check, one
+  (mode and owner kept; the integration's directory is opened level by
+  level without following links, so a link swapped in for it or for
+  `custom_components` is never followed, and each file goes through a
+  fresh randomly named temporary file), Core's config check, one
   Core restart, the health check (locks and the alarm included) and, if
   anything is worse or the restart fails, the old files back with a second
   restart and a push. A good rebase is committed if git tracks the files.

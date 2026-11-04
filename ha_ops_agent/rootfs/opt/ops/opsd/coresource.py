@@ -24,6 +24,7 @@ capped (`MAX_DIFF_BYTES`, cut with a clear marker). When Core has no such integr
 integration.
 """
 
+import contextlib
 import difflib
 import hashlib
 import json
@@ -33,7 +34,7 @@ import re
 import shutil
 import stat
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -342,7 +343,9 @@ def _write_private(path: Path, data: bytes) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
-        os.write(fd, data)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -362,57 +365,101 @@ class LocalFiles:
     skipped: dict[str, str] = field(default_factory=dict)
 
 
-def custom_dir(custom_components: Path, domain: str) -> Path:
-    """`custom_components/<domain>`, a real directory with a manifest; CoreSourceError otherwise."""
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+@contextlib.contextmanager
+def domain_fd(custom_components: Path, domain: str) -> Iterator[int]:
+    """A descriptor of `custom_components/<domain>`, reached by walking from the config directory one level at a
+    time with `O_DIRECTORY | O_NOFOLLOW` (`changes.LiveFiles` does the same): a link swapped in for
+    `custom_components` or the domain's directory at any moment is never followed. Every read and write of the
+    integration's files goes through this descriptor. CoreSourceError when it is not a plain directory with a
+    regular `manifest.json`."""
     if not valid_domain(domain):
         raise CoreSourceError("an integration domain is lowercase letters, digits and underscores")
-    path = custom_components / domain
+    opened: list[int] = []
     try:
-        info = os.lstat(path)
-        manifest = os.lstat(path / "manifest.json")
-    except OSError as err:
-        raise CoreSourceError(f"there is no custom integration {domain} on this install") from err
-    if not stat.S_ISDIR(info.st_mode) or not stat.S_ISREG(manifest.st_mode):
-        raise CoreSourceError(f"custom_components/{domain} is not a plain directory with a manifest")
-    return path
+        try:
+            opened.append(os.open(custom_components.parent, _DIR_FLAGS))
+            opened.append(os.open(custom_components.name, _DIR_FLAGS, dir_fd=opened[-1]))
+            opened.append(os.open(domain, _DIR_FLAGS, dir_fd=opened[-1]))
+        except FileNotFoundError as err:
+            raise CoreSourceError(f"there is no custom integration {domain} on this install") from err
+        except OSError as err:
+            raise CoreSourceError(f"custom_components/{domain} is not a plain directory (never a link)") from err
+        try:
+            manifest = os.stat("manifest.json", dir_fd=opened[-1], follow_symlinks=False)
+        except OSError as err:
+            raise CoreSourceError(f"there is no custom integration {domain} on this install") from err
+        if not stat.S_ISREG(manifest.st_mode):
+            raise CoreSourceError(f"custom_components/{domain} is not a plain directory with a manifest")
+        yield opened[-1]
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+
+def custom_dir(custom_components: Path, domain: str) -> Path:
+    """Check `custom_components/<domain>` is a plain directory with a manifest (`domain_fd`); CoreSourceError
+    otherwise. The path is only for messages: file access goes through `domain_fd`."""
+    with domain_fd(custom_components, domain):
+        return custom_components / domain
+
+
+def read_at(dir_fd: int, name: str, limit: int = MAX_FILE_BYTES) -> bytes | None:
+    """A regular file in the directory `dir_fd`, never through a link, at most `limit` bytes; None otherwise."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        while size <= limit and (chunk := os.read(fd, min(1 << 16, limit + 1 - size))):
+            chunks.append(chunk)
+            size += len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    return None if len(data) > limit else data
 
 
 def read_custom(custom_components: Path, domain: str) -> LocalFiles:
-    """Top-level text files of a custom integration: regular files only (never a symlink), each at most
-    `MAX_FILE_BYTES`, at most `MAX_FILES`."""
-    root = custom_dir(custom_components, domain)
+    """Top-level text files of a custom integration (through `domain_fd`): regular files only (never a link), each
+    at most `MAX_FILE_BYTES`, at most `MAX_FILES`."""
     found = LocalFiles(domain)
-    with os.scandir(root) as entries:
-        listed = sorted(entries, key=lambda e: e.name)
-    for entry in listed:
-        name = entry.name
-        if not valid_file(name):
-            found.skipped[clean_name(name)] = "name not allowed"
-            continue
-        if entry.is_symlink():
-            found.skipped[name] = "a symbolic link (never followed)"
-            continue
-        if entry.is_dir(follow_symlinks=False):
-            if name != "__pycache__":
-                found.dirs.append(name)
-            continue
-        if name.endswith((".pyc", ".orig", ".rej", ".bak")) or name.startswith("."):
-            found.skipped[name] = "not source"
-            continue
-        if len(found.files) >= MAX_FILES:
-            found.skipped[name] = f"more than {MAX_FILES} files"
-            continue
-        try:
-            data = _read_file(root / name, MAX_FILE_BYTES)
-        except OSError:
-            data = None
-        if data is None:
-            found.skipped[name] = f"not a regular file of at most {MAX_FILE_BYTES // 1024} KiB"
-            continue
-        try:
-            found.files[name] = data.decode("utf-8")
-        except UnicodeDecodeError:
-            found.skipped[name] = "not text"
+    with domain_fd(custom_components, domain) as root:
+        for name in sorted(os.listdir(root)):
+            if not valid_file(name):
+                found.skipped[clean_name(name)] = "name not allowed"
+                continue
+            try:
+                info = os.stat(name, dir_fd=root, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                found.skipped[name] = "a symbolic link (never followed)"
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                if name != "__pycache__":
+                    found.dirs.append(name)
+                continue
+            if name.endswith((".pyc", ".orig", ".rej", ".bak")) or name.startswith("."):
+                found.skipped[name] = "not source"
+                continue
+            if len(found.files) >= MAX_FILES:
+                found.skipped[name] = f"more than {MAX_FILES} files"
+                continue
+            data = read_at(root, name)
+            if data is None:
+                found.skipped[name] = f"not a regular file of at most {MAX_FILE_BYTES // 1024} KiB"
+                continue
+            try:
+                found.files[name] = data.decode("utf-8")
+            except UnicodeDecodeError:
+                found.skipped[name] = "not text"
     return found
 
 

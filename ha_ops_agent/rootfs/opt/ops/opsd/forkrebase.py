@@ -28,6 +28,7 @@ diff, and a restore with a second restart on any failure or regression.
 """
 
 import ast
+import contextlib
 import difflib
 import hashlib
 import itertools
@@ -38,7 +39,7 @@ import re
 import secrets
 import shutil
 import stat
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,7 +54,9 @@ from opsd.coresource import (
     CoreSourceError,
     LocalFiles,
     custom_dir,
+    domain_fd,
     installed_core_version,
+    read_at,
     read_custom,
     valid_domain,
     valid_file,
@@ -410,7 +413,9 @@ def _write_private(path: Path, data: bytes) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
-        os.write(fd, data)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -514,17 +519,18 @@ def new_files(data: Path, record: Mapping[str, Any]) -> dict[str, bytes] | None:
 
 
 def current_files(custom_components: Path, record: Mapping[str, Any]) -> dict[str, bytes] | None:
-    """The fork's files the proposal replaces, as they are on disk now (never through a link); None if unreadable."""
-    try:
-        root = custom_dir(custom_components, str(record["domain"]))
-    except CoreSourceError:
-        return None
+    """The fork's files the proposal replaces, as they are on disk now (`coresource.domain_fd`: never through a
+    link, at any level); None if unreadable."""
     found: dict[str, bytes] = {}
-    for name in record.get("files") or {}:
-        content = _read_regular(root / str(name)) if valid_file(str(name)) else None
-        if content is None:
-            return None
-        found[str(name)] = content
+    try:
+        with domain_fd(custom_components, str(record["domain"])) as root:
+            for name in record.get("files") or {}:
+                content = read_at(root, str(name)) if valid_file(str(name)) else None
+                if content is None:
+                    return None
+                found[str(name)] = content
+    except CoreSourceError, OSError:
+        return None
     return found
 
 
@@ -554,26 +560,32 @@ class Saved:
 
 
 class ForkFiles:
-    """Snapshot, write and restore one proposal's files in `custom_components/<domain>/`: regular files only
-    (never through a link), written to a temporary file in the same directory, fsynced, renamed over the old one,
-    keeping its mode and owner."""
+    """Snapshot, write and restore one proposal's files in `custom_components/<domain>/`.
+
+    Every access goes through a descriptor of the domain's directory reached from the config directory with
+    `O_DIRECTORY | O_NOFOLLOW` at each level (`coresource.domain_fd`), so swapping `custom_components` or the
+    domain's directory for a link never redirects a read or a write. Within it: regular files only (`stat` without
+    following links), each written to a fresh randomly named temporary file (`O_CREAT | O_EXCL | O_NOFOLLOW`),
+    written in full, given the old file's mode and owner, fsynced and renamed over the old one (both names relative
+    to the same descriptor), then the directory fsynced; a failed write removes its temporary file."""
 
     def __init__(self, data: Path, custom_components: Path) -> None:
         self.data = data
         self.custom = custom_components
 
-    def _root(self, domain: str) -> Path:
+    @contextlib.contextmanager
+    def _root(self, domain: str) -> Iterator[int]:
         try:
-            return custom_dir(self.custom, domain)
+            with domain_fd(self.custom, domain) as fd:
+                yield fd
         except CoreSourceError as err:
             raise RebaseRefused(str(err)) from err
 
     @staticmethod
-    def _target(root: Path, domain: str, name: str) -> Path:
+    def _check_name(domain: str, name: str) -> None:
         path = f"custom_components/{domain}/{name}"
-        if not valid_file(name) or selfguard.self_path(path):
+        if not valid_file(name) or name.startswith(".") or selfguard.self_path(path):
             raise RebaseRefused(f"{path[:80]} may not be written")
-        return root / name
 
     def snapshot(self, record: Mapping[str, Any]) -> None:
         """Keep the files the proposal replaces (bytes, mode, owner) under its own directory, once."""
@@ -581,20 +593,21 @@ class ForkFiles:
         meta_path = folder / "meta.json"
         if meta_path.exists():
             return
-        root = self._root(str(record["domain"]))
+        domain = str(record["domain"])
         _private_dir(folder)
         meta: dict[str, Any] = {}
-        for name in record["files"]:
-            target = self._target(root, str(record["domain"]), str(name))
-            info = os.lstat(target)
-            if not stat.S_ISREG(info.st_mode):
-                raise RebaseRefused(f"{name} is not a regular file")
-            content = _read_regular(target)
-            if content is None:
-                raise RebaseRefused(f"{name} could not be read")
-            _write_private(folder / name, content)
-            meta[str(name)] = {"mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid,
-                               "sha": sha256(content)}  # fmt: skip
+        with self._root(domain) as root:
+            for name in record["files"]:
+                self._check_name(domain, str(name))
+                info = os.stat(str(name), dir_fd=root, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    raise RebaseRefused(f"{name} is not a regular file")
+                content = read_at(root, str(name))
+                if content is None:
+                    raise RebaseRefused(f"{name} could not be read")
+                _write_private(folder / str(name), content)
+                meta[str(name)] = {"mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid,
+                                   "sha": sha256(content)}  # fmt: skip
         write_json_atomic(meta_path, meta, mode=0o600)
 
     def saved(self, record: Mapping[str, Any]) -> dict[str, tuple[bytes, Saved]] | None:
@@ -612,64 +625,72 @@ class ForkFiles:
             found[str(name)] = (content, Saved(int(info["mode"]), int(info["uid"]), int(info["gid"]), str(info["sha"])))
         return found if set(found) == set(record["files"]) else None
 
-    def _write(self, root: Path, domain: str, name: str, content: bytes, saved: Saved) -> None:
-        target = self._target(root, domain, name)
+    def _write(self, root: int, domain: str, name: str, content: bytes, saved: Saved) -> None:
+        self._check_name(domain, name)
         try:
-            info = os.lstat(target)
+            info = os.stat(name, dir_fd=root, follow_symlinks=False)
         except FileNotFoundError:
             info = None
         if info is not None and not stat.S_ISREG(info.st_mode):
             raise RebaseRefused(f"{name} is not a regular file (never written through a link)")
-        tmp = root / f".{name}.ops-rebase"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        tmp = f".ops-{secrets.token_hex(8)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)
         try:
-            os.write(fd, content)
-            os.fchmod(fd, saved.mode & 0o777)
-            if os.geteuid() == 0:
-                os.fchown(fd, saved.uid, saved.gid)
-            os.fsync(fd)
+            try:
+                view = memoryview(content)
+                while view:
+                    view = view[os.write(fd, view) :]
+                os.fchmod(fd, saved.mode & 0o777)
+                if os.geteuid() == 0:
+                    os.fchown(fd, saved.uid, saved.gid)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, name, src_dir_fd=root, dst_dir_fd=root)
         except BaseException:
-            os.close(fd)
-            tmp.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp, dir_fd=root)
             raise
-        os.close(fd)
-        os.replace(tmp, target)
 
-    def _fsync_dir(self, root: Path) -> None:
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+    def _put(self, record: Mapping[str, Any], files: Mapping[str, tuple[bytes, Saved]]) -> None:
+        domain = str(record["domain"])
+        with self._root(domain) as root:
+            for name in sorted(files):
+                content, meta = files[name]
+                self._write(root, domain, name, content, meta)
+            os.fsync(root)
 
     def write(self, record: Mapping[str, Any], files: Mapping[str, bytes]) -> None:
         """Write the rebased files (after `snapshot`), keeping each old file's mode and owner."""
         saved = self.saved(record)
         if saved is None:
             raise RebaseRefused("the snapshot of the fork's files is missing or damaged; nothing was written")
-        domain = str(record["domain"])
-        root = self._root(domain)
-        for name in sorted(files):
-            self._write(root, domain, name, files[name], saved[name][1])
-        self._fsync_dir(root)
+        if set(files) - set(saved):
+            raise RebaseRefused("the rebase names a file the snapshot does not hold; nothing was written")
+        self._put(record, {name: (files[name], saved[name][1]) for name in files})
 
     def restore(self, record: Mapping[str, Any]) -> None:
         """Put the snapshot back (bytes, mode and owner)."""
         saved = self.saved(record)
         if saved is None:
             raise RebaseRefused("the snapshot of the fork's files is missing or damaged")
-        domain = str(record["domain"])
-        root = self._root(domain)
-        for name in sorted(saved):
-            content, meta = saved[name]
-            self._write(root, domain, name, content, meta)
-        self._fsync_dir(root)
+        self._put(record, saved)
 
     def restored(self, record: Mapping[str, Any]) -> bool:
         """The fork's files on disk are the snapshot again."""
         saved = self.saved(record)
         now = current_files(self.custom, record)
         return saved is not None and now is not None and all(sha256(now[n]) == s.sha for n, (_, s) in saved.items())
+
+    def untouched(self, record: Mapping[str, Any]) -> bool:
+        """The fork's files on disk are exactly the ones the proposal was built from (nothing was written)."""
+        now = current_files(self.custom, record)
+        files = record.get("files") or {}
+        return (
+            now is not None
+            and set(now) == set(files)
+            and all(sha256(now[n]) == (files[n] or {}).get("old") for n in files)
+        )
 
 
 # ------------------------------------------------------------------ the capability

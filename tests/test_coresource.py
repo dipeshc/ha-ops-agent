@@ -32,8 +32,8 @@ CORE_FILES = {
 CUSTOM_FILES = {
     "manifest.json": '{\n  "domain": "acme_fan",\n  "name": "Acme Fan",\n  "codeowners": [],\n  "version": "1.0"\n}\n',
     "__init__.py": CORE_FILES["__init__.py"],
-    "fan.py": "class AcmeFan:\n    speeds = 4\n\n    def turn_on(self):\n        return True\n",
-    "four_speed.py": "SPEEDS = 4\n",
+    "fan.py": CORE_FILES["fan.py"].replace("speeds = 3\n", "speeds = 3\n    preset_modes = ['breeze']\n"),
+    "presets.py": "BREEZE = 'breeze'\n",
 }
 
 
@@ -115,14 +115,14 @@ async def test_core_compare_reports_a_summary_and_a_diff_per_file(world: World, 
     assert f"against Home Assistant Core {VERSION}" in out
     assert f"https://github.com/home-assistant/core/tree/{VERSION}/homeassistant/components/acme_fan" in out
     assert "- files compared: 3 (2 changed, 1 identical)" in out
-    assert "- only in the custom integration: four_speed.py" in out
+    assert "- only in the custom integration: presets.py" in out
     assert "- only in Core: diagnostics.py" in out
-    assert "fan.py +1 -1" in out and "manifest.json +2 -1" in out
+    assert "fan.py +1 -0" in out and "manifest.json +2 -1" in out
     assert "- identical: __init__.py" in out
     assert f"--- core/{VERSION}/fan.py" in out and "+++ custom/fan.py" in out
-    assert "-    speeds = 3" in out and "+    speeds = 4" in out
+    assert "+    preset_modes = ['breeze']" in out
     # Fenced as untrusted data.
-    assert out.index("<core-compare-diff>") < out.index("speeds = 4") < out.index("</core-compare-diff>")
+    assert out.index("<core-compare-diff>") < out.index("preset_modes = ['breeze']") < out.index("</core-compare-diff>")
     # Only the two hosts, each request narrowed to its own host, files capped at 256 KiB; only shared files fetched.
     assert [(u.split("/")[2], h) for u, h, _ in gh.asked] == [
         ("api.github.com", frozenset({"api.github.com"})),

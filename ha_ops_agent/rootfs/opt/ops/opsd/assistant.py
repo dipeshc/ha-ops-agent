@@ -49,7 +49,17 @@ from typing import Any
 from opsd import forkrebase, proposals
 from opsd.activity import ActivityLog
 from opsd.capabilities import CAPABILITIES
-from opsd.channels import REPLY_ACTION, Action, ActionKind, BudgetClass, Message, agent_message, task_from_tag, task_tag
+from opsd.channels import (
+    AGENT_TAG,
+    REPLY_ACTION,
+    Action,
+    ActionKind,
+    BudgetClass,
+    Message,
+    agent_message,
+    task_from_tag,
+    task_tag,
+)
 from opsd.chatcards import error_card, plan_retry, refusal_card, split_reason
 from opsd.conversation import (
     CHAT_TURNS_PER_DAY,
@@ -59,13 +69,11 @@ from opsd.conversation import (
     MESSAGE_CHARS,
     SUMMARY_CHARS,
     SUMMARY_EVERY,
-    THREAD_ID_RE,
     build_chat_prompt,
     build_followup_prompt,
     build_investigation_prompt,
     build_summary_prompt,
     clean_text,
-    new_thread_id,
     sources_line,
     sources_of,
     step_label,
@@ -74,15 +82,14 @@ from opsd.conversation import (
 )
 from opsd.effects import PUSH_REASONS
 from opsd.events import Event
-from opsd.items import ITEM_ID_RE, item_context
+from opsd.items import ITEM_ID_RE, ItemBook, is_question, item_context, item_id, thread_of, update_key
 from opsd.items import deep_link as item_link
 from opsd.live import Hub
-from opsd.notify import deep_link
 from opsd.policy import Origin
 from opsd.redact import Redactor
 from opsd.runctx import AGENT_SELF, Principal, RunContext
 from opsd.runner import BLOCKED_STATUSES, CHAT, FOLLOWUP, INVESTIGATE, SUMMARY, AgentRunner
-from opsd.store import IN_FLIGHT, RETRYABLE, Store, StoreError, Task, Turn
+from opsd.store import IN_FLIGHT, ITEM_THREAD_RE, QUESTION_PREFIX, RETRYABLE, Store, StoreError, Task, Turn
 from opsd.tasks import MAX_OPEN_INVESTIGATIONS, MAX_OPEN_TASKS, MAX_TITLE_CHARS
 
 _LOGGER = logging.getLogger(__name__)
@@ -94,8 +101,8 @@ FOLLOWUP_RETRY = timedelta(hours=6)
 MAX_TASK_ATTEMPTS = 3
 SNOOZE = timedelta(days=1)
 MAX_MANUAL_RETRIES_PER_DAY = 30
-# The one conversation with the admin.
-MAIN_THREAD_KEY = "chat.main_thread"
+# A question's title: the admin's text, one line.
+QUESTION_TITLE_CHARS = 120
 RETRY_QUEUE_FULL = timedelta(minutes=15)
 MAX_STEPS = 5
 MAX_INVESTIGATION_STEPS = 3
@@ -109,7 +116,7 @@ CANCEL_KEY = "investigation.cancel:"
 # "Plan a fix" on a maintenance item: the brief of its investigation (daemon text; the item is fenced beside it).
 PLAN_FIX_STEPS = 2
 PLAN_FIX_BRIEF = (
-    "The admin tapped Plan a fix on the item below and wants a concrete plan for it in this chat. Read the evidence"
+    "The admin tapped Plan a fix on the item below and wants a concrete plan for it on that item. Read the evidence"
     " (the item, the repairs, the logs, the config and the integration it names) and write the plan: the steps, the"
     " risk of each, and which of them you can do yourself and which you cannot. The admin wants a fix proposed where"
     " the proposal rules allow it: then propose it, so it waits for his approval like any proposal. Where the fix"
@@ -117,6 +124,8 @@ PLAN_FIX_BRIEF = (
     " anything in the UI), say so plainly, say that the admin or an engineering session must do it, and that he can"
     " use Remind me on the item to come back to it."
 )
+# A plan's text on its finding (the last step's findings).
+PLAN_CHARS = 3000
 # Run ids an investigation keeps (its approval requests are voided if it is cancelled).
 MAX_RUN_IDS = 6
 INVESTIGATION_LIVE = ("queued", "running", "next", "waiting")
@@ -168,9 +177,10 @@ class Assistant:
         # Live status per in-flight turn, and which turn a thread's run answers.
         self._live: dict[int, dict[str, Any]] = {}
         self._running: dict[str, int] = {}
-        # The activity log (set by the daemon); entries that need the admin post in the chat.
+        # The activity log (set by the daemon): what the agent did, on items and in History, never in a chat.
         self.activity: ActivityLog | None = None
-        self._main: str | None = None
+        # The item book (set by the daemon): writes the questions the admin asks.
+        self.items: ItemBook | None = None
 
     # --------------------------------------------------------------- jobs
 
@@ -215,64 +225,89 @@ class Assistant:
 
     # ------------------------------------------------------------ pushes
 
-    def main_thread(self) -> str:
-        """The one conversation with the admin: panel messages and push replies all land here."""
-        if self._main is not None and self.store.get_thread(self._main) is not None:
-            return self._main
-        found = self.store.kv_get(MAIN_THREAD_KEY)
-        if found and THREAD_ID_RE.fullmatch(found) and self.store.get_thread(found) is not None:
-            self._main = found
-            return found
-        now = datetime.now(UTC)
-        thread = new_thread_id()
-        self.store.create_thread(thread, principal="admin", channel="panel", now=now)
-        self.store.kv_set(MAIN_THREAD_KEY, thread, now=now)
-        self._main = thread
-        self.thread_changed(thread)
-        return thread
+    # ------------------------------------------------------------ threads
 
-    def post_activity(self, entry: dict[str, Any], text: str | None) -> int | None:
-        """One short agent message in the chat for an activity entry that needs the admin."""
-        body = text or (f"{entry['title']}. {clean_text(str(entry['detail']), 300)}" if entry["detail"]
-                        else str(entry["title"]))  # fmt: skip
-        turn = self.store.append_turn(self.main_thread(), role="agent", text=f"{body}\n(activity #{entry['id']})",
-                                      now=datetime.now(UTC), meta={"activity": entry["id"]})  # fmt: skip
-        self._turn_changed(turn)
-        self.thread_changed(turn.thread_id)
-        return turn.id
+    def record_of(self, thread: str) -> dict[str, Any] | None:
+        """The item a conversation belongs to (`item:<id>` or `ask:<id>`), from the store; None for anything else."""
+        found = ITEM_THREAD_RE.fullmatch(thread)
+        record = self.store.item(found.group(2)) if found is not None else None
+        return record if record is not None and thread_of(record) == thread else None
+
+    def writable(self, thread: str) -> bool:
+        """Messages go only to the conversation of an item or a question that is stored; the earlier one chat is
+        read only."""
+        return self.record_of(thread) is not None
+
+    def item_message(self, thread: str, title: str, body: str, *, reply: bool = True,
+                     budget_class: BudgetClass = BudgetClass.USER) -> Message:  # fmt: skip
+        """An agent push about a conversation's item: opens the item, Reply continues its conversation. It carries
+        the item's tag (the push the admin replied to), except for an urgent item, whose daemon push model text never
+        replaces."""
+        record = self.record_of(thread)
+        ident = str(record["id"]) if record is not None else ""
+        message = agent_message(title, body, urgent=False, budget_class=budget_class, thread_id=thread,
+                                actions=(REPLY_ACTION,) if reply and record is not None else (),
+                                url=item_link(ident) if ident else None, tag_suffix=ident or None)  # fmt: skip
+        if record is not None and not (record.get("source") or {}).get("urgent"):
+            message = dataclasses.replace(message, tag=ident)
+        return message
+
+    def _title(self, thread: str, fallback: str) -> str:
+        record = self.record_of(thread)
+        return clean_text(str(record["title"]), 70) if record is not None else fallback
 
     def note(self, kind: str, title: str, detail: str = "", *, needs_admin: bool = False,
-             ref: dict[str, Any] | None = None, chat_text: str | None = None) -> None:  # fmt: skip
+             ref: dict[str, Any] | None = None, chat_text: str | None = None) -> str | None:  # fmt: skip
+        """An activity entry; returns the item it went on (the task's item, a finding for "Plan a fix", or its
+        own standalone item)."""
         if self.activity is None:
-            return
+            return None
         task = (ref or {}).get("task")
         if isinstance(task, int):
-            # About a task (a reminder, a follow-up, an investigation): an event on that task's item.
-            self.activity.record(kind, title, detail, needs_admin=needs_admin, ref=ref, chat_text=chat_text,
-                                 item=f"task:{task}")  # fmt: skip
-            return
-        self.activity.record(kind, title, detail, needs_admin=needs_admin, ref=ref, chat_text=chat_text)
+            # About a task (a reminder, a follow-up, an investigation): an event on that task's item, or on the
+            # finding a "Plan a fix" runs on.
+            key = self._task_item_key(task)
+            entry = self.activity.record(kind, title, detail, needs_admin=needs_admin, ref=ref, chat_text=chat_text,
+                                         item=key)  # fmt: skip
+        else:
+            entry = self.activity.record(kind, title, detail, needs_admin=needs_admin, ref=ref, chat_text=chat_text)
+        found = (entry or {}).get("item")
+        return found if isinstance(found, str) else None
 
-    def with_reply(self, message: Message, *, now: datetime, source: str = "alert", reply: bool = True) -> Message:
-        """A push that needs the admin: an activity entry, one message in the chat, and a Reply button into it.
+    def _task_item_key(self, task_id: int) -> str:
+        task = self.store.get_task(task_id)
+        target = task.payload.get("item") if task is not None and task.payload.get("plan_fix") else None
+        record = self.store.item(target) if isinstance(target, str) and ITEM_ID_RE.fullmatch(target) else None
+        return str(record["key"]) if record is not None else f"task:{task_id}"
 
-        Reminders are logged by `deliver_reminder` and post nothing in the chat. Without `reply` (a push from the
-        agent's own run) the push links to the chat but has no Reply button.
+    def with_reply(self, message: Message, *, now: datetime, source: str = "alert", reply: bool = True,
+                   item: str | None = None) -> Message:  # fmt: skip
+        """A push that needs the admin: an activity entry (its own item), opening that item (or `item`, the task's
+        item for a reminder), with a Reply button into that item's conversation.
+
+        Reminders are logged by `deliver_reminder`. Without `reply` (a push from the agent's own run) the push opens
+        the item but has no Reply button: model text never invites an answer.
         """
+        del now
         title = message.title.removeprefix("Agent: ")
+        target = item
         try:
-            thread = self.main_thread()
             if source != "reminder":
                 kind = "followup" if source == "followup" else "notice"
-                self.note(kind, title, message.body, needs_admin=True,
-                          chat_text=message.body if source == "followup" else None)  # fmt: skip
+                noted = self.note(kind, title, message.body, needs_admin=True,
+                                  chat_text=message.body if source == "followup" else None)  # fmt: skip
+                target = target or noted
+            record = self.store.item(target) if isinstance(target, str) and ITEM_ID_RE.fullmatch(target) else None
         except (StoreError, sqlite3.Error) as err:
-            _LOGGER.warning("no chat for push; sent without reply", extra={"error": str(err)[:200]})
+            _LOGGER.warning("no item for push; sent without reply", extra={"error": str(err)[:200]})
+            return message
+        thread = thread_of(record) if record is not None else None
+        if record is None or thread is None:
             return message
         return Message(
             message.title, message.body, urgent=message.urgent, tag=message.tag, thread_id=thread,
             actions=(*message.actions, *((REPLY_ACTION,) if reply else ())), budget_class=message.budget_class,
-            url=deep_link(thread),
+            url=item_link(str(record["id"])),
             quiet_ok=message.quiet_ok,
         )  # fmt: skip
 
@@ -393,7 +428,7 @@ class Assistant:
             # The admin chose this time, quiet hours or not.
             message = dataclasses.replace(message, quiet_ok=True)
         if task.payload.get("reply") and task.owner == "admin":
-            message = self.with_reply(message, now=now, source="reminder")
+            message = self.with_reply(message, now=now, source="reminder", item=item_id(f"task:{task.id}"))
         if task.owner != "admin" and task.payload.get("reason") not in PUSH_REASONS:
             # The agent's own reminder for information: History only (its words under `agent`, never a need).
             self.note("note", f"{label}: {task.title}", note)
@@ -459,24 +494,119 @@ class Assistant:
     # ---------------------------------------------------------------- chat
 
     async def on_user_message(self, event: Event) -> None:
-        """A verified push reply: continue its thread (or a new one) like a panel message."""
+        """A verified push reply: a message on the item the push was about (its conversation), else a new
+        question."""
         text = event.payload.get("reply_text")
         if not isinstance(text, str) or not text.strip():
             self.audit("chat.turn", event.principal.label(), args={"role": "admin"}, outcome="empty")
             return
-        now = datetime.now(UTC)
-        thread = self._thread_for(event, now)
         action = event.payload.get("action_id")
         # The action id is single use; as a client id it also makes a redelivered event a no-op.
         client_id = hashlib.sha256(action.encode()).hexdigest()[:32] if isinstance(action, str) else None
+        via = "notification" if event.source == "companion" else None
+        thread = self._thread_for(event)
+        if thread is None:
+            await self.ask(text, principal=event.principal, channel=event.source, client_id=client_id, via=via)
+            return
         await self.submit(thread, text, principal=event.principal, channel=event.source, client_id=client_id,
-                    exclusive=False, via="notification" if event.source == "companion" else None)  # fmt: skip
+                          exclusive=False, via=via, item=self.record_of(thread))  # fmt: skip
 
-    def _thread_for(self, event: Event, now: datetime) -> str:
-        """Every push reply continues the one chat."""
-        return self.main_thread()
+    def _thread_for(self, event: Event) -> str | None:
+        """The conversation of the item the push was about: the thread recorded with the action id when the push
+        was sent (the daemon's record, never the event's own words), else the item its tag names. A push about
+        nothing that still exists (or the earlier one chat) starts a question."""
+        thread = event.payload.get("thread_id")
+        if isinstance(thread, str) and self.writable(thread):
+            return thread
+        tag = event.payload.get("tag")
+        ident = tag.removeprefix(f"{AGENT_TAG}-") if isinstance(tag, str) else ""
+        record = self.store.item(ident) if ITEM_ID_RE.fullmatch(ident) else None
+        return thread_of(record) if record is not None else None
+
+    async def ask(self, text: str, *, principal: Principal, channel: str, client_id: str | None,
+                  via: str | None = None) -> tuple[dict[str, Any] | None, Submitted]:  # fmt: skip
+        """A question the admin asks (Ask in the panel, or a reply to a push about nothing current): it is an item of
+        its own (`ask:<token>`), Running until it is answered, and its conversation holds the answer and any
+        follow-ups. The same `client_id` returns the same question."""
+        if self.items is None:
+            return None, Submitted("failed")
+        now = datetime.now(UTC)
+        title = " ".join(clean_text(text, MESSAGE_CHARS).split())[:QUESTION_TITLE_CHARS]
+        if not title:
+            return None, Submitted("failed")
+        seed = client_id or hashlib.sha256(f"{now.isoformat()}{text}".encode()).hexdigest()
+        key = f"{QUESTION_PREFIX}{hashlib.sha256(seed.encode()).hexdigest()[:16]}"
+        record = self.store.item_by_key(key)
+        if record is None:
+            record = self.items.question(key, state="running", gist=f"asked {self._hhmm(now)}", title=title,
+                                         actor="you", now=now)  # fmt: skip
+            record = record or self.store.item_by_key(key)
+        thread = thread_of(record) if record is not None else None
+        if record is None or thread is None:
+            return None, Submitted("failed")
+        sent = await self.submit(thread, text, principal=principal, channel=channel, client_id=client_id,
+                                 exclusive=False, via=via)  # fmt: skip
+        return self.store.item(str(record["id"])), sent
+
+    def _hhmm(self, when: datetime | str) -> str:
+        moment = datetime.fromisoformat(when) if isinstance(when, str) else when
+        return moment.astimezone(self._tz()).strftime("%H:%M")
+
+    def sync_question(self, thread: str) -> None:
+        """A question's item follows its conversation: Running while the last message waits for its answer, Done
+        with the answer (the reply under `agent`, the gist in the daemon's words), Failed when it went unanswered
+        (its card says why)."""
+        if self.items is None or not thread.startswith("ask:"):
+            return
+        record = self.record_of(thread)
+        if record is None:
+            return
+        turns = self.store.turns_page(thread, limit=20)
+        last = next((t for t in reversed(turns) if t.role == "admin"), None)
+        if last is None:
+            return
+        agent: dict[str, Any] | None = None
+        actor = "daemon"
+        if last.status in ("queued", "running"):
+            state, gist = "running", f"asked {self._hhmm(last.at)}"
+        elif last.status == "ok":
+            reply = next((t for t in turns if t.reply_to == last.id and t.role == "agent"), None)
+            if reply is None:
+                return
+            sources = [str(x) for x in reply.meta.get("sources") or []]
+            state, actor = "done", "agent"
+            gist = f"answered {self._hhmm(reply.at)}" + (
+                f" · {len(sources)} source{'s' if len(sources) != 1 else ''}" if sources else "")  # fmt: skip
+            agent = {"text": reply.text, "sources": sources, "not_read": [], "run_id": reply.run_id}
+        else:
+            card = self.store.card_for(last.id)
+            why = clean_text(card.text, 160) if card is not None else "no answer"
+            later = card is not None and bool(card.meta.get("auto_retry")) and last.status == "refused"
+            state, gist = "failed", f"not answered {'yet' if later else ''}: {why}".replace(" :", ":")
+        try:
+            self.items.question(str(record["key"]), state=state, gist=gist, agent=agent, actor=actor)
+        except (StoreError, sqlite3.Error, ValueError) as err:
+            _LOGGER.warning("question item not written", extra={"error": str(err)[:200]})
 
     async def submit(
+        self,
+        thread: str,
+        text: str,
+        *,
+        principal: Principal,
+        channel: str,
+        client_id: str | None = None,
+        exclusive: bool = True,
+        via: str | None = None,
+        item: Mapping[str, Any] | None = None,
+    ) -> Submitted:
+        """`_submit`, then a question's item follows its conversation (`sync_question`)."""
+        sent = await self._submit(thread, text, principal=principal, channel=channel, client_id=client_id,
+                                  exclusive=exclusive, via=via, item=item)  # fmt: skip
+        self.sync_question(thread)
+        return sent
+
+    async def _submit(
         self,
         thread: str,
         text: str,
@@ -492,8 +622,9 @@ class Assistant:
 
         `exclusive` (the panel): at most one message in flight per thread.
         The same `client_id` returns the stored turn instead of a second one.
-        The message is stored even when the daily cap refuses it. `item` (the panel's "Ask the agent"): the
-        item the message is about; its record is fenced into the run's prompt (`items.item_context`).
+        The message is stored even when the daily cap refuses it. `item`: the item whose conversation this is;
+        its record is fenced into the run's prompt (`items.item_context`). A question needs none (it is the
+        question itself).
         """
         now = datetime.now(UTC)
         text = clean_text(text, MESSAGE_CHARS)
@@ -508,7 +639,7 @@ class Assistant:
         meta: dict[str, Any] = {"user": principal.user_id, "channel": channel}
         if via is not None:
             meta["via"] = via
-        if item is not None:
+        if item is not None and not is_question(item):
             meta["item"], meta["item_title"] = str(item["id"]), clean_text(str(item.get("title") or ""), 120)
         turn, created = self.store.submit_turn(thread, text=text, now=now, client_id=client_id, meta=meta)
         if not created:
@@ -524,8 +655,8 @@ class Assistant:
             refused = self._write_card(turn, "refused", card.status, card.text, card.meta, now)
             self.thread_changed(thread)
             if self.store.bump(self._day(now), "chat_cap_notice", limit=1):
-                notice = agent_message("Chat limit", "Today's chat limit is reached; try again tomorrow.",
-                                       urgent=False, budget_class=BudgetClass.USER, url=deep_link(thread))  # fmt: skip
+                notice = self.item_message(thread, "Chat limit", "Today's chat limit is reached; try again tomorrow.",
+                                           reply=False)  # fmt: skip
                 await self._push_unless_watching(thread, notice, what="chat_cap")
             return Submitted("refused", refused or turn)
         self.audit("chat.turn", who, args={"role": "admin", "thread": thread, "chars": len(text), "sha": digest},
@@ -570,6 +701,7 @@ class Assistant:
         self._turn_changed(admin)
         self._turn_changed(card)
         self.publish("status", turn.thread_id, {"turn_id": turn.id, "state": outcome})
+        self.sync_question(turn.thread_id)
         return admin
 
     def _midnight(self, now: datetime) -> datetime:
@@ -660,11 +792,13 @@ class Assistant:
         if card is not None:
             self._turn_changed(self.store.update_turn_meta(card.id, {"resolved": True, "auto_retry": False,
                                                                      "retry_at": None, "actions": []}))  # fmt: skip
+        self.sync_question(thread)
         footer = sources_line(run_meta)
-        delivered = await self._push_unless_watching(thread, agent_message(
-            "Reply", f"{reply}\n\n{footer}" if footer else reply, urgent=False, budget_class=BudgetClass.USER,
-            tag_suffix=f"chat-{thread}",
-            thread_id=thread, actions=(REPLY_ACTION,), url=deep_link(thread)), what="reply")  # fmt: skip
+        delivered = await self._push_unless_watching(
+            thread,
+            self.item_message(thread, self._title(thread, "Reply"), f"{reply}\n\n{footer}" if footer else reply),
+            what="reply",
+        )
         self._turn_changed(self.store.update_turn_meta(agent.id, {"push": delivered}))
         self.publish("status", thread, {"turn_id": turn.id, "state": "ok"})
         self.audit("chat.turn", "agent", args={"role": "agent", "thread": thread, "run": outcome.context.run_id,
@@ -681,14 +815,17 @@ class Assistant:
     # ------------------------------------------------------ item actions
 
     def plan_fix(self, record: Mapping[str, Any], *, user: str) -> str:
-        """ "Plan a fix" on a maintenance item: an investigation in the one chat, as if the admin had asked for it
-        there (the `task.investigate` limits and daily quota, the `investigate` profile and its caps, the
-        admin-chat origin). Returns "ok" or why it did not start (daemon words)."""
+        """ "Plan a fix" on a maintenance item: an investigation on that item, as if the admin had asked for it in the
+        item's conversation (the `task.investigate` limits and daily quota, the `investigate` profile and its caps,
+        the admin-chat origin). It has no item of its own: the finding shows its phases, its plan and any proposal
+        it makes (`Composer._with_plan`). Returns "ok" or why it did not start (daemon words)."""
         now = datetime.now(UTC)
-        thread = self.main_thread()
+        thread = thread_of(record)
+        if thread is None or not str(record.get("key") or "").startswith("maint:"):
+            return "Only a maintenance item can plan a fix."
         open_now = self.store.open_investigations()
         if any(t.thread_id == thread for t in open_now):
-            return "An investigation is already running in the chat; wait for it or cancel it there."
+            return "A plan is already being made for this item; wait for it or stop it."
         if len(open_now) >= MAX_OPEN_INVESTIGATIONS:
             return f"{MAX_OPEN_INVESTIGATIONS} investigations are already open; try again later."
         if self.store.count_open_tasks("admin") >= MAX_OPEN_TASKS["admin"]:
@@ -700,19 +837,20 @@ class Assistant:
         title = clean_text(f"Plan a fix: {record.get('title') or 'maintenance item'}", MAX_TITLE_CHARS)
         task, created = self.store.create_task(
             kind="followup", title=title, owner="admin", created_by=f"panel:{user[:64]}", next_fire_at=now,
-            payload={"investigation": True, "note": PLAN_FIX_BRIEF, "max_steps": PLAN_FIX_STEPS, "step": 0,
-                     "findings": [], "origin": str(Origin.ADMIN_CHAT), "user_id": user, "item": str(record["id"])},
+            payload={"investigation": True, "plan_fix": True, "note": PLAN_FIX_BRIEF, "max_steps": PLAN_FIX_STEPS,
+                     "step": 0, "findings": [], "origin": str(Origin.ADMIN_CHAT), "user_id": user,
+                     "item": str(record["id"]), "started_at": now.isoformat(timespec="seconds")},
             idempotency_key=f"plan_fix:{record['id']}:{record.get('revision')}:{now.date().isoformat()}", now=now,
             thread_id=thread,
         )  # fmt: skip
         if not created:
             # The same request again (same item, revision and day): the quota unit goes back.
             self.store.unbump(day, "cap:task.investigate")
-            return "This fix was already planned today; its findings are in the chat."
+            return "This fix was already planned today; the plan is on the item."
         self.audit("task.investigate", f"admin-chat:{user[:64]}", args={"task": task.id, "item": record["id"]},
                    outcome="accepted", detail="plan a fix (panel)")  # fmt: skip
         self._investigation_card(task, now)
-        self.note("investigation", f"Investigation started: {task.title}", ref={"task": task.id})
+        self.note("investigation", "Plan a fix: started from this item", ref={"task": task.id})
         self.publish("tasks", None, {})
         self.wake()
         return "ok"
@@ -758,21 +896,37 @@ class Assistant:
         return {k: v for k, v in meta.items() if v}
 
     def _after_chat_run(self, run_id: str, thread: str, run_meta: dict[str, Any]) -> None:
-        """Cards for investigations the run started; approval requests are on the update's item on Home."""
+        """What the run started or proposed has an item of its own: the conversation gets a link card to each, and
+        an investigation links back to where it was asked (`payload.from_item`)."""
         now = datetime.now(UTC)
         started = False
+        origin = self.record_of(thread)
         for task in self.store.tasks_created_by(f"{CHAT.name}:{run_id}"):
             if task.payload.get("investigation") and task.thread_id == thread and task.state == "pending":
+                if origin is not None and not task.payload.get("from_item"):
+                    self.store.set_task_payload(task.id, task.payload | {"from_item": str(origin["key"])}, now=now)
                 self._investigation_card(task, now)
+                self._link_card(thread, f"task:{task.id}", "Investigation", now)
                 self.note("investigation", f"Investigation started: {task.title}", ref={"task": task.id})
                 started = True
         if started:
             self.publish("tasks", None, {})
             self.wake()
-        self._proposal_cards(thread, run_meta, now)
+        self._link_cards(thread, run_id, run_meta, now)
 
-    def _proposal_cards(self, thread: str, run_meta: dict[str, Any], now: datetime) -> None:
-        """A daemon card per approval request, after the reply: plan data only, and where to decide."""
+    def _link_card(self, thread: str, key: str, kicker: str, now: datetime) -> None:
+        """A card in the conversation that opens the item `key` (its title and state are read when shown)."""
+        record = self.store.item_by_key(key)
+        if record is None or any(t.status == "link" and t.meta.get("item") == record["id"]
+                                 for t in self.store.turns_page(thread, limit=30)):  # fmt: skip
+            return
+        text = f"{kicker}: {clean_text(str(record['title']), 120)}"
+        self._turn_changed(self.store.append_turn(thread, role="system", status="link", text=text, now=now,
+                                                  meta={"item": str(record["id"])}))  # fmt: skip
+
+    def _link_cards(self, thread: str, run_id: str, run_meta: dict[str, Any], now: datetime) -> None:
+        """After a run: a link card per approval request, config change and fork rebase it made (each is an item,
+        decided there), and the Back up now card for a backup request."""
         for found in run_meta.get("proposals") or []:
             if found.get("kind") == "backup":
                 self._turn_changed(self.store.append_turn(
@@ -781,19 +935,11 @@ class Assistant:
                          " runs until you tap Back up now.",
                     meta={"actions": ["backup"]}))  # fmt: skip
                 continue
-            text = (f"{clean_text(str(found['title']), 60)} {clean_text(str(found['from']), 40)} →"
-                    f" {clean_text(str(found['to']), 40)}. Nothing runs until you approve it on its item in Needs you"
-                    " on Home. You can also reject it there.")  # fmt: skip
-            self._turn_changed(self.store.append_turn(thread, role="system", status="proposal", text=text, now=now,
-                                                      meta={"entity_id": found["entity_id"],
-                                                            "actions": ["updates"]}))  # fmt: skip
+            self._link_card(thread, update_key(str(found["entity_id"]), str(found["to"])), "Approval requested", now)
+        for row in self.store.changes_of_runs([run_id]):
+            self._link_card(thread, f"change:{row['id']}", "Proposed change", now)
         for fork in run_meta.get("forks") or []:
-            text = (f"Rebase {fork['domain']} onto Home Assistant Core {fork['core']}, keeping {fork['kept']} of the"
-                    " fork's own changes. Nothing is written until you approve it on its item (Rebase onto Core) on"
-                    " Home; it then runs in the update window (or now) with a backup, a health check and automatic"
-                    " rollback. You can also reject it there.")  # fmt: skip
-            self._turn_changed(self.store.append_turn(thread, role="system", status="proposal", text=text, now=now,
-                                                      meta={"fork": fork["id"], "actions": ["updates"]}))  # fmt: skip
+            self._link_card(thread, f"fork:{fork['id']}", "Rebase onto Core", now)
         if run_meta.get("proposals") or run_meta.get("forks"):
             self.publish("updates", None, {})
 
@@ -819,9 +965,9 @@ class Assistant:
         self.audit("chat.turn", "agent", args={"role": "agent", "thread": turn.thread_id, "turn": turn.id},
                     outcome=status, detail=f"retry at {retry_at.isoformat() if retry_at else 'none'}")  # fmt: skip
         if card.meta["gave_up"]:
-            await self._push_unless_watching(turn.thread_id, agent_message(
-                "Message not answered", f"I could not answer your message: {card.text}", urgent=False,
-                budget_class=BudgetClass.USER, url=deep_link(turn.thread_id)), what="gave_up")  # fmt: skip
+            await self._push_unless_watching(turn.thread_id, self.item_message(
+                turn.thread_id, "Message not answered", f"I could not answer your message: {card.text}",
+                reply=False), what="gave_up")  # fmt: skip
 
     async def _failed(self, turn: Turn, status: str) -> None:
         now = datetime.now(UTC)
@@ -830,9 +976,8 @@ class Assistant:
             return
         self.audit("chat.turn", "agent", args={"role": "agent", "thread": turn.thread_id, "turn": turn.id},
                     outcome=status, detail="failed")  # fmt: skip
-        await self._push_unless_watching(turn.thread_id, agent_message(
-            "Reply failed", card.text, urgent=False, budget_class=BudgetClass.USER, tag_suffix=f"chat-{turn.thread_id}",
-            url=deep_link(turn.thread_id)), what="failed")  # fmt: skip
+        await self._push_unless_watching(turn.thread_id, self.item_message(
+            turn.thread_id, "Reply failed", card.text, reply=False), what="failed")  # fmt: skip
 
     async def _maybe_summarise(self, turn: Turn, principal: Principal, redactor: Redactor) -> None:
         """Condense a long thread before answering, so it can go on (a no-op for short threads)."""
@@ -931,12 +1076,28 @@ class Assistant:
             self.publish("updates", None, {})
 
     async def _end_investigation(
-        self, task: Task, card: Turn, state: str, step: int, of: int, *, detail: str = "", runs: list[str] | None = None
+        self,
+        task: Task,
+        card: Turn,
+        state: str,
+        step: int,
+        of: int,
+        *,
+        detail: str = "",
+        runs: list[str] | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> None:
         now = datetime.now(UTC)
-        self.store.finish_task(task.id, state, now=now)
+        # The runs (a plan's proposals are found by them), the plan and why it stopped stay on the task.
+        kept = dict(payload if payload is not None else task.payload)
+        if runs is not None:
+            kept["runs"] = runs
+        kept.pop("waiting", None)
+        if state == "failed":
+            kept["stopped"] = clean_text(detail, 300) or "it could not finish"
+        self.store.finish_task(task.id, state, now=now, payload=kept)
         if state == "cancelled":
-            self._void_requests(runs if runs is not None else _run_ids(task.payload), now)
+            self._void_requests(runs if runs is not None else _run_ids(kept), now)
         self._set_card(card, task, state, step, of, detail=detail)
         self.audit("task.investigate", "system", args={"task": task.id, "step": step}, outcome=state,
                    detail=detail[:200])  # fmt: skip
@@ -944,10 +1105,12 @@ class Assistant:
                   needs_admin=state == "failed", ref={"task": task.id})  # fmt: skip
         self.publish("tasks", None, {})
         if state == "failed" and task.thread_id:
-            await self._push_unless_watching(task.thread_id, agent_message(
-                f"Investigation stopped: {task.title}", detail or "It could not finish.", urgent=False,
-                budget_class=BudgetClass.USER, tag_suffix=f"chat-{task.thread_id}",
-                url=deep_link(task.thread_id)), what="investigation")  # fmt: skip
+            stopped = "The plan stopped" if task.payload.get("plan_fix") else f"Investigation stopped: {task.title}"
+            await self._push_unless_watching(
+                task.thread_id,
+                self.item_message(task.thread_id, stopped, detail or "It could not finish.", reply=False),
+                what="investigation",
+            )
 
     async def run_investigation(self, task: Task) -> None:
         """One step of an investigation; schedules the next while the result asks for one and steps remain."""
@@ -984,7 +1147,7 @@ class Assistant:
         now = datetime.now(UTC)
         payload["runs"] = [*_run_ids(payload), outcome.context.run_id][-MAX_RUN_IDS:]
         if self._cancel_requested(task.id) or run.status == "cancelled":
-            await self._end_investigation(task, card, "cancelled", done, of, runs=payload["runs"])
+            await self._end_investigation(task, card, "cancelled", done, of, payload=payload)
             return
         if run.status in BLOCKED_STATUSES or run.status == "skipped_busy":
             await self._investigation_blocked(task, card, payload, run.status, run.error, done, of, now)
@@ -992,7 +1155,7 @@ class Assistant:
         reply, summary, following = validate_investigation(run.structured) if run.status == "ok" else (None, "", None)
         if reply is None:
             why = "the step gave no findings" if run.status == "ok" else f"the step ended with {run.status}"
-            await self._end_investigation(task, card, "failed", done, of, detail=why)
+            await self._end_investigation(task, card, "failed", done, of, detail=why, payload=payload)
             return
         reply = redactor.redact(reply)
         run_meta = self._run_meta(outcome.context.run_id)
@@ -1000,10 +1163,13 @@ class Assistant:
                                           meta={"investigation": task.id, "step": step, "of": of,
                                                 "duration_s": round(run.duration_s, 1), **run_meta})  # fmt: skip
         self._turn_changed(findings)
-        self._proposal_cards(thread, run_meta, now)
+        if not task.payload.get("plan_fix"):
+            # A plan's proposals are decided on its finding; anything else the step made gets a link card.
+            self._link_cards(thread, outcome.context.run_id, run_meta, now)
         earlier = [str(f) for f in payload.get("findings") or [] if isinstance(f, str)]
         noted = clean_text(redactor.redact(summary or reply), FINDINGS_CHARS)
         payload |= {"step": step, "waits": 0, "findings": [*earlier, noted][-MAX_FINDINGS:]}
+        payload.pop("waiting", None)
         self.note("investigation", f"Investigation step {step} of {of}: {task.title}", summary, ref={"task": task.id})
         self.audit("task.investigate", _principal(task).label(), args={"task": task.id, "step": step,
                    "run": outcome.context.run_id}, outcome="step", detail=summary)  # fmt: skip
@@ -1013,12 +1179,20 @@ class Assistant:
             self._set_card(card, task, "next", step, of)
             self.wake()
             return
-        await self._end_investigation(task, card, "done", step, of)
+        if task.payload.get("plan_fix"):
+            # The last step's findings are the plan: the finding shows them under The agent says.
+            payload |= {"plan": clean_text(reply, PLAN_CHARS), "sources": list(run_meta.get("sources") or [])}
+        await self._end_investigation(task, card, "done", step, of, payload=payload)
         footer = sources_line(run_meta)
-        await self._push_unless_watching(thread, agent_message(
-            f"Investigation: {task.title}", f"{reply}\n\n{footer}" if footer else reply, urgent=False,
-            budget_class=BudgetClass.USER, tag_suffix=f"chat-{thread}", thread_id=thread, actions=(REPLY_ACTION,),
-            url=deep_link(thread)), what="investigation")  # fmt: skip
+        record = self.record_of(thread)
+        if task.payload.get("plan_fix") and record is not None and record.get("needs"):
+            # The finding now asks (a proposal waits for approval): the item book's push says so; one push per item.
+            return
+        title = f"Plan ready: {self._title(thread, '')}" if task.payload.get("plan_fix") else (
+            f"Investigation: {task.title}")  # fmt: skip
+        await self._push_unless_watching(
+            thread, self.item_message(thread, title, f"{reply}\n\n{footer}" if footer else reply), what="investigation"
+        )
 
     async def _investigation_blocked(  # noqa: PLR0917 - internal step of run_investigation
         self,
@@ -1038,11 +1212,13 @@ class Assistant:
         hint = self._reset_hint(reason, detail, now)
         at = max(hint or now + INVESTIGATION_RETRY, now + STEP_GAP)
         if waits >= MAX_INVESTIGATION_WAITS or at - now > INVESTIGATION_MAX_WAIT:
-            await self._end_investigation(task, card, "failed", done, of, detail=text)
+            await self._end_investigation(task, card, "failed", done, of, detail=text, payload=payload)
             return
         payload["waits"] = waits + 1
-        self.store.reschedule(task.id, next_fire_at=at, now=now, payload=payload)
         local = at.astimezone(self._tz()).strftime("%a %H:%M")
+        # Daemon words for the finding's state line while a plan waits.
+        payload["waiting"] = f"{text} Next try {local}."
+        self.store.reschedule(task.id, next_fire_at=at, now=now, payload=payload)
         self._set_card(card, task, "waiting", done, of, detail=f"{text} Next try {local}.")
         self.audit("task.investigate", "system", args={"task": task.id}, outcome="waiting", detail=status)
 
@@ -1074,7 +1250,7 @@ class Assistant:
 
     def _admin_turn(self, thread: str, turn_id: int) -> Turn | None:
         turn = self.store.get_turn(turn_id)
-        if turn is None or turn.thread_id != thread or turn.role != "admin":
+        if turn is None or turn.thread_id != thread or turn.role != "admin" or not self.writable(thread):
             return None
         return turn
 
@@ -1082,7 +1258,7 @@ class Assistant:
         """The admin's Retry: `queued`, `not_found`, `not_retryable`, `cap` or `busy`. Runs at most once."""
         now = datetime.now(UTC)
         turn = self._admin_turn(thread, turn_id)
-        if turn is None:
+        if turn is None or not self.writable(thread):
             return "not_found"
         if turn.status not in RETRYABLE:
             return "not_retryable"
@@ -1103,6 +1279,7 @@ class Assistant:
         queued = self.store.get_turn(turn.id) or turn
         self._turn_changed(queued)
         if self._enqueue_turn(queued):
+            self.sync_question(turn.thread_id)
             return "queued"
         busy = refusal_card("busy", "", now=now, tz=self._tz())
         self._write_card(queued, "failed", busy.status, busy.text, busy.meta, now, expect=("queued",))
@@ -1157,7 +1334,13 @@ class Assistant:
         self.store.finish_task(task.id, "done", now=now)
         turn_id = task.payload.get("turn_id")
         turn = self.store.get_turn(turn_id) if isinstance(turn_id, int) else None
-        if turn is None or turn.status != "refused" or turn.meta.get("auto_retry_off"):
+        # The earlier one chat is read only: a retry left scheduled there never runs.
+        if (
+            turn is None
+            or turn.status != "refused"
+            or turn.meta.get("auto_retry_off")
+            or not self.writable(turn.thread_id)
+        ):
             self.audit("chat.retry", "system", args={"task": task.id, "turn": turn_id}, outcome="skipped")
             return
         retries = int(turn.meta.get("retries") or 0) + 1
@@ -1171,11 +1354,22 @@ class Assistant:
                                                                      "actions": []}))  # fmt: skip
         queued = self.store.get_turn(turn.id) or turn
         self._turn_changed(queued)
+        self.sync_question(turn.thread_id)
         if not self._enqueue_turn(queued):
             # Put it back and try again later; the attempt is not consumed.
             self.store.set_turn_status(turn.id, "refused", expect=("queued",), meta={"retries": retries - 1})
             self.store.schedule_retry(turn.id, at=now + RETRY_QUEUE_FULL, attempt=retries, thread_id=turn.thread_id,
                                       now=now)  # fmt: skip
+
+    def keep_earlier(self) -> None:
+        """At start: the one chat of earlier versions becomes one read-only History item (written once)."""
+        try:
+            if self.items is None or not self.store.chat_id():
+                return
+            turns, first, last = self.store.legacy_turns()
+            self.items.earlier(turns=turns, first=first, last=last)
+        except (StoreError, sqlite3.Error) as err:
+            _LOGGER.warning("earlier conversation not kept as an item", extra={"error": str(err)[:200]})
 
     def recover(self, now: datetime) -> int:
         """At start: turns a restart caught queued or running get an `interrupted` card (retry by hand)."""

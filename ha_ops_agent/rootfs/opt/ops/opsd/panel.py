@@ -73,8 +73,10 @@ PRESENCE_BURST = 4
 PRESENCE_PER_S = 1.0
 MAX_CHAT_CHARS = 2000
 
-THREAD_RE = re.compile(r"[0-9a-f]{16}")
-# The shell is served at the panel root and at deep links: a chat thread, an item (`t/<item id>`, from its push).
+# An item id, the only handle a client gives for a conversation (`?item=`, presence); the thread is the daemon's.
+ITEM_RE = re.compile(r"[a-z]-[0-9a-z]{1,40}")
+# The shell is served at the panel root and at deep links: an item (`t/<item id>`, from its push), and the old chat
+# link (`t/<16 hex>`) of pushes sent before 0.22.0, which opens Home.
 _SHELL_RE = re.compile(r"/(?:t/([0-9a-f]{16}|[a-z]-[0-9a-z]{1,40})/?|updates/?)?")
 _PART_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _SCRIPT_RE = re.compile(r"[a-z]{1,32}\.js")
@@ -123,7 +125,7 @@ class PanelApi(Protocol):
         self, method: str, parts: tuple[str, ...], query: Mapping[str, str], body: dict[str, Any] | None, user: str
     ) -> tuple[int, dict[str, Any]]: ...
 
-    def thread_exists(self, thread_id: str) -> bool: ...
+    def thread_for(self, ident: str) -> str | None: ...
 
 
 class RateLimiter:
@@ -405,11 +407,13 @@ class PanelServer:
     # --------------------------------------------------------------- live
 
     def _thread_param(self, request: Request) -> str | None:
-        thread = request.query.get("thread")
-        if thread is None or thread == "":
+        """`?item=<id>`: that item's conversation events as well as the global ones."""
+        ident = request.query.get("item")
+        if ident is None or ident == "":
             return None
-        if not THREAD_RE.fullmatch(thread) or not self._api.thread_exists(thread):
-            raise HttpError(404, "no_such_thread")
+        thread = self._api.thread_for(ident) if ITEM_RE.fullmatch(ident) else None
+        if thread is None:
+            raise HttpError(404, "no_such_item")
         return thread
 
     @staticmethod
@@ -421,12 +425,13 @@ class PanelServer:
         return int(value)
 
     def _presence_post(self, body: dict[str, Any]) -> Response:
-        thread = body.get("thread")
+        ident = body.get("item")
         visible = body.get("visible")
-        if not isinstance(thread, str) or not THREAD_RE.fullmatch(thread) or not isinstance(visible, bool):
+        if not isinstance(ident, str) or not ITEM_RE.fullmatch(ident) or not isinstance(visible, bool):
             raise HttpError(400, "bad_presence")
-        if not self._api.thread_exists(thread):
-            raise HttpError(404, "no_such_thread")
+        thread = self._api.thread_for(ident)
+        if thread is None:
+            raise HttpError(404, "no_such_item")
         if not self._presence.allow():
             raise HttpError(429, "slow_down")
         self._hub.touch(thread, visible=visible)

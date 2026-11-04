@@ -1,12 +1,12 @@
 "use strict";
-/* History, the System sheet and the chat views.
+/* History, Ask, the System sheet and the conversation on an item.
    Loaded by index.html under its nonce. Everything from the API is rendered as text nodes, never parsed as HTML. */
 (() => {
 const P = window.opsPanel;
 const { h, btn, api, toast, S, go, row, section } = P;
 
 /* ---------------------------------------------------------------- History: one row per item, by day, quiet folds */
-const FILTERS = [["all", "All"], ["needs", "Needs you"], ["changes", "Changes"], ["checks", "Checks"]];
+const FILTERS = [["all", "All"], ["needs", "Needs you"], ["changes", "Changes"], ["questions", "Questions"], ["checks", "Checks"]];
 let asked = false;
 function history(selected) {
   const hs = S.hist, f = hs ? hs.filter : S.arg || "all", n = hs ? hs.counts.needs : 0;
@@ -16,7 +16,7 @@ function history(selected) {
   if (!hs) return [seg, h("p", { class: "empty", text: "Loading…" })];
   if (!hs.items.length) {
     return [seg, h("div", { class: "calm" }, h("div", null, h("h2", { text: "Nothing yet" }),
-      h("p", { text: f === "all" ? "What the agent does appears here, one line per item." : "Nothing in this filter." }),
+      h("p", { text: f === "all" ? "What the agent does appears here, one line per item." : f === "questions" ? "Your questions appear here with their answers." : "Nothing in this filter." }),
       f === "all" ? h("div", { class: "btns" }, btn("Run a health check", runCheck)) : null))];
   }
   const z = P.tz(), days = [];
@@ -162,114 +162,127 @@ async function toggleUpdates(ev) {
   else { toast(r.data.message || "Could not change automatic updates."); ev.target.checked = !on; }
 }
 
-/* ---------------------------------------------------------------- Chat: the one conversation (state and live
-   updates stay in index.html; this renders it). Model text goes through rich(): text nodes only. */
+/* ---------------------------------------------------------------- Ask: the questions, newest first, and the one place to start one */
 const { els } = P;
 const MAX = 2000, WARN_AT = 1800;
+const RULE = "Something on Home? Open the item and ask there instead; the answer stays with it.";
+function ask(selected) {
+  const qs = S.asks, list = !qs ? [h("p", { class: "empty", text: "Loading…" })]
+    : !qs.length ? [h("div", { class: "calm q" }, h("span", { class: "g" }, P.icon("chat")), h("div", null, h("h2", { text: "Ask anything" }),
+      h("p", { text: "For anything on Home, open the item and ask there; the answer stays with it. This is for the rest: the house, the agent, what to do next. Each question keeps its own answer and follow-ups." })))]
+    : [section("Your questions", null, qs.map((q) => P.row(q, q.id === selected))), h("p", { class: "empty", text: RULE })];
+  return [...list, h("div", { class: "askc" }, composer(null))];
+}
+
+/* ---------------------------------------------------------------- the conversation on an item (state and live updates stay in
+   index.html; this renders it). Model text goes through rich(): text nodes only. */
 const CARD = {
   ai_disabled: ["AI is off", "power"], share_cap: ["Run-time budget used for this window", "clock"],
   run_cap_reached: ["Run limit reached", "clock"], usage_limited: ["AI usage limit", "clock"],
   account_busy: ["Subscription busy", "clock"], skipped_busy: ["Agent busy", "clock"],
-  chat_cap: ["Chat limit reached", "clock"], busy: ["Not sent", "alert"], interrupted: ["Interrupted", "alert"], error: ["Run failed", "alert"],
+  chat_cap: ["Message limit reached", "clock"], busy: ["Not sent", "alert"], interrupted: ["Interrupted", "alert"], error: ["Run failed", "alert"],
   investigation: ["Investigation", "search"], share_reserve: ["Saving budget for monitoring", "clock"], cost_cap: ["Daily cost cap reached", "clock"],
-  proposal: ["Approval requested", "alert"],
+  proposal: ["Back up now?", "alert"],
 };
-function chat(content, banners) {
-  let v = els.thread;
-  if (!v || v.id !== S.thread || !v.root.isConnected) {
-    const log = h("div", { class: "log" });
-    v = els.thread = { id: S.thread, log, root: log, comp: S.thread ? composer() : null, scrollDown: true };
-    content.replaceChildren(...banners(), log, v.comp ? v.comp.el : h("p", { class: "empty", text: "Loading the chat…" }));
-  }
-  const body = v.log, nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
-  const chat = h("div", { class: "chat", role: "log", "aria-label": "Conversation" });
-  if (S.more) chat.append(btn("Load earlier", () => P.loadThread(S.turns.find((t) => typeof t.id === "number").id), "text"));
+function convo(t) {
+  const c = S.conv, q = t.kind === "question";
+  if (!c.loaded) return h("div", { class: "thread" }, h("p", { class: "empty", text: "Loading the conversation…" }));
+  const log = h("div", { class: "msgs", role: "log", "aria-label": q ? "Conversation" : "About this item", "aria-live": "polite" });
+  if (c.more) log.append(btn("Load earlier", () => P.loadConv(c.turns.find((x) => typeof x.id === "number").id), "text"));
   let day = "";
-  for (const t of S.turns) {
-    const iso = t.at || new Date().toISOString(), k = P.dayKey(iso, P.tz());
-    if (k !== day) { day = k; chat.append(h("div", { class: "daysep", text: P.dayLabel(iso, P.tz()) })); }
-    chat.append(...turnEls(t)); /* turnEls never returns null: append(null) would render the text "null" */
+  for (const turn of c.turns) {
+    const iso = turn.at || new Date().toISOString(), k = P.dayKey(iso, P.tz());
+    if (k !== day && c.turns.length > 1) { day = k; log.append(h("div", { class: "daysep", text: P.dayLabel(iso, P.tz()) })); }
+    log.append(...turnEls(turn)); /* turnEls never returns null: append(null) would render the text "null" */
   }
-  if (S.inflight) chat.append(working());
-  body.replaceChildren(chat);
-  if (v.comp) v.comp.sync();
-  if (nearBottom || v.scrollDown || els.scrollDown) { body.scrollTop = body.scrollHeight; v.scrollDown = false; els.scrollDown = false; }
+  if (c.inflight) log.append(working());
+  const has = c.turns.length || c.inflight;
+  return h("section", { class: "thread", "aria-label": q ? "Conversation" : "About this item" },
+    has ? h("h3", { text: q ? "Conversation" : "About this item" }) : null, has ? log : null,
+    c.failed ? h("p", { class: "ro", role: "alert", text: "The conversation could not be loaded; retrying when the daemon answers." }) : null,
+    c.readOnly ? h("p", { class: "ro", text: "The one chat of earlier versions, kept read only. Ask something new on Ask." })
+      : h("div", { class: "dock" }, composer(t)));
 }
-async function remember(t) {
+async function remember(turn) {
   S.menuFor = null;
-  const text = prompt("Remember as a house fact (edit it first; it is proposed as a change you approve):", t.text.slice(0, 500));
-  if (text === null) { P.render(); return; }
-  const r = await api("POST", `api/threads/${t.thread}/remember`, { turn_id: t.id, text: text.slice(0, 500) });
+  const text = prompt("Remember as a house fact (edit it first; it is proposed as a change you approve):", turn.text.slice(0, 500));
+  if (text === null || !S.conv) { P.render(); return; }
+  const r = await api("POST", P.itemUrl(S.conv.item, "/remember"), { turn_id: turn.id, text: text.slice(0, 500) });
   toast(r.status === 201 ? "Proposed. It appears on Home under Needs you." : r.data.message || "Could not save it.");
   P.loadHome();
 }
-function turnMenu(t) {
-  const open = S.menuFor === t.id;
-  return [h("button", { "aria-label": "Message options", "aria-expanded": String(open), onclick: () => { S.menuFor = open ? null : t.id; P.render(); } }, "···"),
-    open ? h("div", { class: `btns meta ${t.role === "admin" ? "r" : "l"}` },
-      btn("Copy", () => copy(t.text), "text"),
-      typeof t.id === "number" ? btn("Remember this", () => remember(t), "text") : null,
-      t.run_id ? h("span", { text: `Run ${t.run_id}` }) : null) : null];
+function turnMenu(turn) {
+  const open = S.menuFor === turn.id;
+  return [h("button", { "aria-label": "Message options", "aria-expanded": String(open), onclick: () => { S.menuFor = open ? null : turn.id; P.render(); } }, "···"),
+    open ? h("div", { class: `btns meta ${turn.role === "admin" ? "r" : "l"}` },
+      btn("Copy", () => copy(turn.text), "text"),
+      typeof turn.id === "number" && !(S.conv || {}).readOnly ? btn("Remember this", () => remember(turn), "text") : null,
+      turn.run_id ? h("span", { text: `Run ${turn.run_id}` }) : null) : null];
 }
-function turnEls(t) {
-  return turnParts(t).filter((el) => el !== null && el !== undefined && el !== false);
+function turnEls(turn) {
+  return turnParts(turn).filter((el) => el !== null && el !== undefined && el !== false);
 }
-const hasText = (t) => typeof t.text === "string" && t.text.trim() !== "";
-function turnParts(t) {
-  if (!hasText(t)) return [];
-  const at = t.at ? P.hhmm(t.at, P.tz()) : "";
-  if (t.role === "admin") {
-    const out = [h("div", { class: `msg me ${t.status === "sending" ? "sending" : ""}`, text: t.text })];
-    const st = { sending: "Sending…", queued: "Sent", running: "Sent", ok: "Sent", refused: "Sent", failed: "Not answered" }[t.status] || "";
-    const [mb, menu] = turnMenu(t);
-    out.push(h("div", { class: "meta r" }, [at, st, t.meta && t.meta.via ? "via notification" : "",
-      t.meta && t.meta.item_title ? `about: ${t.meta.item_title}` : ""].filter(Boolean).join(" · "), mb), menu);
-    if (t.status === "unsent") out.push(h("button", { class: "fail", onclick: () => resend(t) }, "Not sent: tap to retry"));
+const hasText = (turn) => typeof turn.text === "string" && turn.text.trim() !== "";
+function turnParts(turn) {
+  if (!hasText(turn)) return [];
+  const at = turn.at ? P.hhmm(turn.at, P.tz()) : "";
+  if (turn.role === "admin") {
+    const out = [h("div", { class: `msg me ${turn.status === "sending" ? "sending" : ""}`, text: turn.text })];
+    const st = { sending: "Sending…", queued: "Sent", running: "Sent", ok: "Sent", refused: "Sent", failed: "Not answered" }[turn.status] || "";
+    const [mb, menu] = turnMenu(turn);
+    out.push(h("div", { class: "meta r" }, [at, st, turn.meta && turn.meta.via ? "via notification" : ""].filter(Boolean).join(" · "), mb), menu);
+    if (turn.status === "unsent") out.push(h("button", { class: "fail", onclick: () => resend(turn) }, "Not sent: tap to retry"));
     return out;
   }
-  if (t.role === "agent") {
-    const m = t.meta || {};
+  if (turn.role === "agent") {
+    const m = turn.meta || {};
     const bits = [at, m.duration_s ? `${Math.round(m.duration_s)} s` : "", m.push === "skipped_watching" ? "no push (you were here)" : "",
       m.refused && `Refused: ${m.refused.join(", ")}`].filter(Boolean);
-    const [mb, menu] = turnMenu(t);
-    return [h("div", { class: "msg ag" }, h("div", { class: "tag" }, P.icon("spark"), "Agent"), P.rich(t.text),
+    const [mb, menu] = turnMenu(turn);
+    return [h("div", { class: "msg ag" }, h("div", { class: "tag" }, P.icon("spark"), "Agent"), P.rich(turn.text),
       m.sources && m.sources.length ? h("div", { class: "src", text: `Sources: ${m.sources.join(", ")}` }) : null),
     h("div", { class: "meta l" }, bits.join(" · "), mb), menu];
   }
-  if (t.status === "summary") {
-    return [h("details", { class: "ctx" }, h("summary", { text: `Earlier messages summarised (${(t.meta || {}).turns || "?"} turns)` }), h("div", { text: t.text }))];
+  if (turn.status === "summary") {
+    return [h("details", { class: "ctx" }, h("summary", { text: `Earlier messages summarised (${(turn.meta || {}).turns || "?"} turns)` }), h("div", { text: turn.text }))];
   }
-  return [card(t)];
+  if (turn.status === "link") return [link(turn)];
+  return [card(turn)];
 }
-function card(t) {
-  const m = t.meta || {}, [title, ic] = CARD[t.status] || ["Notice", "alert"];
-  const err = ["error", "busy", "interrupted"].includes(t.status);
-  const acts = m.resolved ? [] : (m.actions || []);
+/* What a run started or proposed is an item of its own: the card opens it, it never acts. */
+function link(turn) {
+  const id = (turn.meta || {}).item, cur = S.items[id];
+  return h("button", { class: "link", onclick: () => P.open(id) }, h("span", { class: "g q" }, P.icon("doc")),
+    h("span", { class: "t" }, h("b", { text: turn.text }), cur ? h("span", { text: cur.gist ? `${cur.state} · ${cur.gist}` : cur.state }) : null), P.icon("chev"));
+}
+function card(turn) {
+  const m = turn.meta || {}, [title, ic] = CARD[turn.status] || ["Notice", "alert"];
+  const err = ["error", "busy", "interrupted"].includes(turn.status);
+  const acts = m.resolved || (S.conv || {}).readOnly ? [] : (m.actions || []);
   const btns = [];
-  const turn = t.reply_to;
-  if (acts.includes("turn_on_retry")) btns.push(btn("Turn AI on & retry", () => turnOnAndRetry(turn), "fill"));
-  if (acts.includes("updates")) btns.push(btn("Review on Home", () => go("#home"), "fill"));
+  const ref = turn.reply_to;
+  if (acts.includes("turn_on_retry")) btns.push(btn("Turn AI on & retry", () => turnOnAndRetry(ref), "fill"));
   if (acts.includes("backup")) btns.push(btn("Back up now", async () => {
     const r = await api("POST", "api/backups/now", {});
     toast(r.status === 200 ? "Backing up… The result appears on Home." : r.data.message || "Not possible now.");
   }, "fill"));
-  if (acts.includes("cancel")) btns.push(btn("Cancel", () => api("POST", `api/threads/${S.thread}/cancel`, { task_id: m.task })));
-  if (acts.includes("retry")) btns.push(h("button", { class: `btn ${acts.includes("turn_on_retry") ? "" : "fill"}`, onclick: () => retry(turn) }, "Retry now"));
+  if (acts.includes("cancel")) btns.push(btn("Stop", () => api("POST", P.itemUrl(S.conv.item, "/cancel"), { task_id: m.task }), "danger"));
+  if (acts.includes("retry")) btns.push(h("button", { class: `btn ${acts.includes("turn_on_retry") ? "" : "fill"}`, onclick: () => retry(ref) }, "Retry now"));
   let auto = null;
   if (acts.includes("cancel_auto") || acts.includes("enable_auto")) {
-    const sw = h("input", { type: "checkbox", class: "sw", role: "switch", "aria-label": "Retry automatically", onchange: (e) => autoRetry(turn, e.target.checked) });
+    const sw = h("input", { type: "checkbox", class: "sw", role: "switch", "aria-label": "Retry automatically", onchange: (e) => autoRetry(ref, e.target.checked) });
     sw.checked = !!m.auto_retry;
     auto = h("label", { class: "auto" }, "Auto-retry", sw);
   }
-  return h("div", { class: `ccard ${t.status} ${err ? "err" : ""} ${m.resolved || m.done ? "done" : ""}`, role: "status" },
+  return h("div", { class: `ccard ${turn.status} ${err ? "err" : ""} ${m.resolved || m.done ? "done" : ""}`, role: "status" },
     h("div", { class: "k" }, P.icon(ic), title),
-    h("p", { text: t.text }),
+    h("p", { text: turn.text }),
     m.resolved ? h("p", { class: "src", text: "Answered after a retry." }) : m.retrying ? h("p", { class: "src", text: "Retrying…" }) : null,
     btns.length || auto ? h("div", { class: "btns" }, btns, auto) : null);
 }
-const WAIT = { triage: "the health check", chat: "another chat", followup: "a follow-up", summary: "a summary", investigate: "an investigation" };
+const WAIT = { triage: "the health check", chat: "another conversation", followup: "a follow-up", summary: "a summary", investigate: "an investigation", maintenance_plan: "the maintenance plan" };
 function working() {
-  const f = S.inflight, started = f.started_at ? new Date(f.started_at) : new Date();
+  const f = S.conv.inflight, started = f.started_at ? new Date(f.started_at) : new Date();
   let label = "Working";
   if (f.state === "queued") label = f.waiting_for ? `Queued: waiting for ${WAIT[f.waiting_for] || "another run"}` : `Queued${f.position > 1 ? ` (#${f.position})` : ""}`;
   else if (f.state === "waiting") label = `Waiting for ${WAIT[f.waiting_for] || "another run"} to finish`;
@@ -277,7 +290,7 @@ function working() {
   if (label !== els.lastLabel) { els.lastLabel = label; P.announce(label); }
   const time = h("time", { text: P.clock((Date.now() - started) / 1000) });
   els.timer = { el: time, started };
-  const steps = (f.steps || []).map((s, i, a) => h("li", { class: i === a.length - 1 ? "now" : "", text: s }));
+  const steps = (f.steps || []).map((x, i, a) => h("li", { class: i === a.length - 1 ? "now" : "", text: x }));
   const slow = Date.now() - started > 90000;
   return h("div", { class: "working", "aria-label": label },
     h("div", { class: "dots", "aria-hidden": "true" }, h("i"), h("i"), h("i")),
@@ -285,77 +298,83 @@ function working() {
     steps.length ? h("ul", { class: "steps" }, steps) : null,
     slow ? h("div", { class: "src", text: "Taking longer than usual. You'll get a push if you leave." }) : null);
 }
-function composer() {
-  const id = S.thread;
-  const ta = h("textarea", { rows: "1", "aria-label": "Message the agent", placeholder: "Message the agent", maxlength: String(MAX + 200) });
-  ta.value = S.drafts[id] || "";
-  const count = h("div", { class: "count" });
+/* One box per conversation (`t`), or Ask's (`null`): a real labelled textarea, its draft kept for this tab only. */
+function composer(t) {
+  const key = t ? `i:${t.id}` : "ask", label = !t ? "Ask about the house or the agent" : t.kind === "question" ? "Ask a follow-up" : "Ask about this item";
+  const ta = h("textarea", { rows: "1", "aria-label": label, placeholder: label, maxlength: String(MAX + 200) });
+  ta.value = S.drafts[key] || "";
+  const count = h("div", { class: "count", "aria-live": "polite" });
   const send = h("button", { class: "send", "aria-label": "Send" }, P.icon("send"));
+  const busy = () => !!t && !!S.conv && (!!S.conv.inflight || S.conv.turns.some((x) => x.role === "admin" && ["sending", "queued", "running"].includes(x.status)));
   const sync = () => {
-    const busy = !!S.inflight || S.turns.some((t) => t.role === "admin" && ["sending", "queued", "running"].includes(t.status));
-    S.drafts[id] = ta.value; P.saveDrafts();
+    S.drafts[key] = ta.value; P.saveDrafts();
     ta.style.height = "auto"; ta.style.height = `${Math.min(160, ta.scrollHeight)}px`;
-    const n = ta.value.length;
+    const n = ta.value.length, wait = busy();
     count.textContent = n >= WARN_AT ? `${n} / ${MAX}` : "";
     count.className = `count ${n > MAX ? "over" : ""}`;
-    send.disabled = busy || !ta.value.trim() || n > MAX;
-    send.setAttribute("aria-label", busy ? "Send (waiting for the answer)" : "Send");
+    send.disabled = wait || !ta.value.trim() || n > MAX;
+    send.setAttribute("aria-label", wait ? "Send (waiting for the answer)" : "Send");
   };
+  const fire = () => (t ? submit(ta, key) : askNew(ta));
   ta.addEventListener("input", sync);
   ta.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && matchMedia("(pointer:fine)").matches) { e.preventDefault(); if (!send.disabled) submit(ta); }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && matchMedia("(pointer:fine)").matches) { e.preventDefault(); if (!send.disabled) fire(); }
   });
-  send.addEventListener("click", () => submit(ta));
-  els.composer = ta;
-  // The item "Ask the agent" attached: shown above the box until the message is sent or the admin drops it.
-  const about = S.askItem ? h("div", { class: "about" }, h("span", { text: `About: ${S.askItem.title}` }),
-    h("button", { class: "x", "aria-label": "Ask without the item", onclick: () => { S.askItem = null; P.render(); } }, "×")) : null;
-  return { el: h("div", null, about, count, h("div", { class: "composer" }, ta, send)), sync, ta };
+  send.addEventListener("click", fire);
+  sync();
+  return h("div", null, count, h("div", { class: "composer" }, ta, send));
 }
 function clientId() {
   const b = new Uint8Array(12); crypto.getRandomValues(b);
   return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }
-async function submit(ta) {
+/* Ask: the question becomes an item, and its page opens at once to watch the answer arrive there. */
+async function askNew(ta) {
   const text = ta.value.trim();
-  if (!text || text.length > MAX || !S.thread) return;
-  const item = S.askItem;
-  const turn = { id: null, client_id: clientId(), thread: S.thread, role: "admin", text, status: "sending", at: new Date().toISOString(),
-    meta: item ? { item: item.id, item_title: item.title } : {} };
-  S.drafts[S.thread] = ""; P.saveDrafts(); ta.value = ""; S.askItem = null;
-  S.turns.push(turn); els.scrollDown = true; P.render();
-  await deliver(turn);
-  if (els.composer) els.composer.focus();
+  if (!text || text.length > MAX || els.asking) return;
+  els.asking = true;
+  const body = { text, client_id: clientId() };
+  const r = await api("POST", "api/ask", body);
+  els.asking = false;
+  if (!r.data.item || r.status >= 400) { toast(r.data.message || "Not sent: try again."); return; }
+  S.drafts.ask = ""; P.saveDrafts(); ta.value = "";
+  const it = r.data.item;
+  P.put(it);
+  S.conv = { item: it.id, thread: r.data.turn ? r.data.turn.thread : null, turns: r.data.turn ? [r.data.turn] : [], more: false, loaded: true, readOnly: false, info: null,
+    inflight: r.status === 202 ? { turn_id: r.data.turn.id, state: "queued", position: r.data.position, steps: [], started_at: new Date().toISOString() } : null };
+  S.asks = [it, ...(S.asks || []).filter((x) => x.id !== it.id)];
+  S.from = "ask";
+  P.open(it.id);
 }
-async function deliver(turn) {
-  const body = { text: turn.text, client_id: turn.client_id };
-  if (turn.meta && turn.meta.item) body.item = turn.meta.item;
-  const r = await api("POST", `api/threads/${turn.thread}/messages`, body);
-  if (r.data.turn) { Object.assign(turn, r.data.turn); }
+async function submit(ta, key) {
+  const text = ta.value.trim(), c = S.conv;
+  if (!text || text.length > MAX || !c || c.readOnly) return;
+  const turn = { id: null, client_id: clientId(), thread: c.thread, role: "admin", text, status: "sending", at: new Date().toISOString(), meta: {} };
+  S.drafts[key] = ""; P.saveDrafts(); ta.value = "";
+  c.turns.push(turn); els.scrollDown = true; P.render();
+  await deliver(turn, c);
+}
+async function deliver(turn, c) {
+  const r = await api("POST", P.itemUrl(c.item, "/messages"), { text: turn.text, client_id: turn.client_id });
+  if (r.data.turn) Object.assign(turn, r.data.turn);
   if (r.status === 202 || r.status === 200) {
-    if (r.status === 202) S.inflight = S.inflight || { turn_id: turn.id, state: "queued", position: r.data.position, steps: [], started_at: new Date().toISOString() };
-  } else if (r.status === 409) {
-    S.turns = S.turns.filter((t) => t !== turn); restoreDraft(turn); toast(r.data.message || "Wait for the answer first.");
-  } else if (r.status === 413 || r.status === 400) {
-    S.turns = S.turns.filter((t) => t !== turn); restoreDraft(turn); toast(r.data.message || "That message cannot be sent.");
+    if (r.status === 202) c.inflight = c.inflight || { turn_id: turn.id, state: "queued", position: r.data.position, steps: [], started_at: new Date().toISOString() };
+  } else if (r.status === 409 || r.status === 413 || r.status === 400 || r.status === 404) {
+    c.turns = c.turns.filter((x) => x !== turn); S.drafts[`i:${c.item}`] = turn.text; P.saveDrafts();
+    toast(r.data.message || "That message cannot be sent.");
   } else if (r.status !== 503) {
     turn.status = "unsent";
   }
   P.render();
 }
-function restoreDraft(turn) {
-  S.drafts[turn.thread] = turn.text; P.saveDrafts();
-  if (turn.meta && turn.meta.item) S.askItem = { id: turn.meta.item, title: turn.meta.item_title || "" };
-  if (els.thread && els.thread.id === turn.thread && els.thread.comp && !els.thread.comp.ta.value) els.thread.comp.ta.value = turn.text;
-}
-function resend(turn) { turn.status = "sending"; P.render(); deliver(turn); }
+function resend(turn) { turn.status = "sending"; P.render(); deliver(turn, S.conv); }
 async function retry(turnId) {
-  const r = await api("POST", `api/threads/${S.thread}/retry`, { turn_id: turnId });
+  const r = await api("POST", P.itemUrl(S.conv.item, "/retry"), { turn_id: turnId });
   if (r.status !== 202) toast({ cap: "Too many retries today.", not_retryable: "Already answered or retrying.", busy: "The agent is busy; try again shortly." }[r.data.error] || "Could not retry.");
 }
 async function autoRetry(turnId, on) {
-  const r = await api("POST", `api/threads/${S.thread}/autoretry`, { turn_id: turnId, on });
-  if (r.status !== 200) { toast("Automatic retry is not possible any more."); P.loadThread(); }
+  const r = await api("POST", P.itemUrl(S.conv.item, "/autoretry"), { turn_id: turnId, on });
+  if (r.status !== 200) { toast("Automatic retry is not possible any more."); P.loadConv(); }
 }
 async function turnOnAndRetry(turnId) {
   const r = await api("POST", "api/ai", { on: true });
@@ -367,5 +386,5 @@ function copy(text) {
   S.menuFor = null; P.render();
 }
 
-window.opsViews = { history, system, chat, card, turnEls };
+window.opsViews = { history, system, ask, convo, card, turnEls };
 })();

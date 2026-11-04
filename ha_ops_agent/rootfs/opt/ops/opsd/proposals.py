@@ -110,15 +110,15 @@ def settle_backup(store: Store, *, now: datetime, detail: str) -> int:
 def _request_backup(store: Store, run: RunContext, now: datetime) -> str:
     open_now = refresh(store, now=now)
     if any(p["entity_id"] == BACKUP_PROPOSAL for p in open_now):
-        return "ok: already asked the admin to back up now; the button is waiting in the chat"
+        return "ok: already asked the admin to back up now; the button is waiting in the conversation"
     if len(open_now) >= MAX_OPEN:
         raise CapabilityError(f"{MAX_OPEN} approval requests are already waiting for the admin")
     store.create_proposal(entity_id=BACKUP_PROPOSAL, from_version="", to_version="", plan_run=0, title=BACKUP_TITLE,
                           thread_id=run.thread_id, run_id=run.run_id, requested_by=run.principal.label(), now=now,
                           expires_at=now + PROPOSAL_TTL)  # fmt: skip
     return (
-        "ok: asked the admin to back up now. Nothing runs until the admin taps Back up now (in the chat or in System,"
-        " the gear). Tell them that."
+        "ok: asked the admin to back up now. Nothing runs until the admin taps Back up now (in the conversation or in"
+        " System, the gear). Tell them that."
     )
 
 

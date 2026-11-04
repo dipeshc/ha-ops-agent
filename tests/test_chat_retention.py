@@ -1,4 +1,4 @@
-"""The main chat and earlier conversations are never pruned,
+"""An item's conversation goes with its item (the earlier one chat is never pruned),
 summaries have no capabilities, and purged threads leave the live replay buffer."""
 
 from collections.abc import Iterator
@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import FakeHA
+from tests.conftest import FakeHA, conversation
 from tests.test_chat_ux import setup
 from tests.test_daemon import Harness
 
@@ -23,13 +23,19 @@ def h(paths: Any, fake_ha: FakeHA, monkeypatch: pytest.MonkeyPatch, meminfo: Pat
         daemon.close()
 
 
-def test_the_main_chat_is_never_pruned(h: Harness) -> None:
+def test_a_conversation_goes_with_its_item(h: Harness) -> None:
     _d, a, store, _, _ = setup(h)
-    main = a.main_thread()
-    store.append_turn(main, role="admin", text="an old question", now=OLD)
+    thread = conversation(a)
+    store.append_turn(thread, role="admin", text="an old question", now=OLD)
     store.prune(now=datetime.now(UTC))
-    assert store.get_thread(main) is not None
-    assert [t.text for t in store.turns_page(main)] == ["an old question"]
+    # The question is resolved for 40 days only: it and its conversation stay.
+    assert store.get_thread(thread) is not None
+    assert [t.text for t in store.turns_page(thread)] == ["an old question"]
+    later = datetime.now(UTC) + timedelta(days=120)
+    store.prune(now=later)
+    # Its item resolved more than 90 days ago is gone, and its turns with it.
+    assert store.get_thread(thread) is None
+    assert store._all("SELECT id FROM turns") == []
 
 
 def test_summary_run_still_has_no_capabilities() -> None:

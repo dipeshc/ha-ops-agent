@@ -20,11 +20,11 @@ from opsd import __version__, diagnostics, proposals
 from opsd.approvals import LIVE, ApprovalError, approvable
 from opsd.changes import ChangeRefused, propose_fact
 from opsd.conversation import CHAT_TURNS_PER_DAY
-from opsd.items import ACTION_RE, ITEM_ID_RE, REMIND, ItemBook
-from opsd.panel import MAX_CHAT_CHARS, THREAD_RE
+from opsd.items import ACTION_RE, ITEM_ID_RE, REMIND, ItemBook, thread_of
+from opsd.panel import MAX_CHAT_CHARS
 from opsd.policy import Origin, same_version
 from opsd.runctx import Principal
-from opsd.store import MAX_FACT_CHARS, Store, StoreError
+from opsd.store import EARLIER_KEY, MAX_FACT_CHARS, QUESTION_PREFIX, Store, StoreError
 
 if TYPE_CHECKING:
     from opsd.assistant import Assistant
@@ -39,9 +39,16 @@ HISTORY_FILTERS: dict[str, tuple[str, ...] | None] = {
     "needs": None,
     "changes": ("proposal", "update", "reload"),
     "checks": ("check", "backup"),
+    "questions": None,
 }
+# The Questions filter: the questions the admin asked, and the earlier one chat.
+QUESTION_KEYS = (QUESTION_PREFIX, EARLIER_KEY)
 USER_ACK_DAYS = {"snooze": 7, "accept": 30}
+# What a finding offers for the proposal its plan made (`items.Composer._linked`).
+_LINKED_ACTIONS = frozenset({"approve_rebase", "approve_rebase_now", "apply", "revert", "reject"})
 _CLIENT_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
+# What a conversation takes, under `api/items/<id>/<verb>`.
+_CONVERSATION_POSTS = frozenset({"messages", "retry", "autoretry", "read", "cancel", "remember"})
 _DIGITS_RE = re.compile(r"[0-9]{1,12}")
 _CONTROL_KEEP_NL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 MAX_FACTS_PER_DAY = 50
@@ -101,16 +108,31 @@ class PanelHandlers:
             raise StoreError("store unavailable")
         return assistant
 
-    def thread_exists(self, thread_id: str) -> bool:
-        store = self._d.store
+    def thread_for(self, ident: str) -> str | None:
+        """The conversation of the item `ident` (live events and presence): derived from the stored record, never
+        named by the client. None for an unknown item."""
         try:
-            return (
-                store is not None
-                and THREAD_RE.fullmatch(thread_id) is not None
-                and (store.get_thread(thread_id) is not None)
-            )
+            found = self._conversation(ident)
         except StoreError, sqlite3.Error:
-            return False
+            return None
+        return found[1] if found is not None else None
+
+    def _conversation(self, ident: str) -> tuple[dict[str, Any], str, bool] | None:
+        """(the item, its thread, whether it takes messages): an item's own conversation, a question's, or the
+        earlier one chat (read only). None for an unknown item or a thread the store does not have."""
+        store, book = self._d.store, self._d.items
+        if store is None or book is None or not ITEM_ID_RE.fullmatch(ident):
+            return None
+        record = book.get(ident)
+        if record is None:
+            return None
+        thread = thread_of(record)
+        writable = thread is not None
+        if thread is None:
+            thread = store.chat_id() if record.get("key") == EARLIER_KEY else ""
+        if not thread or store.get_thread(thread) is None:
+            return None
+        return record, thread, writable
 
     async def handle(
         self, method: str, parts: tuple[str, ...], query: Mapping[str, str], body: dict[str, Any] | None, user: str
@@ -155,25 +177,18 @@ class PanelHandlers:
                 return self.history(query)
             case ("GET", ("diagnostics",)):
                 return 200, diagnostics.build(self._d)
-        if self._d.store is None or self._d.assistant is None:
+        if self._d.store is None or self._d.assistant is None or self._d.items is None:
             return 503, {"error": "store_unavailable"}
         match (method, parts):
-            case ("GET", ("chat",)):
-                return self.chat()
-            case ("GET", ("threads", thread)):
-                return self.thread(thread, query)
-            case ("POST", ("threads", thread, "messages")):
-                return await self.message(thread, body, user)
-            case ("POST", ("threads", thread, "retry")):
-                return self.retry(thread, body)
-            case ("POST", ("threads", thread, "autoretry")):
-                return self.autoretry(thread, body)
-            case ("POST", ("threads", thread, "read")):
-                return self.read(thread, body)
-            case ("POST", ("threads", thread, "cancel")):
-                return self.cancel_investigation(thread, body)
-            case ("POST", ("threads", thread, "remember")):
-                return await self.remember(thread, body, user)
+            case ("POST", ("ask",)):
+                return await self.ask(body, user)
+            case ("GET", ("items", ident, "thread")):
+                return self.thread(ident, query)
+            case ("POST", ("items", ident, verb)) if verb in _CONVERSATION_POSTS:
+                found = self._conversation(ident)
+                if found is None:
+                    return 404, {"error": "no_such_item"}
+                return await self._conversation_post(verb, found, body, user)
         return 404, {"error": "not_found"}
 
     # ---------------------------------------------------------------- header
@@ -209,8 +224,7 @@ class PanelHandlers:
                                                "cost_today_usd", "daily_max_usd", "today", "last_run")},
             "run": {"profile": current.profile, "thread": current.thread_id} if current is not None else None,
             "queue": queued,
-            "chat": {"used": used, "cap": CHAT_TURNS_PER_DAY,
-                     "thread": d.assistant.main_thread() if d.assistant else None},
+            "chat": {"used": used, "cap": CHAT_TURNS_PER_DAY},
             "options": d.options_notice(),
             "held": d.held_view(now),
             # The house's time zone: the panel shows task times in it, whatever the browser's zone.
@@ -444,7 +458,8 @@ class PanelHandlers:
         if raw is not None and before is None:
             return _bad("bad_cursor")
         rows = self._store.items_page(kinds=HISTORY_FILTERS[name], needs_only=name == "needs", before=before,
-                                      limit=PAGE_HISTORY + 1)  # fmt: skip
+                                      limit=PAGE_HISTORY + 1,
+                                      prefixes=QUESTION_KEYS if name == "questions" else None)  # fmt: skip
         more = len(rows) > PAGE_HISTORY
         rows = rows[:PAGE_HISTORY]
         cursor = _cursor(str(rows[-1]["at"]), str(rows[-1]["id"])) if more and rows else None
@@ -570,19 +585,34 @@ class PanelHandlers:
         return await self._run("approve_update", {"approval": approval["id"]}, user)
 
     async def _act_maintenance(self, found: Mapping[str, Any], action: str, user: str) -> Result:
-        """A maintenance item: plan a fix (an investigation in the chat), a reminder, hide it until it changes,
-        reject its dashboard plan, or approve that plan (the daemon re-checks it)."""
+        """A maintenance item: plan a fix (an investigation on the item itself), stop it, a reminder, hide it until
+        it changes, reject its dashboard plan, or approve that plan (the daemon re-checks it); and the actions of a
+        proposal its plan made (`_act_linked`)."""
         d = self._d
         manager = d.maintenance
-        finding = str((found.get("source") or {}).get("finding") or "")
+        source = found.get("source") or {}
+        finding = str(source.get("finding") or "")
         if manager is None or not finding:
             return 503, {"error": "store_unavailable"}
+        linked = source.get("linked") if isinstance(source.get("linked"), dict) else {}
+        if action in _LINKED_ACTIONS and linked:
+            # A proposal the finding's plan made is decided here: the same checks as on its own item, bound to the
+            # revision and the diff hash the admin saw on the finding.
+            return await self._act_linked(found, linked, action, user)
+        if action == "stop":
+            thread = thread_of(found)
+            task = source.get("plan_task")
+            if d.assistant is None or thread is None or not isinstance(task, int):
+                return 409, {"error": "not_available", "message": "Nothing is being planned."}
+            done = d.assistant.cancel_investigation(thread, task) == "ok"
+            self._d.hub.publish("tasks", None, {})
+            return (200, {}) if done else (409, {"error": "not_available", "message": "Not running any more."})
         if action == "plan_fix" or action in REMIND:
             if d.assistant is None:
                 return 503, {"error": "store_unavailable"}
             if action == "plan_fix":
                 outcome = d.assistant.plan_fix(found, user=user)
-                message = "The agent is planning a fix in the chat."
+                message = "Planning a fix here. You get a push when it is ready."
             else:
                 at = self._remind_at(action, finding)
                 if at is None:
@@ -602,6 +632,25 @@ class PanelHandlers:
         else:
             done = False
         return (200, {}) if done else (409, {"error": "not_available", "message": "Not open any more."})
+
+    async def _act_linked(self, found: Mapping[str, Any], linked: Mapping[str, Any], action: str,
+                          user: str) -> Result:  # fmt: skip
+        """An action on the proposal folded into a finding, run as that proposal's own action."""
+        source = dict(found.get("source") or {})
+        if isinstance(linked.get("fork"), str):
+            return await self._act_fork(dict(found) | {"source": source | {"fork": linked["fork"]}}, action, user)
+        change_id = linked.get("change")
+        if not isinstance(change_id, int) or action not in ("apply", "revert", "reject"):
+            return 409, {"error": "not_available", "message": "That action is not offered any more."}
+        d = self._d
+        if action == "reject":
+            done = d.changes is not None and d.changes.reject(change_id, user)
+            return (200, {}) if done else (409, {"error": "not_available", "message": "Not open any more."})
+        if d.changes is None:
+            return 503, {"error": "store_unavailable"}
+        shown = [str(x) for x in (found.get("change") or {}).get("shown") or []]
+        approval = await d.changes.request(change_id, action, user, shown)
+        return await self._run("approve_change", {"approval": approval["id"]}, user)
 
     async def _act_fork(self, found: Mapping[str, Any], action: str, user: str) -> Result:
         """A fork rebase proposal: approve it for the update window or now (the daemon re-checks the files on disk
@@ -642,23 +691,14 @@ class PanelHandlers:
             return 200, {}
         return 409, {"error": "not_pending", "message": "Nothing is waiting to be withdrawn."}
 
-    # ---------------------------------------------------------------- chats
+    # --------------------------------------------------------- conversations
 
-    def chat(self) -> Result:
-        """The one conversation with the admin (created on first use)."""
-        thread = self._assistant.main_thread()
-        return 200, {"thread": thread, "info": self._store.get_thread(thread)}
-
-    def _thread_or_404(self, thread: str) -> dict[str, Any] | None:
-        """Only the one chat is reachable."""
-        if not THREAD_RE.fullmatch(thread) or thread != self._assistant.main_thread():
-            return None
-        return self._store.get_thread(thread)
-
-    def thread(self, thread: str, query: Mapping[str, str]) -> Result:
-        row = self._thread_or_404(thread)
-        if row is None:
-            return 404, {"error": "no_such_thread"}
+    def thread(self, ident: str, query: Mapping[str, str]) -> Result:
+        """`api/items/<id>/thread`: the item's conversation, a page of turns (oldest first)."""
+        found = self._conversation(ident)
+        if found is None:
+            return 404, {"error": "no_such_item"}
+        _record, thread, writable = found
         before = query.get("before")
         before_id = _int(before) if before is not None else None
         if before is not None and before_id is None:
@@ -666,15 +706,34 @@ class PanelHandlers:
         turns = self._store.turns_page(thread, before=before_id, limit=PAGE_TURNS)
         more = bool(turns) and bool(self._store.turns_page(thread, before=turns[0].id, limit=1))
         return 200, {
-            "thread": row,
+            "thread": self._store.get_thread(thread),
             "turns": [t.to_json() for t in turns],
             "more": more,
             "in_flight": self._assistant.live_status(thread),
+            "read_only": not writable,
         }
 
-    async def message(self, thread: str, body: dict[str, Any], user: str) -> Result:
-        if self._thread_or_404(thread) is None:
-            return 404, {"error": "no_such_thread"}
+    async def _conversation_post(self, verb: str, found: tuple[dict[str, Any], str, bool], body: dict[str, Any],
+                                 user: str) -> Result:  # fmt: skip
+        record, thread, writable = found
+        if verb == "read":
+            return self.read(thread, body)
+        if not writable:
+            return 409, {"error": "read_only", "message": "The earlier conversation is read only; ask on Ask."}
+        match verb:
+            case "messages":
+                return await self.message(record, thread, body, user)
+            case "retry":
+                return self.retry(thread, body)
+            case "autoretry":
+                return self.autoretry(thread, body)
+            case "cancel":
+                return self.cancel_investigation(thread, body)
+        return await self.remember(thread, body, user)
+
+    @staticmethod
+    def _refuse_message(body: dict[str, Any]) -> Result | None:
+        """Why a message body is refused (empty, too long, no client id), or None."""
         text = body.get("text")
         client_id = body.get("client_id")
         if not isinstance(text, str) or not text.strip():
@@ -683,20 +742,25 @@ class PanelHandlers:
             return 413, {"error": "too_long", "message": f"At most {MAX_CHAT_CHARS} characters."}
         if not isinstance(client_id, str) or not _CLIENT_ID_RE.fullmatch(client_id):
             return _bad("bad_client_id")
-        # "Ask the agent": the item the message is about (its record goes into the chat run's prompt, fenced).
-        raw_item = body.get("item")
-        item = None
-        if raw_item is not None:
-            item = self._book.get(raw_item) if isinstance(raw_item, str) else None
-            if item is None:
-                return _bad("bad_item", "That item is gone; ask without it.")
+        return None
+
+    async def message(self, record: dict[str, Any], thread: str, body: dict[str, Any], user: str) -> Result:
+        """A message in an item's (or a question's) conversation; the run gets that item's record, fenced. The
+        thread and the item come from the stored record, never from the request."""
+        refused = self._refuse_message(body)
+        if refused is not None:
+            return refused
+        text, client_id = str(body["text"]), str(body["client_id"])
         principal = Principal(Origin.ADMIN_CHAT, user_id=user, channel="panel")
         sent = await self._assistant.submit(thread, text, principal=principal, channel="panel", client_id=client_id,
-                                            item=item)  # fmt: skip
-        turn = sent.turn.to_json() if sent.turn is not None else None
-        match sent.result:
+                                            item=record)  # fmt: skip
+        return self._sent(sent.result, sent.turn.to_json() if sent.turn is not None else None, sent.position)
+
+    @staticmethod
+    def _sent(result: str, turn: dict[str, Any] | None, position: int) -> Result:
+        match result:
             case "queued":
-                return 202, {"turn": turn, "state": "queued", "position": sent.position}
+                return 202, {"turn": turn, "state": "queued", "position": position}
             case "duplicate":
                 return 200, {"turn": turn, "state": turn["status"] if turn else "unknown", "duplicate": True}
             case "in_flight":
@@ -704,6 +768,21 @@ class PanelHandlers:
             case "refused":
                 return 200, {"turn": turn, "state": "refused"}
         return 503, {"error": "busy", "message": "Not sent: the agent is busy.", "turn": turn}
+
+    async def ask(self, body: dict[str, Any], user: str) -> Result:
+        """`api/ask`: a question about anything without an item. It becomes an item of its own (Running, then Done
+        with the answer) and the panel opens it at once."""
+        refused = self._refuse_message(body)
+        if refused is not None:
+            return refused
+        text, client_id = str(body["text"]), str(body["client_id"])
+        principal = Principal(Origin.ADMIN_CHAT, user_id=user, channel="panel")
+        record, sent = await self._assistant.ask(text, principal=principal, channel="panel", client_id=client_id)
+        if record is None:
+            return 503, {"error": "busy", "message": "Not sent: the question could not be stored."}
+        status, result = self._sent(sent.result, sent.turn.to_json() if sent.turn is not None else None,
+                                    sent.position)  # fmt: skip
+        return status, result | {"item": self._book.view(record, events=True)}
 
     def _turn_id(self, body: dict[str, Any]) -> int | None:
         return _int(body.get("turn_id"))
@@ -726,8 +805,6 @@ class PanelHandlers:
         return status, {"result": result} if status == 200 else {"error": result}
 
     def read(self, thread: str, body: dict[str, Any]) -> Result:
-        if self._thread_or_404(thread) is None:
-            return 404, {"error": "no_such_thread"}
         upto = body.get("turn_id")
         upto_id = _int(upto) if upto is not None else None
         if upto is not None and upto_id is None:
@@ -736,12 +813,10 @@ class PanelHandlers:
             self._assistant.thread_changed(thread)
         return 200, {"ok": True}
 
-    # -------------------------------------------------- thread management
-
     def cancel_investigation(self, thread: str, body: dict[str, Any]) -> Result:
-        """Stop an investigation (one step: stopping is the safe direction)."""
+        """Stop an investigation in this conversation (one step: stopping is the safe direction)."""
         task_id = _int(body.get("task_id"))
-        if task_id is None or self._thread_or_404(thread) is None:
+        if task_id is None:
             return _bad("bad_task")
         result = self._assistant.cancel_investigation(thread, task_id)
         status = {"ok": 200, "not_found": 404, "not_open": 409}[result]

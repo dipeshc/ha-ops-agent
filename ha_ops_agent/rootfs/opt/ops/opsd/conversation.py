@@ -52,7 +52,7 @@ def _tasks_block(tasks: list[Task], tz: tzinfo, thread: str | None = None) -> st
         kind = task.kind
         if task.payload.get("investigation"):
             kind = f"investigation (after step {task.payload.get('step', 0)} of {task.payload.get('max_steps', '?')})"
-        mine = " (this chat)" if thread is not None and task.thread_id == thread else ""
+        mine = " (this conversation)" if thread is not None and task.thread_id == thread else ""
         lines.append(f"- #{task.id} {kind}{mine} {when}: {fence(task.title, 120)}")
     return "\n".join(lines)
 

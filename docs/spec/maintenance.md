@@ -199,9 +199,10 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   update rule (`removals`, M26). Test
   `test_a_hidden_removal_still_holds_core_back_and_asks_near_its_deadline`. Test
   `test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home`.
-- M14a. **Every finding is actionable.** Besides "Ask the agent" (as on
+- M14a. **Every finding is actionable.** Besides its conversation (as on
   every item, [panel.md](panel.md) N21), a finding offers **Plan a fix**
-  (an investigation in the chat that reads the evidence and writes a plan:
+  (an investigation on the finding itself that reads the evidence and
+  writes a plan:
   the steps, their risk, what the agent can and cannot do; where the fix
   is inside the proposal rules it ends in an ordinary proposal for
   approval; where it is not, for example a custom integration's own code,
@@ -212,8 +213,35 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   when it fires), and **Hide until it changes** (M14, only while it does
   not ask). A dashboard plan
   still comes only from the plan run (M18). Tests
-  `test_plan_a_fix_starts_an_investigation_with_the_item`,
+  `test_plan_a_fix_runs_on_the_finding_itself`,
   `test_remind_me_later_sets_a_reminder_about_the_item`.
+- M14b. **The plan lives on the finding.** "Plan a fix" makes no item of
+  its own. While it runs (its task pending or running) the finding is
+  Running, without a need, gist "planning a fix · step N of 2" (or
+  "planning a fix · waiting: <why>, next try <time>" while a cap holds a
+  step), with the phases "Read the evidence" and "Write the plan" (current
+  the steps done, `started_at` the start, usually 4 minutes), a text that
+  says it cannot change anything, and the one action **Stop** (`stop`,
+  which cancels the pending step or kills the running one); a hidden
+  finding shows it too. When it is done, the last step's findings (the
+  model's words, 3000 characters, with the run's sources) are the finding's
+  `agent` text. When it stopped, the gist adds "the plan could not finish:
+  <why>" (daemon words) and Plan a fix reads **Retry the plan**. A fork
+  rebase or a config change that one of its steps proposed is folded into
+  the finding while it is open, approved, running or asks for an
+  acknowledgement: the finding takes the proposal's state, gist, need,
+  actions, phase, `change` and footnote, adds the proposal's facts, keeps
+  its plan as `agent`, and its actions run as the proposal's own (bound to
+  the finding's revision and the `change.shown` hash it shows;
+  [panel.md](panel.md) N16); an acknowledgement is stored under the
+  proposal's key, so both items resolve. The proposal's own item follows
+  the finding, is quiet, has no need or action and never pushes, so there
+  is one row in Needs you. Rejected, expired or done, the finding is
+  composed as before. Tests `test_a_proposal_the_plan_made_is_decided_on_the_finding`,
+  `test_a_config_change_the_plan_made_is_applied_from_the_finding`,
+  `test_a_plan_that_stopped_says_why_and_offers_a_retry`,
+  `test_the_finding_rejects_the_rebase_its_plan_proposed`,
+  `test_stop_on_a_running_plan_cancels_it`.
 - M15. Stored findings of the wrong shape (key not 16 hex characters,
   unknown variant) are dropped. Test
   `test_stored_findings_of_the_wrong_shape_are_dropped`.
@@ -234,8 +262,7 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   line, which any integration can write. Chat and investigations (the
   admin asked) may propose one whatever the signal.
   "Plan a fix" on such a finding is an investigation with the same two;
-  when its run proposes a rebase, the chat gets a "Rebase onto Core" card
-  ([chat.md](chat.md) T7) pointing at the proposal's item. An answer is kept only for a finding that was asked about, once
+  a rebase its run proposes is decided on the finding (M14b). An answer is kept only for a finding that was asked about, once
   per finding and evidence; AI off, capped or failed is retried at the next
   scan and never remembered.
 - M17. **YAML migrations** become an ordinary one-tap proposal

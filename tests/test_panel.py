@@ -16,7 +16,7 @@ from opsd.baseline import Item
 from opsd.daemon import Daemon
 from opsd.live import MAX_LIVE
 from opsd.panel import MAX_BODY, PanelServer
-from tests.conftest import FakeHA
+from tests.conftest import FakeHA, conversation
 from tests.test_assistant import ADMIN
 from tests.test_daemon import Harness
 
@@ -109,14 +109,13 @@ async def p(h: Harness, local_ingress: None) -> AsyncIterator[Panel]:
 
 
 async def new_thread(p: Panel) -> str:
-    """The one chat."""
-    status, _, body = await p.request("GET", "/api/chat")
-    assert status == 200
-    return str(body["thread"])
+    """A question's item id (its conversation is `ask:<id>`); the panel names a conversation only by its item."""
+    assert p.d.assistant is not None
+    return conversation(p.d.assistant).removeprefix("ask:")
 
 
-async def send(p: Panel, thread: str, text: str, client_id: str = "client-0001") -> tuple[int, Any]:
-    status, _, body = await p.request("POST", f"/api/threads/{thread}/messages",
+async def send(p: Panel, item: str, text: str, client_id: str = "client-0001") -> tuple[int, Any]:
+    status, _, body = await p.request("POST", f"/api/items/{item}/messages",
                                       body={"text": text, "client_id": client_id})  # fmt: skip
     return status, body
 
@@ -182,7 +181,7 @@ async def test_requests_not_from_the_ingress_proxy_are_refused(h: Harness) -> No
 
 async def test_writes_need_csrf_json_and_same_origin(p: Panel) -> None:
     thread = await new_thread(p)
-    path = f"/api/threads/{thread}/messages"
+    path = f"/api/items/{thread}/messages"
     body = {"text": "hi", "client_id": "client-0001"}
     assert (await p.request("POST", path, body=body, csrf=False))[2]["error"] == "csrf"
     assert (await p.request("POST", path, body=body, csrf=False, headers={"X-Ops-CSRF": "nope"}))[0] == 403
@@ -195,7 +194,7 @@ async def test_writes_need_csrf_json_and_same_origin(p: Panel) -> None:
         assert (await p.request("GET", "/api/state", headers={"Sec-Fetch-Site": site}))[0] == 403
     assert (await p.request("POST", path, body=["not", "an", "object"]))[0] == 400
     assert (await p.request("POST", path, raw_body=b"{bad json"))[0] == 400
-    assert p.d.store is not None and p.d.store.turns_page(thread) == []
+    assert p.d.store is not None and p.d.store.turns_page(f"ask:{thread}") == []
     status, _, ok = await p.request("POST", path, body=body, headers={"Sec-Fetch-Site": "same-origin"})
     assert status == 202 and ok["state"] == "queued"
 
@@ -233,7 +232,7 @@ async def test_oversized_bodies_get_413_before_they_are_read(p: Panel) -> None:
     assert (await p.raw("GET / HTTP/1.1\r\nContent-Length: ²\r\n\r\n".encode()))[0] == 400
     assert (await p.request("GET", "/api/poll?after=%C2%B2"))[0] == 400
     huge = b'{"text": "x", "client_id": "client-0001", "n": ' + b"9" * 5000 + b"}"
-    assert (await p.request("POST", f"/api/threads/{thread}/messages", raw_body=huge))[0] == 400
+    assert (await p.request("POST", f"/api/items/{thread}/messages", raw_body=huge))[0] == 400
     smuggle = b"GET /api/state HTTP/1.1\r\nX-Remote-User-Id: u-other\r\nX-Remote-User-Id: u-admin\r\n\r\n"
     assert (await p.raw(smuggle))[0] == 400
 
@@ -245,7 +244,7 @@ async def test_a_2000_character_non_ascii_message_fits(p: Panel) -> None:
     assert len(text) == 2000 and len(json.dumps({"text": text}).encode()) > 4096
     status, body = await send(p, thread, text)
     assert status == 202
-    assert p.d.store is not None and p.d.store.turns_page(thread)[0].text == text
+    assert p.d.store is not None and p.d.store.turns_page(f"ask:{thread}")[0].text == text
     status, body = await send(p, thread, "x" * 2001, client_id="client-0002")
     assert status == 413 and body["error"] == "too_long"
     assert (await send(p, thread, "   ", client_id="client-0003"))[0] == 400
@@ -293,14 +292,14 @@ async def test_model_output_and_titles_only_ever_leave_as_json(p: Panel, h: Harn
     assert (await send(p, thread, "<script>alert(3)</script> title"))[0] == 202
     assert p.d.assistant is not None
     await p.d.assistant.drain()
-    status, headers, body = await p.request("GET", f"/api/threads/{thread}")
+    status, headers, body = await p.request("GET", f"/api/items/{thread}/thread")
     assert status == 200 and headers["content-type"] == "application/json"
     assert headers["content-security-policy"] == "default-src 'none'; frame-ancestors 'none'"
-    assert body["turns"][-1]["text"] == evil and body["thread"]["id"] == thread
+    assert body["turns"][-1]["text"] == evil and body["thread"]["id"] == f"ask:{thread}"
     _, _, page = await p.request("GET", f"/t/{thread}")
     assert "<img src=x" not in page and "alert(3)" not in page and "pwn" not in page
     # The SSE frame keeps the text on one data line: no injected events.
-    event = p.d.hub.since(0, thread)
+    event = p.d.hub.since(0, f"ask:{thread}")
     assert event
     from opsd.panel import sse_frame
 
@@ -350,7 +349,7 @@ def streams(p: Panel) -> Iterator[Panel]:
 async def test_sse_streams_a_turn_from_queued_to_reply(streams: Panel, h: Harness) -> None:
     p = streams
     thread = await new_thread(p)
-    reader = await open_stream(p, f"?thread={thread}")
+    reader = await open_stream(p, f"?item={thread}")
     assert (await read_events(reader, "hello"))[-1][1]["seq"] >= 0
     h.claude_reply = {"reply": "pong", "summary": ""}
     assert (await send(p, thread, "ping"))[0] == 202
@@ -362,7 +361,7 @@ async def test_sse_streams_a_turn_from_queued_to_reply(streams: Panel, h: Harnes
     while not any(k == "turn" and d["data"]["role"] == "agent" for k, d in events):
         events += await read_events(reader, "turn")
     reply = next(d for k, d in events if k == "turn" and d["data"]["role"] == "agent")
-    assert reply["data"]["text"] == "pong" and reply["thread"] == thread
+    assert reply["data"]["text"] == "pong" and reply["thread"] == f"ask:{thread}"
 
 
 async def test_live_connections_are_capped_and_freed(streams: Panel) -> None:
@@ -398,7 +397,7 @@ async def test_sse_resume_and_gap(streams: Panel) -> None:
     assert [d["data"]["i"] for _, d in replayed] == [1, 2]
     reader = await open_stream(p, headers={"Last-Event-ID": "99999"})
     assert (await read_events(reader, "reset"))[-1][0] == "reset"
-    assert (await p.request("GET", "/api/events?thread=zzz"))[0] == 404
+    assert (await p.request("GET", "/api/events?item=zzz"))[0] == 404
     assert (await p.request("GET", "/api/events", headers={"Last-Event-ID": "-1"}))[0] == 400
 
 
@@ -419,19 +418,19 @@ async def test_long_poll_returns_the_same_events(p: Panel) -> None:
 async def test_presence_is_admin_only_rate_limited_and_bounded(p: Panel) -> None:
     thread = await new_thread(p)
     hub = p.d.hub
-    status, _, _ = await p.request("POST", "/api/presence", body={"thread": thread, "visible": True}, admin=False,
+    status, _, _ = await p.request("POST", "/api/presence", body={"item": thread, "visible": True}, admin=False,
                                    headers={"X-Remote-User-Id": "u-household"})  # fmt: skip
-    assert status == 403 and not hub.is_watching(thread)
-    status, _, _ = await p.request("POST", "/api/presence", body={"thread": thread, "visible": True}, csrf=False)
-    assert status == 403 and not hub.is_watching(thread)
-    status, _, body = await p.request("POST", "/api/presence", body={"thread": thread, "visible": True})
-    assert status == 200 and body["watching"] and hub.is_watching(thread)
+    assert status == 403 and not hub.is_watching(f"ask:{thread}")
+    status, _, _ = await p.request("POST", "/api/presence", body={"item": thread, "visible": True}, csrf=False)
+    assert status == 403 and not hub.is_watching(f"ask:{thread}")
+    status, _, body = await p.request("POST", "/api/presence", body={"item": thread, "visible": True})
+    assert status == 200 and body["watching"] and hub.is_watching(f"ask:{thread}")
     # The client cannot ask for a longer lease or name a thread that does not exist.
-    status, _, _ = await p.request("POST", "/api/presence", body={"thread": thread, "visible": True, "ttl": 9e9})
+    status, _, _ = await p.request("POST", "/api/presence", body={"item": thread, "visible": True, "ttl": 9e9})
     assert status in (200, 429)
-    assert (await p.request("POST", "/api/presence", body={"thread": "f" * 16, "visible": True}))[0] == 404
-    assert (await p.request("POST", "/api/presence", body={"thread": thread, "visible": "yes"}))[0] == 400
-    codes = [(await p.request("POST", "/api/presence", body={"thread": thread, "visible": True}))[0] for _ in range(8)]
+    assert (await p.request("POST", "/api/presence", body={"item": "q-000000000000", "visible": True}))[0] == 404
+    assert (await p.request("POST", "/api/presence", body={"item": thread, "visible": "yes"}))[0] == 400
+    codes = [(await p.request("POST", "/api/presence", body={"item": thread, "visible": True}))[0] for _ in range(8)]
     assert 429 in codes
 
 
@@ -460,42 +459,41 @@ async def test_ops_items_are_redacted_for_the_panel(p: Panel) -> None:
     assert ops["items"][0]["detail"]["count"] == 3 and ops["items"][0]["summary"] == "new ERROR from go2rtc"
 
 
-async def test_one_chat_unread_retry_and_paging(p: Panel, h: Harness) -> None:
+async def test_a_conversation_unread_retry_and_paging(p: Panel, h: Harness) -> None:
     thread = await new_thread(p)
-    assert (await p.request("GET", "/api/chat"))[2]["thread"] == thread  # the same chat every time
     p.d.control.set_switch("off", by="test", admin=True)
     status, sent = await send(p, thread, "lock battery?")
     assert p.d.assistant is not None and p.d.store is not None
     await p.d.assistant.drain()
     turn_id = sent["turn"]["id"]
-    status, _, body = await p.request("GET", f"/api/threads/{thread}")
+    status, _, body = await p.request("GET", f"/api/items/{thread}/thread")
     assert [t["role"] for t in body["turns"]] == ["admin", "system"] and body["in_flight"] is None
     assert body["turns"][1]["meta"]["actions"] == ["turn_on_retry"]
-    info = (await p.request("GET", "/api/chat"))[2]["info"]
-    assert info["id"] == thread and info["unread"]
-    assert (await p.request("POST", f"/api/threads/{thread}/read", body={}))[0] == 200
-    assert not (await p.request("GET", "/api/chat"))[2]["info"]["unread"]
+    info = (await p.request("GET", f"/api/items/{thread}/thread"))[2]["thread"]
+    assert info["id"] == f"ask:{thread}" and info["unread"]
+    assert (await p.request("POST", f"/api/items/{thread}/read", body={}))[0] == 200
+    assert not (await p.request("GET", f"/api/items/{thread}/thread"))[2]["thread"]["unread"]
     # ai_disabled is not retried automatically; the toggle refuses, Retry after turning AI on works.
-    auto = await p.request("POST", f"/api/threads/{thread}/autoretry", body={"turn_id": turn_id, "on": True})
+    auto = await p.request("POST", f"/api/items/{thread}/autoretry", body={"turn_id": turn_id, "on": True})
     assert auto[0] == 409
-    assert (await p.request("POST", f"/api/threads/{thread}/autoretry", body={"turn_id": "x", "on": 1}))[0] == 400
+    assert (await p.request("POST", f"/api/items/{thread}/autoretry", body={"turn_id": "x", "on": 1}))[0] == 400
     assert (await p.request("POST", "/api/ai", body={"on": True}))[0] == 200
     h.claude_reply = {"reply": "about 40%", "summary": ""}
-    status, _, body = await p.request("POST", f"/api/threads/{thread}/retry", body={"turn_id": turn_id})
+    status, _, body = await p.request("POST", f"/api/items/{thread}/retry", body={"turn_id": turn_id})
     assert status == 202
-    assert (await p.request("POST", f"/api/threads/{thread}/retry", body={"turn_id": turn_id}))[0] == 409
-    assert (await p.request("POST", f"/api/threads/{thread}/retry", body={"turn_id": 10**9}))[0] == 404
+    assert (await p.request("POST", f"/api/items/{thread}/retry", body={"turn_id": turn_id}))[0] == 409
+    assert (await p.request("POST", f"/api/items/{thread}/retry", body={"turn_id": 10**9}))[0] == 404
     await p.d.assistant.drain()
-    status, _, body = await p.request("GET", f"/api/threads/{thread}")
+    status, _, body = await p.request("GET", f"/api/items/{thread}/thread")
     assert body["turns"][-1]["text"] == "about 40%" and body["turns"][1]["meta"]["resolved"]
     for i in range(35):
-        p.d.store.append_turn(thread, role="agent", text=f"n{i}", now=datetime.now(UTC))
-    page = (await p.request("GET", f"/api/threads/{thread}"))[2]
+        p.d.store.append_turn(f"ask:{thread}", role="agent", text=f"n{i}", now=datetime.now(UTC))
+    page = (await p.request("GET", f"/api/items/{thread}/thread"))[2]
     assert len(page["turns"]) == 30 and page["more"]
-    older = (await p.request("GET", f"/api/threads/{thread}?before={page['turns'][0]['id']}"))[2]
+    older = (await p.request("GET", f"/api/items/{thread}/thread?before={page['turns'][0]['id']}"))[2]
     assert older["turns"][-1]["id"] < page["turns"][0]["id"] and not older["more"]
-    assert (await p.request("GET", f"/api/threads/{thread}?before=abc"))[0] == 400
-    assert (await p.request("GET", "/api/threads/zzzz"))[0] == 404
+    assert (await p.request("GET", f"/api/items/{thread}/thread?before=abc"))[0] == 400
+    assert (await p.request("GET", "/api/items/zzzz/thread"))[0] == 404
     status, _, body = await p.request("POST", "/api/run", body={})
     assert status == 200 and isinstance(body["started"], bool)
 

@@ -17,7 +17,7 @@ from opsd.inbound import EVENT_TYPE, AdminIdentity, Refusal, verify_action
 from opsd.policy import Origin
 from opsd.runctx import Principal
 from opsd.tasks import MAX_GENERATION, parse_at
-from tests.conftest import FakeHA
+from tests.conftest import FakeHA, conversation
 from tests.test_daemon import Harness
 
 ADMIN = AdminIdentity(user_id="u-admin", device_id="dev-1")
@@ -51,8 +51,10 @@ def tap(action: str, **data: Any) -> dict[str, Any]:
 
 
 async def chat(d: Daemon, h: Harness, text: str, *, thread: str | None = None) -> None:
-    event = Event("user.message", "companion", Priority.USER, {"reply_text": text, "thread_id": thread}, CHAT)
+    """A push reply into the tests' question (or `thread`), as the Companion app delivers it."""
     assert d.assistant is not None
+    payload = {"reply_text": text, "thread_id": thread or conversation(d.assistant)}
+    event = Event("user.message", "companion", Priority.USER, payload, CHAT)
     await d.assistant.on_user_message(event)
     await d.assistant.drain()
 
@@ -75,8 +77,10 @@ async def test_chat_creates_a_reminder_that_fires_and_snoozes(h: Harness) -> Non
     assert d.store is not None and len(d.store.open_tasks()) == 1
     reply = h.pushes()[-1]
     # The footer comes from the run's audit rows (what was read), not from the model.
-    assert reply["title"] == "Agent: Reply" and reply["message"] == "Done: in 2 hours.\n\nSources: reminders"
-    assert "REPLY" in actions_of(reply) and reply["data"]["tag"].startswith("ha-ops-agent-chat-")
+    assert reply["title"] == "Agent: Test question" and reply["message"] == "Done: in 2 hours.\n\nSources: reminders"
+    # The answer carries the question's tag (it replaces the push it answers) and Reply continues the question.
+    question = conversation(d.assistant).removeprefix("ask:")
+    assert "REPLY" in actions_of(reply) and reply["data"]["tag"] == question
 
     # Fire it (as the scheduler would once due).
     [task] = d.store.open_tasks()
@@ -296,13 +300,12 @@ async def test_chat_flood_is_capped(h: Harness, monkeypatch: pytest.MonkeyPatch)
     assert d.assistant is not None
     monkeypatch.setattr(assistant_mod, "CHAT_TURNS_PER_DAY", 1000)
     for i in range(assistant_mod.MAX_JOBS + 3):
-        await d.assistant.on_user_message(
-            Event("user.message", "companion", Priority.USER, {"reply_text": f"q{i}"}, CHAT)
-        )
+        payload = {"reply_text": f"q{i}", "thread_id": conversation(d.assistant)}
+        await d.assistant.on_user_message(Event("user.message", "companion", Priority.USER, payload, CHAT))
     assert d.assistant.dropped == 3
     assert d.store is not None
     assert d.assistant is not None
-    turns = d.store.turns_page(d.assistant.main_thread(), limit=1000)
+    turns = d.store.turns_page(conversation(d.assistant), limit=1000)
     assert len([t for t in turns if t.role == "admin" and t.status == "failed"]) == 3
     assert len([t for t in turns if t.role == "system" and t.status == "busy"]) == 3
 
@@ -318,7 +321,7 @@ async def test_chat_budget_and_failure_reply(h: Harness, monkeypatch: pytest.Mon
     assert h.claude_calls == []
     # No apology per message and no "AI paused" push: the card in the thread says why.
     assert not [p for p in h.pushes() if p["message"].startswith("Sorry") or "AI paused" in p["title"]]
-    turns = d.store.turns_page(d.assistant.main_thread(), limit=10) if d.assistant else []
+    turns = d.store.turns_page(conversation(d.assistant), limit=10) if d.assistant else []
     assert any(t.role == "system" and t.status == "run_cap_reached" for t in turns)
     rows = [r for r in d.store.audit_rows(limit=20) if r["capability"] == "chat.turn"]
     assert {r["outcome"] for r in rows} >= {"accepted", "run_cap_reached"}
@@ -335,7 +338,7 @@ async def test_empty_and_long_messages(h: Harness) -> None:
     # The reply is stored whole (1500 characters); its push is a short pointer.
     assert len(h.pushes()[-1]["message"]) == 180 and h.pushes()[-1]["message"].endswith("…")
     assert d.store is not None and d.assistant is not None
-    agent = [t for t in d.store.turns_page(d.assistant.main_thread(), limit=5) if t.role == "agent"][-1]
+    agent = [t for t in d.store.turns_page(conversation(d.assistant), limit=5) if t.role == "agent"][-1]
     assert len(agent.text) == 1500
 
 
@@ -343,14 +346,16 @@ async def test_panel_message_runs_a_chat_turn(h: Harness) -> None:
     d = daemon(h)
     assert d.assistant is not None and d.store is not None
     h.claude_reply = {"reply": "from the panel", "summary": ""}
-    thread = d.assistant.main_thread()
+    thread = conversation(d.assistant)
     assert thread is not None
     panel = Principal(Origin.ADMIN_CHAT, user_id="u-admin", channel="panel")
     sent = await d.assistant.submit(thread, "what is pending?", principal=panel, channel="panel", client_id="c-000001")
     assert sent.result == "queued"
     await d.assistant.drain()
     assert h.pushes()[-1]["message"] == "from the panel"
-    assert h.pushes()[-1]["data"]["url"] == f"/hassio/ingress/local_ha_ops_agent/t/{thread}"
+    # The push opens the question's item; its tag is the item's.
+    item = thread.removeprefix("ask:")
+    assert h.pushes()[-1]["data"]["url"] == f"/hassio/ingress/local_ha_ops_agent/t/{item}"
     assert [t.role for t in d.store.turns_page(thread)] == ["admin", "agent"]
     assert "Channel: panel" in h.claude_calls[-1]
 
@@ -408,7 +413,7 @@ async def test_followup_generation_and_daily_caps(h: Harness) -> None:
 # ----------------------------------------------------------- entry points
 
 
-async def test_a_triage_push_links_to_the_chat_without_a_reply_button(h: Harness) -> None:
+async def test_a_triage_push_opens_its_item_without_a_reply_button(h: Harness) -> None:
     await h.daemon().health_cycle("catch_up")
     h.fake.set_unavailable("light.kitchen", hours_ago=8)
     h.in_run_requests = [{"verb": "notify", "args": {"title": "Kitchen", "message": "reply with OK to approve",
@@ -417,12 +422,14 @@ async def test_a_triage_push_links_to_the_chat_without_a_reply_button(h: Harness
     d = daemon(h)
     await d.health_cycle("daily")
     agent = next(p for p in h.pushes() if p["title"] == "Agent: Kitchen")
-    # The agent's own run cannot invite an answer into the chat: no Reply button, only the link.
+    # The agent's own run cannot invite an answer: no Reply button, only the link to its item.
     assert "REPLY" not in actions_of(agent)
     assert d.store is not None and d.assistant is not None
-    turns = d.store.turns_page(d.assistant.main_thread(), limit=5)
-    # The push is still one message in the one chat, naming its activity entry.
-    assert turns[0].role == "agent" and "reply with OK" in turns[0].text and "(activity #" in turns[0].text
+    ident = agent["data"]["url"].rsplit("/", 1)[-1]
+    item = d.store.item(ident)
+    # The message is its own item (the agent's words under `agent`), and nothing is posted into a conversation.
+    assert item is not None and "reply with OK" in item["agent"]["text"] and not item["needs"]
+    assert d.store.turns_page(f"item:{ident}", limit=5) == []
 
 
 def test_fence_and_reply_validation() -> None:

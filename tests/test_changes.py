@@ -739,9 +739,9 @@ async def test_remember_this_becomes_a_git_proposal(p: Any, h: Any) -> None:  # 
     await send(p, thread, "the garden speaker is unplugged in winter")
     assert p.d.assistant is not None and p.d.store is not None
     await p.d.assistant.drain()
-    turn = next(t for t in p.d.store.turns_page(thread, limit=10) if t.role == "admin")
+    turn = next(t for t in p.d.store.turns_page(f"ask:{thread}", limit=10) if t.role == "admin")
     fact = {"turn_id": turn.id, "text": "The garden speaker is unplugged in winter."}
-    status, _, body = await p.request("POST", f"/api/threads/{thread}/remember", body=fact)
+    status, _, body = await p.request("POST", f"/api/items/{thread}/remember", body=fact)
     assert status == 201 and body["change"] and body["refused"] is None
     row = p.d.store.change(int(body["change"]))
     assert row is not None and row["kind"] == "facts" and [f["path"] for f in row["files"]] == [FACTS_PATH]

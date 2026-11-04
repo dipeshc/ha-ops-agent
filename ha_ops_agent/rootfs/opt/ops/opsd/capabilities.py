@@ -406,10 +406,10 @@ REGISTRY: tuple[Capability, ...] = (
     Capability(
         "task.investigate",
         "investigate",
-        "look into something over up to 3 background runs that report back in this chat",
+        "look into something over up to 3 background runs that report back in this conversation",
         "opsd.tasks:exec_investigate",
         {
-            "title": Arg(str, None, pattern=TEXT_RE, help="what is being investigated (shown in the chat)"),
+            "title": Arg(str, None, pattern=TEXT_RE, help="what is being investigated (shown on its item)"),
             "brief": Arg(str, None, pattern=MULTILINE_RE, unescape_newlines=True, help="what to find out and how"),
             "steps": Arg(int, 2, minimum=1, maximum=3, help="most background runs (1-3)"),
         },

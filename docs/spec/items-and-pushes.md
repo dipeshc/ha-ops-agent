@@ -14,7 +14,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 ## Vocabulary
 
 - I1. Kinds: `update`, `reminder`, `investigation`, `proposal`, `check`,
-  `backup`, `reload`, `window`, `maintenance` (a store CHECK). States: `proposed`,
+  `backup`, `reload`, `window`, `maintenance` (a store CHECK), and
+  `question`, which the store keeps as `investigation` (key `ask:` or
+  `chat:earlier`) and the item record serves as `question` (I22). States: `proposed`,
   `waiting`, `scheduled`, `running`, `done`, `failed`, `cancelled`,
   `expired`; the last four are terminal.
 - I2. Need kinds: `approval`, `confirm`, `physical`, `answer`, `ack`. The
@@ -26,9 +28,11 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `failed`. Test `test_the_store_refuses_a_waiting_item_without_a_need`.
 - I4. Keys and ids: keys are `updates:<entity>@<version>`, `window:<run>`,
   `change:<id>`, `fact:<id>`, `task:<id>`, `health:<key>`, `maint:<finding>`,
-  `activity:<id>`. The URL id is `<prefix>-<sha256(key)[:12]>` with prefixes
-  `u` (updates), `w` (window), `p` (change, fact), `r` (task), `c` (health),
-  `m` (maintenance), `x` (other);
+  `activity:<id>`, `fork:<proposal>`, `ask:<token>` (a question) and
+  `chat:earlier` (the earlier one chat). The URL id is
+  `<prefix>-<sha256(key)[:12]>` with prefixes `u` (updates), `w` (window),
+  `p` (change, fact, fork), `r` (task), `c` (health), `m` (maintenance), `q`
+  (questions), `x` (other);
   activity items are `a-<n>`, numbered by `kv` `activity.seq` so a number is
   never reused after a prune.
 
@@ -187,19 +191,23 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `activity:<n>` items, whose push is decided at the write like any other's. Quiet kinds
   (`check`, `suppressed`, `updates`, `reminder`, `investigation`, `note`)
   fold in History and never show on Home unless they need the admin; an
-  entry that needs the admin becomes `waiting` with an `ack` and also posts
-  one chat message naming it. A config change's outcome is an event on its
-  item and never posts in the chat. Tests `test_activity_entries_become_items_and_events`,
+  entry that needs the admin becomes `waiting` with an `ack`. No entry
+  posts into a conversation (0.22.0): the agent's own notes are items and
+  History entries only. A config change's outcome is an event on its item. Tests `test_activity_entries_become_items_and_events`,
   `test_a_standalone_entry_is_pushed_when_it_is_written`.
-- I17. Home sections: `needs` oldest `needs_since` first; `running`;
+- I17. Home sections (questions are on Ask and never on Home; a quiet
+  item that follows another, such as a proposal folded into its finding,
+  is shown on that item and not as a row of its own, unless it needs the
+  admin): `needs` oldest `needs_since` first; `running`;
   `coming` (proposed, scheduled) by `at`; `suggestions` (proposed
   maintenance replacement candidates and suggestions) by `at`; `today` (terminal, not quiet,
   resolved since local midnight) newest first. History: 50 per page, keyset
   cursor on `(at, id)`, filters `all`, `needs`, `changes` (proposal, update,
   reload), `checks` (check, backup); day grouping and folding of quiet items
   is the panel's job. Test `test_history_pages_newest_first`.
-- I18. Resolved items not in Needs you, and their events, are deleted after
-  90 days.
+- I18. Resolved items not in Needs you, their events and their
+  conversations' turns are deleted after 90 days; the earlier one chat's
+  item and turns are never deleted ([chat.md](chat.md) T1a).
 
 - I20. **The Needs-you rule.** Needs you holds only what cannot happen or
   be resolved without the admin: an approval only the admin can give, a
@@ -227,8 +235,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   own notes and messages.
 
 - I21. **Every item shown is actionable** ([panel.md](panel.md) N21):
-  every item in Needs you, In progress, Coming up or Suggestions offers at
-  least one action, and every item of any kind offers "Ask the agent".
+  every item in Needs you, In progress, Coming up or Suggestions has a
+  need, an action or is Running, and every item but the earlier one chat
+  has its own conversation ([chat.md](chat.md) T1).
   Maintenance findings offer Plan a fix, Remind me and Hide until it
   changes ([maintenance.md](maintenance.md) M14a). Test
   `test_every_item_the_panel_shows_offers_an_action`.
@@ -249,7 +258,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   cut at 70; body `"<Word>: <gist>. Open it to <primary label>."`, with the
   need text appended when urgent, cut at 400 characters; tag is the item id;
   the link is the panel's `/t/<item id>`; budget class SAFETY when urgent,
-  else AGENT.
+  else AGENT. Its one button is Reply, a message on the item's conversation
+  (recorded with the action id, [chat.md](chat.md) T14a); nothing executes
+  from a push. Test `test_approvals_ask_once_with_a_link_to_the_panel`.
 - N3. **Other push triggers.** The baseline seed ("the agent is watching"),
   a critical health result (deterministic, urgent, whatever the AI said), a
   warning summary when triage is unavailable, Core down (after 5 minutes;
@@ -278,10 +289,12 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   fails closed and sends nothing, safety pushes included
   ([configuration.md](configuration.md) C5).
 - N7. **Agent text pushes** are cut at 180 characters with an ellipsis, titled
-  `Agent: <title>` (70 characters), tagged `ha-ops-agent`, and are never
-  SAFETY class; the full text stays in the panel. A push from the agent's
-  own run (`notify.admin`) is one message in the chat and links to it, but
-  carries no Reply button: model text never invites an answer. It goes out
+  `Agent: <title>` (70 characters), tagged `ha-ops-agent-…` (or, for an
+  answer in an item's conversation, the item's id unless its push is
+  urgent, [chat.md](chat.md) T10), and are never SAFETY class; the full
+  text stays in the panel. A push from the agent's own run (`notify.admin`)
+  is its own item (the words under `agent`) and opens it, but carries no
+  Reply button: model text never invites an answer. It goes out
   only with a reason class (`needs_action`, `physical_task`, `security`);
   `note` makes it a quiet History note, and no reason is refused
   ([capabilities.md](capabilities.md) K11). The agent's own reminders and
@@ -297,14 +310,25 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `test_reminders_the_admin_set_ring_but_agent_ones_wait`,
   `test_the_push_cap_leaves_overflow_in_the_panel`,
   `test_kill_switch_notices_are_safety_pushes_never_held`.
-- N9. **Presence.** Chat output is not pushed while the admin watches the
-  thread (a 20-second presence lease, at most 8 leases); reminders and safety
+- N9. **Presence.** Conversation output is not pushed while the admin
+  watches that item's conversation (a 20-second presence lease, at most 8
+  leases); reminders and safety
   pushes ignore presence. Tests `test_reply_is_not_pushed_while_the_admin_watches`,
   `test_reminders_ignore_presence`.
 - N10. **Push actions.** The Companion push is the only channel. Each action
   button gets an id `OPS_<KIND>_<32 hex>` recorded with a 3-day expiry; the
   kinds are REPLY (text input), SNOOZE and DONE. Without a store no buttons
   are sent. Inbound handling is in [chat.md](chat.md).
+
+## Questions
+
+- I22. A question ([chat.md](chat.md) T1b) is an item with key
+  `ask:<token>`, id `q-…`, kicker "Question", the admin's text as its
+  title, Running / Done / Failed as its conversation stands, never a need
+  and never pushed by the book; History's `questions` filter lists it with
+  the earlier one chat (`chat:earlier`, Done, read only). Tests
+  `test_a_question_is_an_item_that_opens_at_once`,
+  `test_the_earlier_one_chat_becomes_one_read_only_history_item`.
 
 ## Maintenance items
 
@@ -336,7 +360,10 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   gate is shut) with `withdraw`; while its job runs it is Running with the
   phases Backup, Write, Restart, Verify; applied is Done; rolled back or
   failed is Failed with an `ack` need (urgent for `rollback_failed`),
-  pushed by the item book; rejected is Cancelled; stale is Expired. A fork
+  pushed by the item book; rejected is Cancelled; stale is Expired. A
+  rebase a finding's "Plan a fix" proposed is decided on the finding
+  ([maintenance.md](maintenance.md) M14b): its own item then follows the
+  finding, is quiet, has no need or action and never pushes. A fork
   rebase job never makes an update item, and its run's item is titled
   "Approved fork rebase <day>". Tests `test_the_pipeline_happy_path`,
   `test_a_restart_failure_restores_the_fork_and_pushes`.

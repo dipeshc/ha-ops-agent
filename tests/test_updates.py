@@ -536,7 +536,7 @@ async def test_observe_mode_plans_and_reports_without_backup_or_install(tmp_path
     acme_weather = rig.item(WEATHER, "v2.4.1")
     [push] = rig.sent
     assert acme_weather["state"] == "waiting" and push.tag == acme_weather["id"] and push.title == acme_weather["title"]
-    assert "Needs you" in push.body and not push.urgent and not push.actions
+    assert "Needs you" in push.body and not push.urgent and [str(a.kind) for a in push.actions] == ["REPLY"]
     await rig.flush()
     assert len(rig.sent) == 1
     # The next night with the same plan: the waiting item is re-surfaced once a day, with the same tag, so the

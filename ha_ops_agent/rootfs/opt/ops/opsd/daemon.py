@@ -427,12 +427,10 @@ class Daemon:
                 context=self.chat_context,
                 wake=self.scheduler.wake if self.scheduler is not None else None,
             )
-        # One chat plus an activity log; entries that need the admin post in the chat.
+        # The activity log: what the agent did, on its items and in History (never a chat message).
         self.activity: ActivityLog | None = None
         if self.store is not None and self.assistant is not None:
-            self.activity = ActivityLog(
-                self.store, self.hub, post=self.assistant.post_activity, context_days=options.chat.activity_days
-            )
+            self.activity = ActivityLog(self.store, self.hub, context_days=options.chat.activity_days)
             self.assistant.activity = self.activity
             if self.updates is not None:
                 self.updates.activity = self.activity.record
@@ -466,6 +464,8 @@ class Daemon:
                 self.store, self.hub, tz=lambda: self.tz, context=self.items_context, send=self.send_now,
             )  # fmt: skip
             self.items.on_change = self._items_changed
+            if self.assistant is not None:
+                self.assistant.items = self.items
 
     def items_context(self) -> Context:
         """What the items are derived from besides the store: the update gate, the window, the open health items."""
@@ -569,7 +569,7 @@ class Daemon:
     def _note_check(
         self, trigger: str, result: str, items: list[Item], summary: str, snapshot: Snapshot | None
     ) -> None:
-        """One activity line per health check (a no-op is one compact line; pushes post in the chat)."""
+        """One activity line per health check (a no-op is one compact line)."""
         if self.activity is None:
             return
         patches = ((snapshot.local_patches if snapshot else None) or {}).get("patches") or {}
@@ -1364,6 +1364,7 @@ class Daemon:
         self.store.recover_running(now)
         if self.assistant is not None:
             self.assistant.recover(now)
+            self.assistant.keep_earlier()
         if self.changes is not None:
             try:
                 self.changes.recover()

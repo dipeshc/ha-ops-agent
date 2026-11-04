@@ -10,7 +10,7 @@ import pytest
 
 from opsd.claude_runner import RunConfig, RunResult
 from opsd.store import Store
-from tests.conftest import FakeHA
+from tests.conftest import FakeHA, conversation
 from tests.test_assistant import ADMIN
 from tests.test_daemon import Harness
 
@@ -39,7 +39,7 @@ async def test_a_run_is_charged_its_run_time_whatever_the_utilisation_says(h: Ha
                          cost_usd=0.04, structured={"reply": "fine", "summary": ""})  # fmt: skip
 
     d.runner.run_claude = run_claude
-    thread = d.assistant.main_thread()
+    thread = conversation(d.assistant)
     assert thread is not None
     from tests.test_chat_ux import say
 

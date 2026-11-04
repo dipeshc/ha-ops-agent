@@ -255,3 +255,14 @@ def no_cloud_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
         raise evidence.FetchError("offline in tests")
 
     monkeypatch.setattr(evidence, "fetch_text", offline)
+
+
+TEST_QUESTION = "ask:0123456789abcdef"
+
+
+def conversation(assistant: Any) -> str:
+    """The conversation the chat tests talk in: one question item (written once), like a question asked on Ask."""
+    record = assistant.store.item_by_key(TEST_QUESTION)
+    if record is None:
+        record = assistant.items.question(TEST_QUESTION, state="done", gist="asked", title="Test question")
+    return f"ask:{record['id']}"

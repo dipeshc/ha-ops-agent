@@ -49,7 +49,7 @@ def test_changes_script_is_loaded_under_the_nonce_and_in_budget() -> None:
     # The shell loads it itself, with its own nonce; no second <script> tag in the page.
     assert "document.currentScript.nonce" in SHELL and 'h("script", { src: "changes.js"' in SHELL
     assert "s.nonce = NONCE" in SHELL
-    # History, System and the chat renderer: budgeted together.
+    # History, Ask, System and the conversation renderer: budgeted together.
     assert len(gzip.compress(CHANGES.encode())) < 12_000
 
 
@@ -95,7 +95,7 @@ _STUBS = (
     " const els = {}; const wide = { matches: false }; const calls = [];"
     " function go(x) { calls.push(['go', x]); } function ask(x) { calls.push(['ask', x]); }"
     " function act(t, a) { calls.push(['act', a.id]); }"
-    " function loadItem() {} function render() {}"
+    " function loadItem() {} function render() {} function convo() { return null; }"
     " function minutes(v) { return String(Math.round((Number(v) || 0) / 60)); }"
     " function fmtN(n) { return String(n); }\n"
 )
@@ -223,8 +223,9 @@ def _views(state: str = "{}") -> str:
     exports = (
         "const window = { opsPanel: { h, btn, api: async () => ({ status: 0, data: {} }), toast() {},"
         " render() {}, S, els, go, row, section, icon, minutes, fmtN, hhmm, dayKey, dayLabel, when, tz: () => 'UTC',"
-        " getJSON() {}, loadHistory() {}, loadSystem() {}, loadState() {}, ask, wide, rich, announce() {},"
-        " saveDrafts() {}, clock, loadThread() {}, loadHome() {}, markRead() {} } };\n"
+        " getJSON() {}, loadHistory() {}, loadAsks() {}, loadSystem() {}, loadState() {}, wide, rich, announce() {},"
+        " saveDrafts() {}, clock, loadConv() {}, loadHome() {}, markRead() {}, open(id) { calls.push(['open', id]); },"
+        " put() {}, itemUrl: (id, rest) => `api/items/${id}${rest || ''}` } };\n"
     )
     return _RENDER + f"Object.assign(S, {state});\n" + exports + CHANGES + "\nconst V = window.opsViews;\n"
 
@@ -247,18 +248,72 @@ def test_history_groups_by_day_and_folds_routine_entries() -> None:
 
 
 @needs_node
-def test_chat_cards_are_text_with_fixed_actions() -> None:
+def test_conversation_cards_are_text_with_fixed_actions() -> None:
     cards = [
-        {"status": "proposal", "text": f"{EVIL} v1 → v2", "meta": {"actions": ["updates"]}},
+        {"status": "proposal", "text": f"{EVIL} Back up now?", "meta": {"actions": ["backup"]}},
         {"status": "investigation", "text": f"{EVIL}. Step 1 of 2.", "meta": {"task": 7, "actions": ["cancel"]}},
         {"status": "investigation", "text": "Done.", "meta": {"task": 7, "actions": [], "done": True}},
     ]  # fmt: skip
-    proposal, running, done = _run(
-        _views("{thread: 'abc'}") + f"console.log(JSON.stringify({json.dumps(cards)}.map((t) => dump(V.card(t)))));"
+    state = "{conv: {item: 'q-1', thread: 'ask:q-1', turns: [], loaded: true, readOnly: false}}"
+    backup, running, done = _run(
+        _views(state) + f"console.log(JSON.stringify({json.dumps(cards)}.map((t) => dump(V.card(t)))));"
     )
-    assert EVIL in _text(proposal) and "Review on Home" in _text(proposal)
-    assert "Cancel" in _text(running) and "Review on Home" not in _text(running)
-    assert "Cancel" not in _text(done) and "done" in done["attrs"]["class"]
+    assert EVIL in _text(backup) and "Back up now" in _text(backup)
+    assert "Stop" in _text(running) and "Back up now" not in _text(running)
+    assert "Stop" not in _text(done) and "done" in done["attrs"]["class"]
+
+
+@needs_node
+def test_a_conversation_renders_text_only_with_link_cards_and_its_composer() -> None:
+    """Turns, cards and links are text nodes; a link opens its item and never acts; the box is labelled."""
+    turns = [
+        {"id": 1, "thread": "item:m-1", "role": "admin", "text": EVIL, "status": "ok", "at": "2026-01-30T09:00:00Z",
+         "meta": {"via": "notification"}},
+        {"id": 2, "thread": "item:m-1", "role": "agent", "text": f"{EVIL}\n\n- `{EVIL}`", "status": "ok",
+         "at": "2026-01-30T09:01:00Z", "meta": {"sources": [EVIL]}},
+        {"id": 3, "thread": "item:m-1", "role": "system", "status": "link", "text": f"Investigation: {EVIL}",
+         "at": "2026-01-30T09:01:00Z", "meta": {"item": "r-0123456789ab"}},
+    ]  # fmt: skip
+    conv = {"item": "m-1", "thread": "item:m-1", "turns": turns, "loaded": True, "readOnly": False, "more": False}
+    item = {"id": "m-1", "kind": "maintenance", "title": "t"}
+    question = {"id": "q-1", "kind": "question", "title": "q"}
+    program = _views(json.dumps({"conv": conv, "drafts": {}})) + (
+        f"const a = V.convo({json.dumps(item)}); const q = V.convo({json.dumps(question)});"
+        " S.conv.readOnly = true; const ro = V.convo({id: 'q-0', kind: 'question', title: 'x'});"
+        " const links = []; const find = (n) => { if (n.attrs && n.attrs.class === 'link') links.push(n);"
+        " (n.kids || []).forEach(find); }; find(a); links[0].on.click();"
+        " console.log(JSON.stringify({a: dump(a), q: dump(q), ro: dump(ro), calls}));"
+    )
+    out = _run(program)
+    tree = out["a"]
+    joined = _text(tree)
+    assert joined.count(EVIL) >= 5 and "About this item" in joined and "via notification" in joined
+    assert "Sources: " in joined
+    # The link card is a button that opens the item; nothing else is posted.
+    assert out["calls"] == [["open", "r-0123456789ab"]]
+    labels = [n["attrs"].get("aria-label") for n in _find(tree, lambda n: n["tag"] == "textarea")]
+    assert labels == ["Ask about this item"]
+    assert [n["attrs"].get("role") for n in _find(tree, lambda n: n["attrs"].get("class") == "msgs")] == ["log"]
+    assert [n["attrs"].get("aria-label") for n in _find(out["q"], lambda n: n["tag"] == "textarea")] == [
+        "Ask a follow-up"]  # fmt: skip
+    # The earlier one chat is read only: no composer.
+    assert _find(out["ro"], lambda n: n["tag"] == "textarea") == [] and "read only" in _text(out["ro"])
+
+
+@needs_node
+def test_ask_lists_the_questions_and_says_where_item_questions_go() -> None:
+    q = {"id": "q-1", "kind": "question", "title": EVIL, "state": "done", "gist": "answered 09:40",
+         "at": "2026-01-30T09:40:00Z", "revision": 1}  # fmt: skip
+    full, empty = _run(
+        _views(json.dumps({"asks": [q], "drafts": {}}))
+        + "const full = h('div', null, V.ask()); S.asks = []; const empty = h('div', null, V.ask());"
+        " console.log(JSON.stringify([dump(full), dump(empty)]));"
+    )
+    assert EVIL in _text(full) and "Your questions" in _text(full) and "Open the item and ask there" in _text(full)
+    assert "Ask anything" in _text(empty)
+    for tree in (full, empty):
+        assert [n["attrs"].get("aria-label") for n in _find(tree, lambda n: n["tag"] == "textarea")] == [
+            "Ask about the house or the agent"]  # fmt: skip
 
 
 @needs_node
@@ -408,27 +463,20 @@ def test_the_budget_rows_show_run_time_and_the_measured_account() -> None:
 
 
 @needs_node
-def test_every_action_is_a_button_and_ask_the_agent_opens_the_chat_with_the_item() -> None:
+def test_every_action_is_a_button_that_goes_to_the_daemon() -> None:
     item = (
         "{id: 'm-0123456789ab', title: 'acme_weather: Core may replace it', revision: 3, state: 'proposed',"
         " actions: [{id: 'plan_fix', label: 'Plan a fix'}, {id: 'dismiss', label: 'Hide until it changes',"
-        " style: 'text'}, {id: 'ask', label: 'Ask the agent', style: 'text'}]}"
+        " style: 'text'}]}"
     )
     program = (
         _RENDER
-        + _funcs("askAbout")
-        + "function saveDrafts() {}\nS.main = 'thread01'; S.drafts = {};\n"
         + f"const t = {item}; const block = actBlock(t);\n"
         + "const btns = block.kids[block.kids.length - 1].kids;\n"
-        + "btns[0].on.click(); btns[2].on.click();\n"
-        + "console.log(JSON.stringify({labels: btns.map((b) => b.textContent), calls, draft: S.drafts.thread01,"
-        + " item: S.askItem}));"
+        + "btns.forEach((b) => b.on.click());\n"
+        + "console.log(JSON.stringify({labels: btns.map((b) => b.textContent), calls}));"
     )
     result = _run(program)
-    assert result["labels"] == ["Plan a fix", "Hide until it changes", "Ask the agent"]
-    # Plan a fix goes to the daemon; Ask the agent never does: it opens the chat with the item attached.
-    assert result["calls"] == [["act", "plan_fix"], ["go", "#chat"]]
-    assert result["draft"] == (
-        'What should I do about item m-0123456789ab? Its title: "acme_weather: Core may replace it"'
-    )
-    assert result["item"] == {"id": "m-0123456789ab", "title": "acme_weather: Core may replace it"}
+    assert result["labels"] == ["Plan a fix", "Hide until it changes"]
+    # There is no "Ask the agent" any more: asking is the item's conversation, never an action.
+    assert result["calls"] == [["act", "plan_fix"], ["act", "dismiss"]]

@@ -189,7 +189,8 @@ async def test_approvals_ask_once_with_a_link_to_the_panel(rig: Rig) -> None:
     item = rig.item(WEATHER, "v2.4.1")
     assert push.tag == item["id"] and push.url is not None and push.url.endswith(f"/t/{item['id']}")
     assert "Needs you: needs your approval" in push.body
-    assert not push.actions  # the push only opens the item; nothing executes from it
+    # The push opens the item; nothing executes from it. Its one button is Reply: a message on the item.
+    assert [str(a.kind) for a in push.actions] == ["REPLY"] and push.thread_id == f"item:{item['id']}"
     rig.now += timedelta(hours=20)
     await rig.manager.run_window()
     assert len(await rig.flush()) == 1

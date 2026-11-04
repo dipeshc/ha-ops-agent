@@ -188,7 +188,9 @@ def validate_investigate(ctx: ExecContext, args: Args) -> Args:
         raise CapabilityError("title and brief are required")
     open_now = store.open_investigations()
     if any(t.thread_id == run.thread_id for t in open_now):
-        raise CapabilityError("this chat already has an investigation open; wait for it or ask the admin to cancel it")
+        raise CapabilityError(
+            "this conversation already has an investigation open; wait for it or ask the admin to stop it"
+        )
     if len(open_now) >= MAX_OPEN_INVESTIGATIONS:
         raise CapabilityError(f"{MAX_OPEN_INVESTIGATIONS} investigations are already open; try again later")
     if store.count_open_tasks(owner_of(run)) >= MAX_OPEN_TASKS[owner_of(run)]:
@@ -225,5 +227,5 @@ async def exec_investigate(ctx: ExecContext, args: Args) -> str:
         return f"ok: investigation #{task.id} was already started in this run"
     return (
         f"ok: investigation #{task.id} queued: up to {steps} background run(s) after this reply; progress and"
-        " findings appear in this chat. Tell the admin it has started; do not wait for it."
+        " findings appear in this conversation. Tell the admin it has started; do not wait for it."
     )

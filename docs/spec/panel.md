@@ -53,8 +53,10 @@ Tests: `tests/test_panel.py`, `tests/test_panel_shell.py`,
   `test_health_keeps_a_slot_under_a_connection_flood`.
 - N5. **Routing.** API paths are `api/...` relative to the panel; segments
   match `[A-Za-z0-9_-]{1,64}`, at most 4, else 404 `not_found`. An item's
-  URL `id` is therefore an opaque handle, never the thread key. The shell
-  is served for `/`, `/t/<thread or item id>` and `/updates`; its
+  URL `id` is therefore an opaque handle, never a thread key: a client names
+  a conversation only by its item's id. The shell is served for `/`,
+  `/t/<item id>` (a push's link), `/t/<16 hex>` (a chat link from a push
+  before 0.22.0, which opens Home) and `/updates`; its
   `<base href>` derives from the route depth, never from the ingress path
   header. Static scripts are registered by name (`changes.js` only). Test
   `test_shell_base_path_is_validated_and_the_csp_is_strict`.
@@ -91,7 +93,7 @@ The record behind Home, History and the item page
 {
   "id": "u-7f3a91c2",                 // URL-safe handle, [a-z]-[0-9a-z]{1,40}
   "key": "updates:update.home_assistant_operating_system@17.1",
-  "kind": "update",                   // update | reminder | investigation | proposal | check | backup | reload | window | maintenance
+  "kind": "update",                   // update | reminder | investigation | proposal | check | backup | reload | window | maintenance | question
   "kicker": "Operating system update",// optional subtype label; the panel falls back to a label for `kind`
   "ref": "#18",                       // optional short reference shown beside the kicker
   "title": "Home Assistant OS 17.0 → 17.1",
@@ -112,8 +114,8 @@ The record behind Home, History and the item page
     "expires_at": null
   },
   "about": "Runs tonight at 04:00 through the normal pipeline.",  // optional action-block text when need is null
-  "actions": [ { "id": "withdraw", "label": "Withdraw approval", "style": "text" },
-               { "id": "ask", "label": "Ask the agent", "style": "text" } ],  // available outside a need; always ends with ask
+  "actions": [ { "id": "withdraw", "label": "Withdraw approval", "style": "text" } ],  // available outside a need
+  "conversation": "open",             // open: the item takes messages (api/items/<id>/messages); read_only: the earlier one chat
   "phase": { "names": ["Backup", "Install", "Reboot", "Verify"], "current": 2,
              "started_at": "2026-01-15T03:59:00Z", "usual_s": 480 },  // null unless phased; current = names.length when all done
   "follows": { "id": "u-7f3a91c2", "title": "Home Assistant OS 17.0 → 17.1", "state": "waiting" },  // or null
@@ -166,21 +168,28 @@ The record behind Home, History and the item page
   config change answers it ([maintenance.md](maintenance.md) M14a). Test
   `test_the_panel_applies_an_approved_dashboard_plan_end_to_end`.
 
-- N21. **Every item shown is actionable.** Every item in Needs you, In
-  progress, Coming up or Suggestions has at least one action, and every
-  item of any kind ends its `actions` with `ask` ("Ask the agent"), added
-  when the record is served (it is not stored and never moves the
-  revision). The panel renders all of an item's actions as buttons on its
-  card (wrapping at phone width; text only, through `textContent`); `ask`
-  opens the chat with the item attached ("About: <title>", removable) and
-  the first question `What should I do about item <id>? Its title:
-  "<title>"` filled in (the title quoted as data; no item kind's title is
-  purely a device's or entity's own name, so it is never called "the
-  device's own text"), never sent by itself. The send carries the item id (`POST
-  threads/<t>/messages {item}`, [chat.md](chat.md) T6a); nothing else is
-  granted. Tests `test_every_item_the_panel_shows_offers_an_action`,
+- N21. **Every item shown is actionable, and every item has a
+  conversation.** Every item in Needs you, In progress, Coming up or
+  Suggestions has a need, at least one action, or is Running; and every item
+  but the earlier one chat has `conversation: "open"`: its page ends with
+  its conversation ("About this item", or "Conversation" for a question)
+  and the composer "Ask about this item" ("Ask a follow-up" for a question),
+  whose message is `POST api/items/<id>/messages` ([chat.md](chat.md) T6a).
+  The thread and the item the run reads come from the stored record, never
+  from the request; nothing else is granted. There is no "Ask the agent"
+  action (0.22.0 removed it with the Chat destination). The panel renders
+  all of an item's actions as buttons on its card (wrapping at phone width;
+  text only, through `textContent`). Tests
+  `test_every_item_the_panel_shows_offers_an_action`,
   `test_every_update_item_offers_an_action`,
-  `test_ask_the_agent_sends_the_item_with_the_message`.
+  `test_asking_about_an_item_runs_in_its_own_conversation`.
+- N22. **Kinds of item the panel shows apart.** `question` (a question the
+  admin asked, or the earlier one chat; [chat.md](chat.md) T1b, T1a) is
+  stored under the kind `investigation` (the store's CHECK predates it,
+  [storage.md](storage.md)) and served as `question`. A maintenance
+  finding a plan runs on, or whose plan made a proposal, is served with the
+  plan's phases and Stop, or the proposal's need, actions and `change`
+  ([maintenance.md](maintenance.md) M14b).
 
 ## Routes
 
@@ -188,7 +197,7 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
 
 | Route | Behaviour |
 | --- | --- |
-| `GET state` | `status` (off, paused, working, waiting, ready), `ai {on, state, backoff_until, credential}` (`credential`: `setup_token`, `api_key` or null, never the value; [ai-runner.md](ai-runner.md) AP1a), `usage {run_time_5h_s, run_time_5h_cap_s, run_time_7d_s, run_time_7d_cap_s, account_5h_percent, account_7d_percent, cost_today_usd, daily_max_usd, today, last_run}` (see [budget.md](budget.md) B8; the panel's Budget rows show "Run time, 7 days: N of M min", "Run time, 5 hours: N of M min" and "Account, 7 days: X %" when measured), `run {profile, thread}` or null, `queue`, `chat {used, cap: 30, thread}`, `options` (a notice or null), `held {count, until, undelivered[]}` or null, `tz`, `version`, `store`, `quiet {from, to}` (a side is null when unset), `mode`, `updates {auto, window}`, `needs_count`, `csrf`. |
+| `GET state` | `status` (off, paused, working, waiting, ready), `ai {on, state, backoff_until, credential}` (`credential`: `setup_token`, `api_key` or null, never the value; [ai-runner.md](ai-runner.md) AP1a), `usage {run_time_5h_s, run_time_5h_cap_s, run_time_7d_s, run_time_7d_cap_s, account_5h_percent, account_7d_percent, cost_today_usd, daily_max_usd, today, last_run}` (see [budget.md](budget.md) B8; the panel's Budget rows show "Run time, 7 days: N of M min", "Run time, 5 hours: N of M min" and "Account, 7 days: X %" when measured), `run {profile, thread}` or null, `queue`, `chat {used, cap: 30}` (0.22.0 dropped `thread`: there is no one chat), `options` (a notice or null), `held {count, until, undelivered[]}` or null, `tz`, `version`, `store`, `quiet {from, to}` (a side is null when unset), `mode`, `updates {auto, window}`, `needs_count`, `csrf`. |
 | `GET ops` | `items` (open health items, redacted, each merged with `{item, item_state, needs}`), `needs_count`, `history` (the last 30 cycle records, newest first), `status`, `profile {path, loaded, problems, git, overlays, push_target, notify_problem}`. |
 | `POST ai {on}` | `on: false` pauses the AI at once; `on: true` is a high-impact admin action (`panel.ai_on`), refused unless the user is the admin; 400 `bad_ai`, 503 without the usage guard. Returns `{ok, state}`. |
 | `POST run` | Requests a manual health cycle; `{started}`. |
@@ -198,7 +207,10 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
 | `GET suppressions`, `POST suppressions/<id>/revoke` | `{rules: [], problems: [], max: 0}` without the `suppress` overlay; revoke is 404 without it. |
 | `POST backups/now` | 503 without backups, 409 `backup_running`, 429 `backup_rate` with the reason, else starts a standalone backup ([updates.md](updates.md) U24). |
 | `GET diagnostics` | The redacted export ([diagnostics.md](diagnostics.md)). |
-| `GET chat`, `GET threads/<t>?before=`, `POST threads/<t>/messages|retry|autoretry|read|cancel|remember`, `POST presence` | See [chat.md](chat.md). Only the main thread is reachable; `cancel` cancels an investigation, not a message. Presence is rate-limited (a token bucket of 4, 1 per second; 429 `slow_down`). |
+| `GET items/<id>/thread?before=` | The item's conversation: `{thread {id, turns, unread, in_flight, read_only, …}, turns [Turn] (30 a page, oldest first), more, in_flight, read_only}`; 404 `no_such_item`, 400 `bad_cursor`. See [chat.md](chat.md). |
+| `POST items/<id>/messages|retry|autoretry|read|cancel|remember` | A message (`{text, client_id}`, 202 queued, 200 duplicate or refused, 409 `in_flight`, 413, 400 `empty` / `bad_client_id`), and the conversation's retry, auto-retry, read mark, investigation cancel and Remember this. The thread is the item's own (`item:<id>`, `ask:<id>` for a question), derived from the stored record; 404 `no_such_item` for an unknown item; on the earlier one chat everything but `read` is 409 `read_only`. |
+| `POST ask {text, client_id}` | A question about anything without an item ([chat.md](chat.md) T1b): creates the question item (the same `client_id` is the same question) and queues its first message; answers like `messages` plus `item` (the question, with its events) so the panel opens it at once. |
+| `POST presence {item, visible}` | The admin is watching that item's conversation (a 20-second lease; replies are not pushed meanwhile). 400 `bad_presence`, 404 `no_such_item`; rate-limited (a token bucket of 4, 1 per second; 429 `slow_down`). |
 | `GET events`, `GET poll?after=` | Live events (N17). |
 
 ### `GET api/home`
@@ -227,7 +239,8 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
 ### `GET api/history?filter=<f>&before=<cursor>`
 
 - N14. `f` is `all` (default), `needs`, `changes` (proposals, updates,
-  reloads) or `checks` (checks, backups); 400 `bad_filter` / `bad_cursor`.
+  reloads), `questions` (questions and the earlier one chat) or `checks`
+  (checks, backups); 400 `bad_filter` / `bad_cursor`.
   Newest first, 50 per page, keyset cursor on `(at, id)`:
   `{ "items": [Item], "counts": { "needs": 2 }, "more": true, "cursor": "opaque" }`.
   `counts.needs` equals `needs_count`. The panel groups the items by day in
@@ -238,8 +251,7 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
 
 - N15. Body `{"action": "<action id>", "revision": 7}`. `action` MUST be the
   id of `need.primary`, one of `need.secondary`, or one of `actions`. The
-  daemon re-checks everything; the panel's copy is never trusted. `ask` is
-  never posted here: the panel handles it (N21).
+  daemon re-checks everything; the panel's copy is never trusted.
 
 | status | body | meaning |
 | --- | --- | --- |
@@ -259,8 +271,14 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
   `resume_updates`, `withdraw`,
   update `approve`, `approve_now`, `reject`, `reboot_window`, change
   `apply`, `reject`, `revert`, health `accept`, `snooze`,
-  task `cancel`, `stop`, maintenance `plan_fix` (an investigation in the
-  chat, [chat.md](chat.md) T17a), `remind_month`, `remind_quarter`,
+  task `cancel`, `stop`, maintenance `plan_fix` (an investigation on the
+  finding itself, [chat.md](chat.md) T17a; 200 with the message "Planning a
+  fix here. You get a push when it is ready."), `stop` (the finding's
+  running plan), the actions of a proposal folded into a finding
+  (`approve_rebase`, `approve_rebase_now`, `apply`, `revert`, `reject`),
+  which run exactly as on the proposal's own item, bound to the finding's
+  revision and the `change.shown` hash it shows ([maintenance.md](maintenance.md)
+  M14b), `remind_month`, `remind_quarter`,
   `remind_deadline` (an admin reminder about the item), `dismiss` (hide
   the finding until its evidence changes), `reject` (drop the dashboard
   plan) and
@@ -273,7 +291,8 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
 
 Not served (404): `api/tasks`, `api/changes`, `api/facts`, `api/activity`,
 `api/ack`, `api/approvals*`, `api/updates/plan|holds/clear|skip|notes`,
-`api/confirm/<cid>`, `api/items/<id>/withdraw`.
+`api/confirm/<cid>`, `api/items/<id>/withdraw`, and since 0.22.0 `api/chat` and
+`api/threads/*` (a conversation is reached only through its item).
 
 ## Live events
 
@@ -284,7 +303,9 @@ Not served (404): `api/tasks`, `api/changes`, `api/facts`, `api/activity`,
   poll` returns the same events, holding up to 25 seconds, and answers
   `{seq, events: []}` without `after` and `{seq, reset: true}` on a gap. At
   most 4 live connections (SSE and waiting polls together), else 429
-  `too_many_live_connections`. Event kinds: `state`, `status`, `turn`,
+  `too_many_live_connections`. `?item=<id>` adds that item's conversation
+  events (`turn`, `status` and `thread` of its thread; 404 `no_such_item`);
+  the thread is never named by the client. Event kinds: `state`, `status`, `turn`,
   `thread`, `item {id, revision, state, needs_count}` whenever an item
   changes (the panel refetches the open views and ignores revisions older
   than the one it holds), `tasks`, `updates`, `changes`, `facts`,
@@ -294,7 +315,16 @@ Not served (404): `api/tasks`, `api/changes`, `api/facts`, `api/activity`,
 - N18. The page shows the freshness pill green while pings arrive, amber
   after 40 seconds without one and red after 120, and falls back to
   long-polling after 5 seconds without `hello` or 40 without a ping. A
-  turn's `meta.item` may name an item id, and the panel embeds that item's
-  card in the chat.
+  `link` turn's `meta.item` names an item; the panel shows it as a card
+  that opens that item.
+- N23. **Destinations.** Home, Ask and History (bottom bar on phones, rail
+  from 840 px), System behind the gear. Home has Needs you, In progress,
+  Coming up, Suggestions and Today; Ask lists the questions (History's
+  `questions` filter) with the composer "Ask about the house or the agent"
+  and opens the new question at once; History has the filters of N14.
+  Nothing the agent does by itself appears on Ask. Every item opens as its
+  page (`#t/<id>`), with its conversation at the end. Loading, offline
+  (the daemon not answering), "item gone" (404) and failed states have
+  their own words; reduced motion stops the working dots.
 - N19. There is no digest time: the panel never pushes; pushes are decided
   by the item book and the daemon ([items-and-pushes.md](items-and-pushes.md)).

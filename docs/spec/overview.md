@@ -3,8 +3,8 @@
 ha-ops-agent is an unattended maintenance add-on for Home Assistant OS and
 Supervised installs. It checks the system daily against an accepted
 baseline, uses an AI for the parts that need judgement, installs soaked
-updates with a backup, a health diff and a rollback, and holds one admin
-chat. It is built so that a wrong or manipulated AI answer cannot do much
+updates with a backup, a health diff and a rollback, and talks with the
+admin on each item it shows (and on the questions he asks). It is built so that a wrong or manipulated AI answer cannot do much
 harm.
 
 ## Components
@@ -17,7 +17,7 @@ harm.
 | Updates and the OS flow | [updates.md](updates.md), [os-update.md](os-update.md) | `policy.py`, `updates.py`, `updexec.py`, `updiff.py`, `updatefix.py`, `backups.py` |
 | Approvals, items, pushes | [approvals.md](approvals.md), [items-and-pushes.md](items-and-pushes.md) | `approvals.py`, `items.py`, `activity.py`, `notify.py`, `channels.py`, `quiet.py` |
 | Panel and API | [panel.md](panel.md) | `panel.py`, `panelapi.py`, `live.py`, `panel/` |
-| Chat, inbound, tasks | [chat.md](chat.md) | `assistant.py`, `conversation.py`, `inbound.py`, `tasks.py`, `proposals.py`, `chatcards.py` |
+| Conversations, inbound, tasks | [chat.md](chat.md) | `assistant.py`, `conversation.py`, `inbound.py`, `tasks.py`, `proposals.py`, `chatcards.py` |
 | Proactive maintenance | [maintenance.md](maintenance.md) | `maintenance.py`, `inventory.py`, `dashboards.py` (with `evidence.py`) |
 | Git proposals | [proposals.md](proposals.md) | `changes.py`, `changepaths.py`, `gitops.py`, `safegit.py`, `githistory.py`, `configcheck.py` |
 | AI runner and provider | [ai-runner.md](ai-runner.md) | `runner.py`, `runctx.py`, `claude_runner.py`, `guard.py`, `prompts/` |
@@ -53,7 +53,7 @@ These hold at every stage; each has tests named in the owning document.
   ([privsep.md](privsep.md)). The configuration copy the AI reads is
   redacted, with git on or off ([ai-runner.md](ai-runner.md) R10).
 - INV5. **Untrusted text is data.** Device names, logs, release notes,
-  documents and chat messages reach the AI fenced as data, are rendered by
+  documents and conversation messages reach the AI fenced as data, are rendered by
   the panel as text, and never title a need or a push; model text appears
   in one field (`agent.text`) ([items-and-pushes.md](items-and-pushes.md)).
 - INV6. **The admin approves what is risky.** Majors, OS, firmware, fragile
@@ -96,7 +96,8 @@ These hold at every stage; each has tests named in the owning document.
 - D1. Start: clear stale Core-down state, open the opsctl socket, resolve
   the time zone (Supervisor info, else `TZ`, else UTC), run the self-test,
   open the panel on port 8099, wait the startup delay (default 600 s). With
-  a store: recover running tasks, chat and changes; schedule `health.check`
+  a store: recover running tasks, conversations and changes, and keep the
+  earlier one chat as one read-only History item ([chat.md](chat.md) T1a); schedule `health.check`
   daily at `health.check_time` (with a catch-up when the last check is over
   24 hours old), `update.window` daily at `updates.window` (no catch-up)
   and `status.refresh` every 10 minutes; resume an interrupted update run;

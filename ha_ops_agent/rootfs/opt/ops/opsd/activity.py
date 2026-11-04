@@ -1,12 +1,11 @@
-"""The activity log: what the agent did, next to the one chat with the admin.
+"""The activity log: what the agent did, on its items and in History.
 
 Daily checks, follow-ups, reminders, update plans, installs and rollbacks,
 investigations, approval outcomes, health items and local-patch status are
-each one entry here, never chat messages. A no-op is one compact line. Only
-an entry that needs the admin (an escalation, an approval to give, a failed
-update, a follow-up with a finding, a refused confirmation) also posts one
-short agent message in the chat that names the entry (`activity #N`); the
-push goes out as before.
+each one entry here, never messages in a conversation (0.22.0: the agent's
+own notes never post into one). A no-op is one compact line. `post` and
+`chat` are kept for overlays and callers that pass them; the daemon sets no
+`post`.
 
 The chat prompt gets the last week of entries (capped), fenced as data: the
 daemon writes them, but titles and details can carry model or third-party
@@ -39,7 +38,7 @@ CONTEXT_DAYS = 7
 CONTEXT_ENTRIES = 40
 CONTEXT_DETAIL_CHARS = 200
 
-# `(entry, text or None) -> chat turn id`: posts the short message in the one chat.
+# `(entry, text or None) -> turn id`: an optional hook for an entry that needs the admin (the daemon sets none).
 Post = Callable[[dict[str, Any], str | None], int | None]
 
 _KIND = {"backup": "backup", "reload": "reload", "updates": "window", "approval": "update", "change": "proposal",
@@ -110,7 +109,7 @@ class ActivityLog:
         item: str | None = None,
         chat: bool | None = None,
     ) -> dict[str, Any] | None:
-        """One entry; when it needs the admin, one message in the chat too. Never raises.
+        """One entry (and the `post` hook when it needs the admin and one is set). Never raises.
 
         `item`: the key of the process item this entry is about (its timeline gets the entry); without
         one the entry is its own item.

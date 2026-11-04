@@ -1354,8 +1354,9 @@ class ItemBook:
         return self.flush() if self.on_change is None else []
 
     def recompose(self) -> list[dict[str, Any]]:
-        """At start: the items that read the add-on options (the update gate and window, act mode), and the
-        health items, so one that was watching under an earlier version gets its recheck (`recheck_at`)."""
+        """At start: the items that read the add-on options (the update gate and window, act mode), the health
+        items, so one that was watching under an earlier version gets its recheck (`recheck_at`), and the open
+        or asking change and fact items, so a need an earlier version composed is held to this version's rule."""
         with self.store.atomic():
             composer = self._composer()
             self._safely("updates", partial(self._updates, composer, None))
@@ -1363,6 +1364,14 @@ class ItemBook:
                 self._safely(f"window:{run['id']}", partial(self._window, composer, int(run["id"])))
             self._safely("maint", partial(self._maintenance, composer))
             self._safely("health", partial(self._health, composer))
+            for record in self.store.items_all(open_only=True, prefix="change:"):
+                ref = (record.get("source") or {}).get("change")
+                if isinstance(ref, int):
+                    self._safely(f"change:{ref}", partial(self._change, composer, ref))
+            for record in self.store.items_all(open_only=True, prefix="fact:"):
+                ref = (record.get("source") or {}).get("fact")
+                if isinstance(ref, int):
+                    self._safely(f"fact:{ref}", partial(self._fact, composer, ref))
         return self.flush() if self.on_change is None else []
 
     def tick(self) -> list[dict[str, Any]]:

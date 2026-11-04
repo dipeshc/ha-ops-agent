@@ -835,3 +835,19 @@ def test_one_source_that_cannot_be_composed_leaves_the_others(tmp_path: Path, mo
         task_id = remind(store, START)
     assert [r["key"] for r in store.items_all()] == [f"task:{task_id}"] and store.change(1) is not None
     store.close()
+
+
+def test_a_need_an_earlier_version_composed_is_recomposed_at_start(tmp_path: Path) -> None:
+    store, book, _ = task_store(tmp_path)
+    fact = store.add_fact("the cellar pump runs at night", thread_id=None, turn_id=None, now=START)
+    item = store.item_by_key(f"fact:{fact}")
+    assert item is not None and not item["needs"]
+    # As 0.19 wrote it: waiting with an acknowledgement.
+    old = item | {"state": "waiting", "need": {"kind": "ack", "text": "t", "primary": {"id": "dismiss", "label": "x"},
+                                               "secondary": [], "expires_at": None},
+                  "resolved_at": None, "needs_since": START.isoformat()}  # fmt: skip
+    store.put_item(old)
+    assert store.needs_count() == 1
+    book.recompose()
+    assert store.needs_count() == 0 and store.item_by_key(f"fact:{fact}")["state"] == "done"  # type: ignore[index]
+    store.close()

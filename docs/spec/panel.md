@@ -105,7 +105,7 @@ The record behind Home, History and the item page
   "created_at": "2026-01-11T04:00:00Z", "updated_at": "2026-01-15T04:12:00Z",
 
   "need": {                           // non-null only while the item is in Needs you
-    "kind": "approval",               // approval | confirm | physical | answer | ack (0.19.1 produces approval and ack)
+    "kind": "approval",               // approval | confirm | physical | answer | ack (0.20.0 produces approval and ack)
     "text": "17.1 is installed and waiting for one reboot. …",  // what happens, when, cost, what cannot be undone
     "primary": { "id": "reboot_window", "label": "Reboot tonight at 04:00" },
     "secondary": [ { "id": "reject", "label": "Reject", "style": "text" } ],
@@ -253,11 +253,14 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
   `item.act` with the item id, action, revision and the admin's user id;
   the high-impact kinds (approve_update, approve_reboot, approve_change,
   approve_dashboard, updates_on, ai_on) also audit `panel.<kind>` with
-  their outcome. Actions in 0.19.1: `ack`, `resume_updates`, `withdraw`,
+  their outcome. Actions in 0.20.0: `ack`, `resume_updates`, `withdraw`,
   update `approve`, `approve_now`, `reject`, `reboot_window`, change
-  `apply`, `reject`, `revert`, fact `dismiss`, health `accept`, `snooze`,
-  task `cancel`, `stop`, maintenance `dismiss` (hide the finding until its
-  evidence changes), `reject` (drop the dashboard plan) and
+  `apply`, `reject`, `revert`, health `accept`, `snooze`,
+  task `cancel`, `stop`, maintenance `plan_fix` (an investigation in the
+  chat, [chat.md](chat.md) T17a), `remind_month`, `remind_quarter`,
+  `remind_deadline` (an admin reminder about the item), `dismiss` (hide
+  the finding until its evidence changes), `reject` (drop the dashboard
+  plan) and
   `apply_dashboard` (request the dashboard approval for the shown `change`
   and confirm it in the same request, as `approve_dashboard`; see
   [maintenance.md](maintenance.md) M21). Test `test_approve_then_withdraw_binds_each_action_to_its_revision`.

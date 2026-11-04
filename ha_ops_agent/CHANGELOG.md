@@ -1,5 +1,88 @@
 # Changelog
 
+## 0.20.0
+
+The agent handles day-to-day items itself and pulls you in only when it
+needs you, and every item on Home has something you can do with it. No
+store change (the store stays at schema 19); upgrading from 0.19.1 needs
+nothing, and existing options stay valid.
+
+AI budget:
+
+- One honestly labelled run-time budget replaces the estimated share of
+  your subscription: the agent's runs may take `usage.max_share_percent`
+  (default 5) of your plan's weekly hours (`claude.plan`) per rolling 7
+  days, and a fifth of that per 5 hours. Runs stop at 80 % of it, chat and
+  investigations at half, and a run's time limit is trimmed to what is
+  left. It still yields when your account is above 90 % of a window, and
+  the daily run caps, turn and cost caps per run, the kill switch and the
+  usage-limit backoff are unchanged. Refusals keep their codes
+  (`share_cap:<window>` now means the run-time cap).
+- `claude.plan: auto` means pro: Claude Code's output names no plan tier,
+  so the detection is removed. Set `claude.plan` if you have a Max plan.
+- New optional `limits.daily_max_usd`: the most a day's runs may cost, as
+  the provider reports it (meant for API keys; empty or 0 is no cap). Each
+  run's cost cap is trimmed to what is left, and runs stop below 0.05 USD.
+  Without it a day is bounded only by the run caps, about 30 USD at the
+  defaults.
+- `sensor.ops_agent_ai` shows `run_time_5h_s`, `run_time_5h_cap_s`,
+  `run_time_7d_s`, `run_time_7d_cap_s`, `account_5h_percent`,
+  `account_7d_percent` (measured, or null), `cost_today_usd` and
+  `daily_max_usd`. Removed: `plan`, `max_share_percent`,
+  `share_stop_percent`, `agent_share_5h_percent`, `agent_share_7d_percent`
+  and the two `*_estimated` flags; update any card or automation that read
+  them.
+- The panel's Budget rows read "Run time, 7 days: N of M min", "Run time,
+  5 hours: …", "Account, 7 days: X %" when measured, and "Cost today" when
+  a daily cap is set.
+- `GET api/usage` is removed (nothing used it).
+- The "claude run finished" log line carries each window's utilisation
+  exactly as reported, so its unit can be checked.
+
+Needs you only when needed:
+
+- Deprecations ask 30 days before their deadline (the month the removal
+  release ships), not two releases ahead. Until then the finding and its
+  one-tap fix (a config change or a dashboard plan) wait in Coming up,
+  ready to apply. Findings without a deadline never ask.
+- An update whose release age is unknown waits (checked again every night)
+  instead of asking; it asks after 30 days, or at once when a repair or a
+  breaking change touches it.
+- The agent's triage run pushes only when you must act or decide: its push
+  needs a reason (`needs_action`, `physical_task` or `security`), and
+  anything for information becomes a note in History. The daemon's own
+  critical pushes (locks, the alarm, access hardware, Core down, backup
+  failures and the rest) are unchanged.
+- No longer in Needs you: an update install that failed once and changed
+  nothing (it is retried the next night; a second failure asks), an
+  approved update Home Assistant no longer offers, a failed config change
+  (the daemon undid it), a change that cannot be shown in full (it
+  expires by itself), a fact noted without a proposal, info health items,
+  and a dashboard change that was refused or restored. Items an earlier
+  version put in Needs you are recomposed at start.
+
+Every item is actionable:
+
+- Every item has "Ask the agent": the chat opens with the item attached
+  and "What should I do about …?" filled in, and the agent reads the item's
+  record (fenced as data) with your message.
+- Maintenance findings and suggestions have "Plan a fix" (an
+  investigation in the chat that writes a plan and proposes the fix where
+  it may, or says plainly that you or an engineering session must do it),
+  "Remind me" in 30 or 90 days or near the deadline, and "Hide until it
+  changes" (the former "Not relevant here").
+
+For overlays and integrators: the overlay API is unchanged. Internal
+changes that code outside this repository could notice:
+`opsctl notify` takes `--reason`; `RunResult.plan_hint`,
+`claude_runner.plan_hint`, `budget.run_share`, `budget.share_inconclusive`,
+`Caps.estimated_share`, `Caps.share_stop` and `Store.run_shares` are
+removed; `Store.finish_run` no longer takes `share_5h`, `share_7d` or
+`share_estimated`; `Caps.from_options` no longer takes `detected_plan`;
+`budget.resolve_plan` takes the option only; `policy.Decision` gains
+`age_unknown`; the effect sink gains `note_message`; activity entries gain
+the quiet kind `note`.
+
 ## 0.19.1
 
 Hardening and fixes. No store change; upgrading from 0.19.0 needs nothing.

@@ -120,13 +120,19 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   holds no GitHub question is asked, and the candidate comes back only
   when the Core minor or a fork file changes and the fork no longer
   carries changes Core lacks. When GitHub or the fork cannot be read the
-  candidate stays as it is. Tests
+  candidate stays as it is, and a stored reason for a fork whose fingerprint
+  has changed is cleared. The answer is believed only when at least
+  `MIN_SIMILARITY` (60%) of the fork's Python lines match its origin release;
+  below that the candidate stays as it is. New files count only when they are
+  Python files (a README, `hacs.json` or translations do not). Tests
   `test_the_weekly_checks_find_archived_repositories_and_replacements`,
   `test_github_answers_without_the_expected_shape_are_unknown`,
   `test_a_fork_that_is_still_needed_settles_its_replacement_candidate`,
   `test_an_unreadable_fork_leaves_the_candidate_as_it_is`,
   `test_a_fork_with_changes_core_lacks_is_still_needed`,
-  `test_a_fork_whose_changes_core_took_over_is_not_needed`.
+  `test_a_fork_whose_changes_core_took_over_is_not_needed`,
+  `test_a_fork_far_from_every_release_is_not_judged`,
+  `test_only_code_files_of_its_own_make_a_fork_needed`.
 - M6. **Marketplace.** A read post with a heading naming a Marketplace,
   while HACS is installed, becomes one suggestion. Without HACS there is
   none. Test `test_without_hacs_there_is_no_marketplace_suggestion`.
@@ -228,8 +234,21 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   they report now (a log line no longer there is not kept for
   `LOG_STICKY`); a replacement candidate of the domain is checked as in M5.
   Other domains and signals, and the weekly checks, are untouched. It
-  never raises. Tests `test_a_successful_fix_settles_that_domains_findings_at_once`,
+  never raises, and it reads the stored findings strictly (`load(strict=True)`):
+  a failed read keeps every earlier finding and plan, never replaces them with
+  a partial list. A scan and a settle hold one lock from their read to their
+  write, so neither overwrites the other and `_prune` never deletes a plan
+  made meanwhile. A log line the restart emptied from the log keeps its finding
+  while the custom integration's current source still names its deprecated
+  thing as a whole identifier, until that is gone from the source or
+  `LOG_STICKY` has passed. The daemon runs it as a task of its own, off the
+  update job's lane. Tests `test_a_successful_fix_settles_that_domains_findings_at_once`,
   `test_a_fork_is_checked_again_right_after_a_rebase`,
+  `test_a_failed_read_of_the_findings_never_wipes_other_domains`,
+  `test_a_settle_and_a_scan_never_interleave`,
+  `test_a_log_finding_stays_while_the_forks_source_still_uses_the_thing`,
+  `test_a_log_finding_is_dropped_when_the_source_is_unreadable_or_the_week_is_over`,
+  `test_an_old_fork_reason_is_cleared_when_a_changed_fork_cannot_be_judged`,
   `test_the_pipeline_happy_path`,
   `test_an_applied_change_is_reported_and_a_push_moves_the_tracking_ref`.
 - M14a. **Every finding is actionable.** Besides its conversation (as on

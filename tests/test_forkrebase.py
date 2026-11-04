@@ -997,3 +997,17 @@ def test_a_commit_a_later_push_carried_is_shown_as_pushed(pipe: tuple[Rig, ForkO
     assert forkrebase.load(rig.store, record["id"])["detail"] == "applied and healthy; committed abc1234567, pushed"
     assert "committed abc1234567, pushed" in item(rig, record)["gist"]
     assert forkrebase.settle_pushes(rig.store, PushedRepo({"abc1234567"}), now=rig.now) == 0
+
+
+def test_a_fork_far_from_every_release_is_not_judged(paths: Paths, gh: FakeGitHub) -> None:
+    unrelated = "".join(f"LINE_{n} = {n}\n" for n in range(40))
+    write_custom(paths, {"manifest.json": FORK_MANIFEST, "__init__.py": INIT, "fan.py": unrelated}, DOMAIN)
+    with pytest.raises(RebaseRefused, match="too far"):
+        state(paths)
+
+
+def test_only_code_files_of_its_own_make_a_fork_needed(paths: Paths, gh: FakeGitHub) -> None:
+    gh.publish(INSTALLED, DOMAIN, {**BASE_FILES, "fan.py": REBASED_FAN})
+    extras = {"README.md": "# Acme\n", "hacs.json": '{"name": "Acme"}\n'}
+    write_custom(paths, {k: v for k, v in FORK_FILES.items() if k != "presets.py"} | extras, DOMAIN)
+    assert not state(paths).needed

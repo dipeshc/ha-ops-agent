@@ -332,9 +332,17 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   status refresh, with local git reads only: once `refs/remotes/origin/main`
   holds the commit (a later push carried it; a successful push moves that
   ref), the proposal's detail, and so its item, reads "committed <sha>,
-  pushed" (`forkrebase.settle_pushes`). When the job has succeeded,
-  maintenance reads that domain's findings again at once (M14c). Tests
+  pushed" (`forkrebase.settle_pushes`). The same holds for a config
+  change's "committed <sha>, not pushed yet (...)" detail (any trailing
+  period or note kept), checked against its `applied_sha` (`reverted_sha`
+  for a revert). The tick takes the git lock only when a record is stale.
+  `Repo.push` pushes the exact commit it checked and then moves
+  `refs/remotes/origin/main` to it (compare-and-set on the fetched value).
+  When the job has succeeded, maintenance reads that domain's findings again
+  as a task of its own, not inside the job (M14c). Tests
   `test_a_commit_a_later_push_carried_is_shown_as_pushed`,
+  `test_a_change_left_not_pushed_is_shown_pushed_once_origin_holds_its_commit`,
+  `test_a_failing_applied_hook_never_raises_into_the_apply`,
   `test_the_pipeline_happy_path`.
 - U30. **Rollback.** With no snapshot nothing was written and Core was
   not restarted (the snapshot precedes every write): the job is `failed`

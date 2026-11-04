@@ -63,6 +63,7 @@ update whose version reaches the removal version of an unresolved deprecation fr
 release notes (`removal_block`).
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -555,10 +556,17 @@ def removal_block(item: Mapping[str, Any], findings: Iterable[Finding]) -> str |
 # ------------------------------------------------------------------ records
 
 
-def load(store: Store) -> list[Finding]:
+def load(store: Store, *, strict: bool = False) -> list[Finding]:
+    """The stored findings. `strict`: a failed read of the store raises (StoreError, sqlite3.Error) instead of
+    reading as "no findings", for a writer that would otherwise replace every finding with a partial list."""
     try:
         raw = json.loads(store.kv_get(FINDINGS_KEY) or "[]")
-    except (StoreError, sqlite3.Error, ValueError) as err:
+    except (StoreError, sqlite3.Error) as err:
+        if strict:
+            raise
+        _LOGGER.warning("maintenance findings unreadable", extra={"error": str(err)[:160]})
+        return []
+    except ValueError as err:
         _LOGGER.warning("maintenance findings unreadable", extra={"error": str(err)[:160]})
         return []
     found = [Finding.from_json(r) for r in raw] if isinstance(raw, list) else []
@@ -708,6 +716,8 @@ ForkPrint = Callable[[str, str], Awaitable[str | None]]
 # (domain, installed Core version) -> (still needed, short summary of the fork's own changes, fingerprint); None
 # when it cannot be told (GitHub unreachable, the fork unreadable): the candidate then stays as it is.
 ForkCheck = Callable[[str, str], Awaitable[tuple[bool, str, str] | None]]
+# domain -> the custom integration's current source text (its top-level files), or None when unreadable.
+ForkText = Callable[[str], Awaitable[str | None]]
 # (finding, why, edits) -> the proposal row (changes.build_proposal through updatefix.apply_edits).
 Propose = Callable[[Finding, str, list[Any]], Awaitable[dict[str, Any]]]
 
@@ -717,6 +727,7 @@ class MaintenanceManager:
                  git: bool, generated: frozenset[str], plan: Plan | None = None, propose: Propose | None = None,
                  publish: Callable[[], Any] = lambda: None, note: Callable[[str, str], Any] | None = None,
                  fork_print: ForkPrint | None = None, fork_check: ForkCheck | None = None,
+                 fork_text: ForkText | None = None,
                  clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:  # fmt: skip
         self.store = store
         self._gather = gather
@@ -729,10 +740,13 @@ class MaintenanceManager:
         self._note = note
         self._fork_print = fork_print
         self._fork_check = fork_check
+        self._fork_text = fork_text
         self._clock = clock
+        # Held from a scan's or a settle's read of the findings to its write: neither overwrites the other.
+        self._lock = asyncio.Lock()
 
-    def findings(self) -> list[Finding]:
-        return load(self.store)
+    def findings(self, *, strict: bool = False) -> list[Finding]:
+        return load(self.store, strict=strict)
 
     def due(self, *, before_update: bool = False) -> bool:
         """Before an update plan: only when the last scan is old (the daily check usually made one)."""
@@ -754,7 +768,8 @@ class MaintenanceManager:
     async def scan(self, trigger: str) -> dict[str, Any]:
         """Read the signals, keep the findings, plan the new ones. Never raises: a failure keeps the old findings."""
         try:
-            return await self._scan(trigger)
+            async with self._lock:
+                return await self._scan(trigger)
         except Exception:
             _LOGGER.exception("maintenance scan failed", extra={"trigger": trigger})
             return {"result": "failed"}
@@ -763,7 +778,7 @@ class MaintenanceManager:
         now = self._clock()
         gathered = await self._gather()
         inv, installed = gathered.inventory, gathered.installed
-        previous = self.findings()
+        previous = self.findings(strict=True)
         info = meta(self.store)
         failed: set[str] = set()
         problems = list(inv.problems)
@@ -876,6 +891,9 @@ class MaintenanceManager:
                 return True
             state = await self._fork_check(domain, installed)
             if state is None:
+                if isinstance(stored, dict):
+                    # The fork or Core changed and cannot be judged now: the old reason no longer holds.
+                    self.store.kv_set(FORK_KEY + domain, "", now=now)
                 return False
             needed, summary, fingerprint = state
             if not needed:
@@ -897,16 +915,21 @@ class MaintenanceManager:
         if usable_domain(domain) is None:
             return
         try:
-            await self._settle(domain)
+            async with self._lock:
+                await self._settle(domain)
         except Exception:
             _LOGGER.exception("maintenance settle failed", extra={"domain": domain})
 
     async def _settle(self, domain: str) -> None:
         now = self._clock()
+        previous = self.findings(strict=True)
         gathered = await self._gather()
         fresh = [f for f in from_repairs(gathered.issues, gathered.installed) + from_logs(gathered.logs, now)
                  if f.domain == domain]  # fmt: skip
-        kept = [f for f in self.findings() if not (f.domain == domain and f.signal in ("repair", "log"))]
+        fresh_keys = {f.key for f in fresh}
+        kept = [f for f in previous if not (f.domain == domain and f.signal in ("repair", "log"))]
+        kept += await self._still_used(domain, [f for f in previous if f.domain == domain and f.signal == "log"
+                                                and f.key not in fresh_keys], now)  # fmt: skip
         found = await self._unforked(
             [f for f in kept if f.domain == domain and f.signal == "replacement"], gathered.installed
         )
@@ -919,6 +942,24 @@ class MaintenanceManager:
             self.store.kv_set(FINDINGS_KEY, json.dumps([f.to_json() for f in found]), now=now)
             self._prune({f.key for f in found}, now)
         self._publish()
+
+    async def _still_used(self, domain: str, old: list[Finding], now: datetime) -> list[Finding]:
+        """Log findings the log no longer holds (a restart empties it) that the custom integration's current source
+        still uses: kept until the deprecated thing is gone from the source, or for `LOG_STICKY`."""
+        if not old or self._fork_text is None:
+            return []
+        text = await self._fork_text(domain)
+        if text is None:
+            return []
+        kept = []
+        for finding in old:
+            thing = str(finding.detail.get("thing") or "").removesuffix("()")
+            seen = datetime.fromisoformat(finding.seen_at) if finding.seen_at else None
+            # A whole name: `x_setup` is not used by a source that only has `x_setups`.
+            used = bool(thing) and re.search(rf"(?<![A-Za-z0-9_]){re.escape(thing)}(?![A-Za-z0-9_])", text)
+            if used and seen is not None and now - seen < LOG_STICKY:
+                kept.append(finding)
+        return kept
 
     def _prune(self, keys: set[str], now: datetime) -> None:
         """Plans, dashboard plans and results of findings that are gone (the records stay small)."""

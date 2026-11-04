@@ -1019,9 +1019,14 @@ class ChangeManager:
             self.activity("change", f"Config change #{change_id} ({action}): {outcome.state}", outcome.detail,
                           ref={"change": change_id}, item=f"change:{change_id}")  # fmt: skip
         self._publish()
-        row = self.store.change(change_id)
-        if self.applied is not None and action == "apply" and outcome.state == "applied" and row is not None:
-            await self.applied(row)
+        if self.applied is not None and action == "apply" and outcome.state == "applied":
+            # The change is applied and reported: nothing the hook does may raise into the caller.
+            try:
+                row = self.store.change(change_id)
+                if row is not None:
+                    await self.applied(row)
+            except Exception:
+                _LOGGER.exception("applied hook failed", extra={"id": change_id})
         return outcome
 
     async def _execute(self, approval_id: str, change_id: int, action: str) -> Outcome:

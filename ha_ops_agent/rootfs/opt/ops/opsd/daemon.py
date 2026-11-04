@@ -447,7 +447,7 @@ class Daemon:
                 generated=options.profile.dashboards.generated, plan=self._maintenance_plan,
                 propose=self._propose_maintenance if self.repo is not None else None,
                 publish=lambda: self.hub.publish("maintenance", None, {}),
-                fork_print=self._fork_print, fork_check=self._fork_check,
+                fork_print=self._fork_print, fork_check=self._fork_check, fork_text=self._fork_text,
             )  # fmt: skip
             self.dashboards = dashboards.DashboardWriter(
                 store=self.store, options=options, approvals=Approvals(self.store), ws=self._ws_command,
@@ -1546,19 +1546,31 @@ class Daemon:
         )  # fmt: skip
 
     async def _fix_settled(self, domain: str) -> None:
-        """A fix for `domain` succeeded: its maintenance findings are read again now."""
-        if self.maintenance is not None:
-            await self.maintenance.settle(domain)
+        """A fix for `domain` succeeded: its maintenance findings are read again, off the caller's lane (the update
+        job must not wait for the repairs, the log or GitHub)."""
+        if self.maintenance is None:
+            return
+        task = asyncio.create_task(self.maintenance.settle(domain))
+        self._item_pushes.add(task)
+        task.add_done_callback(self._item_pushes.discard)
 
     async def _change_applied(self, row: Mapping[str, Any]) -> None:
-        """An applied config change proposed for a maintenance finding settles that finding's domain at once."""
+        """An applied config change proposed for a maintenance finding settles that finding's domain."""
         who = str(row.get("requested_by") or "")
         if self.maintenance is None or not who.startswith(maintenance.PROPOSER):
             return
         key = who.removeprefix(maintenance.PROPOSER)
         finding = next((f for f in self.maintenance.findings() if f.key == key), None)
         if finding is not None and finding.domain:
-            await self.maintenance.settle(finding.domain)
+            await self._fix_settled(finding.domain)
+
+    async def _fork_text(self, domain: str) -> str | None:
+        """The custom integration's current source (its top-level text files); None when it cannot be read."""
+        try:
+            custom = await asyncio.to_thread(read_custom, self.paths.custom_components, domain)
+        except CoreSourceError, OSError:
+            return None
+        return "\n".join(custom.files[name] for name in sorted(custom.files))
 
     async def _fork_print(self, domain: str, installed: str) -> str | None:
         """The fork's fingerprint (installed Core minor + its files' hashes); local reads only."""
@@ -1588,10 +1600,13 @@ class Daemon:
         return None if state is None else (state.needed, state.summary, state.fingerprint)
 
     async def _settle_fork_pushes(self) -> None:
-        """Fork rebases left "not pushed yet": a later push may have carried the commit (local git reads only)."""
+        """Commits left "not pushed yet" (fork rebases, config changes): a later push may have carried them."""
         if self.store is None or self.repo is None:
             return
         repo, store = self.repo, self.store
+        # Most ticks have nothing stale: no lock, no git.
+        if not await asyncio.to_thread(forkrebase.stale_pushes, store):
+            return
         async with self.git_lock:
             await asyncio.to_thread(forkrebase.settle_pushes, store, repo, now=datetime.now(UTC))
 

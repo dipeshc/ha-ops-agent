@@ -463,6 +463,33 @@ async def test_an_applied_change_is_reported_and_a_push_moves_the_tracking_ref(w
     assert len(applied) == 1
 
 
+async def test_a_change_left_not_pushed_is_shown_pushed_once_origin_holds_its_commit(w: World) -> None:
+    from opsd import forkrebase
+
+    found = w.propose({ALERT: NEW_ALERT})
+    assert (await w.run(found["id"])).state == "applied"
+    row = w.store.change(found["id"])
+    assert row is not None and row["applied_sha"]
+    assert not forkrebase.stale_pushes(w.store)
+    stale = f"committed {row['applied_sha'][:10]}, not pushed yet (origin moved or unreachable). Note for later."
+    assert w.store.move_change(found["id"], expect=("applied",), to="applied", now=w.now, detail=stale)
+    assert forkrebase.stale_pushes(w.store)
+    # origin/main holds the commit (the push moved the tracking ref): settled, the note kept.
+    assert forkrebase.settle_pushes(w.store, w.repo, now=w.now) == 1
+    after = w.store.change(found["id"])
+    assert after is not None and after["detail"] == f"committed {row['applied_sha'][:10]}, pushed. Note for later."
+    assert not forkrebase.stale_pushes(w.store)
+
+
+async def test_a_failing_applied_hook_never_raises_into_the_apply(w: World) -> None:
+    async def broken(row: Any) -> None:
+        raise RuntimeError("settle exploded")
+
+    w.manager.applied = broken
+    found = w.propose({ALERT: NEW_ALERT})
+    assert (await w.run(found["id"])).state == "applied"
+
+
 async def test_two_factors_binding_replay_and_expiry(w: World) -> None:
     found = w.propose({ALERT: NEW_ALERT})
     approval = await w.approve(found["id"])

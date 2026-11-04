@@ -995,3 +995,120 @@ async def test_a_fork_is_checked_again_right_after_a_rebase(tmp_path: Path) -> N
     forks.state = (True, "fan.py: 1 change", "2030.2:bbb")
     await rig.manager.settle("acme_weather")
     assert by_signal(rig, "replacement") == [] and forks.checks == 2
+
+
+# ------------------------------------------------------------------ 0.22.1 review fixes
+
+
+async def test_a_failed_read_of_the_findings_never_wipes_other_domains(tmp_path: Path) -> None:
+    import sqlite3
+
+    rig = Rig(tmp_path)
+    await rig.scan()
+    repair = by_signal(rig, "repair")[0]
+    rig.answer = {"plans": [{"key": repair.key, "plan": "Open Repairs and follow it."}]}
+    rig.now += timedelta(hours=1)
+    await rig.scan()
+    before = [f.key for f in rig.manager.findings()]
+    assert maintenance.plan_of(rig.store, repair) is not None
+    real = rig.store.kv_get
+    failures = [1]
+
+    def flaky(key: str) -> Any:
+        if key == maintenance.FINDINGS_KEY and failures:
+            failures.pop()
+            raise sqlite3.OperationalError("database is locked")
+        return real(key)
+
+    rig.store.kv_get = flaky  # type: ignore[method-assign]
+    await rig.manager.settle("acme_weather")
+    assert not failures
+    rig.store.kv_get = real  # type: ignore[method-assign]
+    assert [f.key for f in rig.manager.findings()] == before
+    assert maintenance.plan_of(rig.store, repair) is not None
+    # A scan that cannot read them keeps them too.
+    failures.append(1)
+    rig.store.kv_get = flaky  # type: ignore[method-assign]
+    assert (await rig.manager.scan("daily"))["result"] == "failed"
+    rig.store.kv_get = real  # type: ignore[method-assign]
+    assert [f.key for f in rig.manager.findings()] == before
+
+
+async def test_a_settle_and_a_scan_never_interleave(tmp_path: Path) -> None:
+    import asyncio
+
+    rig = Rig(tmp_path)
+    await rig.scan()
+    events: list[str] = []
+    real = rig.gather
+
+    async def slow() -> Gathered:
+        events.append("start")
+        await asyncio.sleep(0.05)
+        found = await real()
+        events.append("end")
+        return found
+
+    rig.manager._gather = slow
+    await asyncio.gather(rig.manager.scan("daily"), rig.manager.settle("acme_weather"),
+                         rig.manager.settle("acme_sprinkler"))  # fmt: skip
+    assert events == ["start", "end"] * 3
+
+
+class Source:
+    def __init__(self, text: str | None) -> None:
+        self.text = text
+
+    async def read(self, domain: str) -> str | None:
+        return self.text
+
+
+async def test_a_log_finding_stays_while_the_forks_source_still_uses_the_thing(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.logs = list(REAL_SHAPED_LOGS[:1])
+    await rig.scan()
+    [log] = by_signal(rig, "log")
+    assert log.detail["thing"] == "async_forward_entry_setup"
+    rig.logs = []
+    source = Source("await hass.config_entries.async_forward_entry_setup(entry, 'fan')\n")
+    rig.manager._fork_text = source.read
+    await rig.manager.settle("acme_fan")
+    assert [f.key for f in by_signal(rig, "log")] == [log.key]
+    # Gone from the source: settled. Or past the week the log would have kept it.
+    source.text = "await hass.config_entries.async_forward_entry_setups(entry, ['fan'])\n"
+    await rig.manager.settle("acme_fan")
+    assert by_signal(rig, "log") == []
+
+
+async def test_a_log_finding_is_dropped_when_the_source_is_unreadable_or_the_week_is_over(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.logs = list(REAL_SHAPED_LOGS[:1])
+    await rig.scan()
+    rig.logs = []
+    source = Source(None)
+    rig.manager._fork_text = source.read
+    await rig.manager.settle("acme_fan")
+    assert by_signal(rig, "log") == []
+    rig.logs = list(REAL_SHAPED_LOGS[:1])
+    await rig.scan()
+    rig.logs = []
+    rig.now += maintenance.LOG_STICKY + timedelta(hours=1)
+    source.text = "async_forward_entry_setup(entry)\n"
+    await rig.manager.settle("acme_fan")
+    assert by_signal(rig, "log") == []
+
+
+async def test_an_old_fork_reason_is_cleared_when_a_changed_fork_cannot_be_judged(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    forks = Forks()
+    await rig.scan()
+    rig.manager._fork_print, rig.manager._fork_check = forks.fingerprint, forks.check
+    rig.now += timedelta(days=8)
+    await rig.scan()
+    assert by_signal(rig, "replacement") == [] and rig.store.kv_get(maintenance.FORK_KEY + "acme_weather")
+    forks.print = "2030.3:aaa"
+    forks.state = None
+    rig.now += timedelta(days=8)
+    await rig.scan()
+    assert len(by_signal(rig, "replacement")) == 1
+    assert not rig.store.kv_get(maintenance.FORK_KEY + "acme_weather")

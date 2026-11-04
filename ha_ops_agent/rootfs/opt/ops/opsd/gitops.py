@@ -260,13 +260,16 @@ class Repo:
         url = self.remote_url()
         self.run("fetch", "--quiet", "--no-recurse-submodules", "--end-of-options", url,
                  "+refs/heads/main:refs/remotes/origin/main")  # fmt: skip
-        behind = int(self.run("rev-list", "--count", "HEAD..refs/remotes/origin/main").strip() or "0")
+        sha = self.run("rev-parse", "--verify", "HEAD").strip()
+        old = self.run("rev-parse", "--verify", "refs/remotes/origin/main").strip()
+        behind = int(self.run("rev-list", "--count", f"{sha}..refs/remotes/origin/main").strip() or "0")
         if behind:
             raise GitError(f"origin/main is {behind} commit(s) ahead; not pushing")
-        self.run("push", "--no-recurse-submodules", "--end-of-options", url, "HEAD:refs/heads/main")
+        # The exact commit that was checked, so a commit made meanwhile is neither pushed nor claimed as pushed.
+        self.run("push", "--no-recurse-submodules", "--end-of-options", url, f"{sha}:refs/heads/main")
         # Pushing to a URL does not move the tracking ref: later checks of "is it pushed" read it.
         try:
-            self.run("update-ref", "refs/remotes/origin/main", "HEAD")
+            self.run("update-ref", "refs/remotes/origin/main", sha, old)
         except GitError:
             # The push went out: a stale tracking ref only delays the "pushed" status until the next fetch.
             _LOGGER.info("tracking ref not updated after a push")

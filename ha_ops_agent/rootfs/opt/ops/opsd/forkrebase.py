@@ -92,10 +92,16 @@ ENTITY_PREFIX = "fork."
 STATES = frozenset({"open", "applying", "applied", "rolled_back", "failed", "rejected", "stale"})
 FINAL = frozenset({"applied", "rolled_back", "failed", "rejected", "stale"})
 KEEP_PROPOSALS = 20
-# The detail `Daemon._commit_fork` leaves when the push did not go out.
+# The detail a commit leaves when its push did not go out (a fork rebase's, a config change's with a trailing
+# period and an optional note).
 STALE_PUSH_RE = re.compile(
-    r"(?P<head>.*?)committed (?P<sha>[0-9a-f]{7,40}), not pushed yet \(origin moved or unreachable\)"
+    r"(?P<head>.*?)(?P<verb>committed|reverted in) (?P<sha>[0-9a-f]{7,40}), not pushed yet "
+    r"\(origin moved or unreachable\)(?P<tail>.*)",
+    re.DOTALL,
 )
+# The least share of the fork's Python lines that must match its origin release for "still needed" to be
+# believed: a fork that is far from every release cannot be told from Core's changes.
+MIN_SIMILARITY = 0.6
 
 
 class RebaseRefused(ValueError):
@@ -856,6 +862,20 @@ def _manifest_differs(core: str, fork: str) -> bool:
     return {k: v for k, v in a.items() if k != "version"} != {k: v for k, v in b.items() if k != "version"}
 
 
+def _similarity(origin: Mapping[str, str], fork: Mapping[str, str]) -> float:
+    """The share of the fork's Python lines that the origin release has in the same place (1.0: no `.py`)."""
+    total = matched = 0
+    for name, text in fork.items():
+        if not name.endswith(".py"):
+            continue
+        b = text.splitlines()
+        total += len(b)
+        if name in origin:
+            blocks = difflib.SequenceMatcher(None, origin[name].splitlines(), b, autojunk=False).get_matching_blocks()
+            matched += sum(block.size for block in blocks)
+    return matched / total if total else 1.0
+
+
 def fork_state(source: CoreSource, custom_components: Path, domain: str, installed: str) -> ForkState:
     """What `core-compare --fork` shows, decided by the daemon: the fork's own changes (hunks against its origin
     release) that Core's installed version lacks. RebaseRefused or CoreSourceError when it cannot be told."""
@@ -868,6 +888,8 @@ def fork_state(source: CoreSource, custom_components: Path, domain: str, install
         return ForkState(False, "", print_)
     core = {name: source.text(listing, name) for name in sorted(set(fork.files) & set(listing.files))}
     origin = find_origin(source, domain, installed, fork.files)
+    if _similarity(origin.texts, fork.files) < MIN_SIMILARITY:
+        raise RebaseRefused("the fork is too far from every Core release searched to tell its own changes")
     counts: dict[str, int] = {}
     for hunk in fork_hunks(origin.texts, fork.files):
         # A custom integration's manifest always differs by its `version`, which is no change of the fork's own.
@@ -875,7 +897,8 @@ def fork_state(source: CoreSource, custom_components: Path, domain: str, install
             counts[hunk.file] = counts.get(hunk.file, 0) + 1
     if "manifest.json" in core and _manifest_differs(core["manifest.json"], fork.files["manifest.json"]):
         counts["manifest.json"] = 1
-    only_fork = set(fork.files) - set(listing.files)
+    # Only code counts as the fork's own: a README, hacs.json or translations are no change to the integration.
+    only_fork = {n for n in set(fork.files) - set(listing.files) if n.endswith(".py")}
     if not counts and not only_fork:
         return ForkState(False, "", print_)
     labels = {name: f"{name}: {n} change{'s' if n != 1 else ''}" for name, n in counts.items()}
@@ -887,22 +910,45 @@ def fork_state(source: CoreSource, custom_components: Path, domain: str, install
     return ForkState(True, clean_text(summary, 120), print_)
 
 
+def _stale(detail: Any) -> re.Match[str] | None:
+    return STALE_PUSH_RE.fullmatch(str(detail or ""))
+
+
+def stale_pushes(store: Store) -> bool:
+    """Whether any applied rebase or config change still says its commit is "not pushed yet" (store reads only)."""
+    if any(r.get("state") == "applied" and _stale(r.get("detail")) for r in proposals(store)):
+        return True
+    return any(_stale(r.get("detail")) for r in store.changes(states=("applied", "reverted"), limit=50))
+
+
 def settle_pushes(store: Store, repo: Any, *, now: datetime) -> int:
-    """Applied rebases whose commit was left "not pushed yet": once `origin/main` holds the commit (a later push
-    or fetch carried it), the record says it is pushed. Local git reads only; returns how many were updated."""
+    """Applied rebases and config changes whose commit was left "not pushed yet": once `origin/main` holds the
+    commit (a later push or fetch carried it), the record says it is pushed. Local git reads only; returns how many
+    were updated."""
     settled = 0
-    for record in proposals(store):
-        found = STALE_PUSH_RE.fullmatch(str(record.get("detail") or ""))
-        if record.get("state") != "applied" or found is None:
-            continue
-        try:
-            carried = repo.is_ancestor(found.group("sha"), "refs/remotes/origin/main")
-        except Exception:  # noqa: BLE001 - a git failure leaves the status as it was
-            _LOGGER.info("push status not checked", extra={"proposal": record.get("id")})
-            return settled
-        if carried and move(store, str(record["id"]), expect=("applied",), to="applied", now=now,
-                            detail=f"{found.group('head')}committed {found.group('sha')}, pushed"):  # fmt: skip
-            settled += 1
+    try:
+        for record in proposals(store):
+            found = _stale(record.get("detail"))
+            if record.get("state") != "applied" or found is None:
+                continue
+            if repo.is_ancestor(found.group("sha"), "refs/remotes/origin/main") and move(
+                store, str(record["id"]), expect=("applied",), to="applied", now=now,
+                detail=f"{found.group('head')}committed {found.group('sha')}, pushed{found.group('tail')}",
+            ):  # fmt: skip
+                settled += 1
+        for row in store.changes(states=("applied", "reverted"), limit=50):
+            found = _stale(row.get("detail"))
+            sha = row.get("applied_sha" if row["state"] == "applied" else "reverted_sha")
+            if found is None or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{7,64}", sha):
+                continue
+            if repo.is_ancestor(sha, "refs/remotes/origin/main") and store.move_change(
+                int(row["id"]), expect=(row["state"],), to=row["state"], now=now,
+                detail=clean_text(f"{found.group('head')}{found.group('verb')} {found.group('sha')}, pushed"
+                                  f"{found.group('tail')}", 300),
+            ):  # fmt: skip
+                settled += 1
+    except Exception:  # noqa: BLE001 - a git or store failure leaves the status as it was
+        _LOGGER.info("push status not checked")
     return settled
 
 

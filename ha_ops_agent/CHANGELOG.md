@@ -10,23 +10,27 @@ stay valid.
   config change proposed for a finding is applied, the agent reads that
   domain's repairs and Core log again right away, instead of at the next
   scheduled scan. A "The Core log says <x> uses something ... removed in
-  2027.8" finding no longer lingers for days after the rebase removed its
+  2030.9" finding no longer lingers for days after the rebase removed its
   cause.
 - **A fork that is still needed settles its replacement candidate.** A custom
   integration that shadows a Core one on purpose (it carries its own changes
   Core's installed version lacks) is no longer offered as a "replacement
   candidate" for ever. The item resolves as "Fork still needed: <what the
   fork changes>" and returns only when the installed Core minor version
-  changes or the fork's files do. If GitHub cannot be reached the candidate
-  stays as it is.
+  changes or the fork's files do (it is then checked again, and returns
+  only if the fork no longer carries changes Core lacks). If GitHub cannot
+  be reached, or the fork is too far from any Core release to judge, the
+  candidate stays as it is.
 - **No more "Core" or "None" as an integration.** A log finding without a
   usable integration domain is never shown, planned or worded: not from a
   new log line, and not from one an earlier version stored (it read "The
   Core log says Core uses something ..." and "Update the custom integration
   None (HACS)"). The domain check ignores letter case.
-- **"Not pushed yet" no longer sticks on fork rebases.** When a later push
-  carried a rebase's commit to origin, its item now says "pushed" (checked
-  on the agent's regular status refresh, with no network call).
+- **"Not pushed yet" no longer sticks.** When a later push carried a fork
+  rebase's or a config change's commit to origin, its item now says
+  "pushed" (checked on the agent's regular status refresh, with no network
+  call). A successful push now also moves `refs/remotes/origin/main` to the
+  commit it pushed, which a push to the repository URL never did.
 
 ## 0.22.0
 

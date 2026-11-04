@@ -2,11 +2,11 @@
 
 An unattended maintenance add-on for Home Assistant. It checks the system
 every day, tells you only when something changed, installs updates that have
-soaked with a backup, a health diff and rollback, and answers questions in
-one admin chat. It uses an AI model for the parts that need judgement and
+soaked with a backup, a health diff and rollback, and answers your questions
+on the item they are about. It uses an AI model for the parts that need judgement and
 plain, tested code for everything that acts.
 
-![The panel's Home page, with a Core update that needs approval selected](docs/images/panel-home.png)
+![The panel's Home page, with a finding whose planned fork rebase waits for approval selected](docs/images/panel-home.png)
 
 ## What it does
 
@@ -24,9 +24,12 @@ plain, tested code for everything that acts.
   backup made with your own automatic backup settings, with a health check
   before and after each one and a rollback if things got worse. Majors,
   HAOS, firmware and anything in your profile's fragile list ask you first.
-- **One chat.** Ask in the panel, or reply to a push. The chat can look
-  things up, set reminders, start a longer investigation and ask you to
-  approve an update. It never approves anything itself.
+- **Conversations on the item.** Every item has its own conversation: open
+  it and ask, or reply to its push, and the answer stays with the item. For
+  anything without an item, *Ask* starts a question, which becomes an item
+  of its own with its answer and follow-ups. The agent can look things up,
+  set reminders, start a longer investigation and ask you to approve an
+  update. It never approves anything itself.
 - **Approvals.** Anything that needs you appears under *Needs you* in the
   panel. An approval is bound to the exact action you were shown, is used
   once and expires.
@@ -61,12 +64,13 @@ plain, tested code for everything that acts.
   automatic rollback.
 
 Everything it does is an *item* on the panel's Home page, with its history.
-Every item has something you can do with it: at least *Ask the agent*,
-which opens the chat with that item attached, and for maintenance findings
-*Plan a fix*, *Remind me* and *Hide until it changes*. It pushes only when
+Every item has something you can do with it: at least its conversation
+(*Ask about this item*), and for maintenance findings *Plan a fix* (the plan
+runs on the finding itself and any change it proposes is approved there),
+*Remind me* and *Hide until it changes*. It pushes only when
 an item needs you, when Home Assistant is down, or when you asked for it.
 
-<img src="docs/images/panel-phone-dark.png" width="300" alt="The same Home page on a phone, in the dark theme.">
+<img src="docs/images/panel-phone-dark.png" width="300" alt="A question on a phone, in the dark theme: its answer and the box for a follow-up.">
 
 The screenshots show sample data.
 
@@ -76,8 +80,8 @@ Home Assistant OS (or Supervised) users who want routine maintenance done
 for them and are comfortable letting a background agent install patch
 updates, with a backup and rollback, under rules they can read. It suits a
 single administrator. If you prefer to install every update by hand, run it
-in `observe` mode: you get the health check, triage and chat, and it changes
-nothing.
+in `observe` mode: you get the health check, triage and conversations, and it
+changes nothing.
 
 ## Requirements
 

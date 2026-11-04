@@ -2,7 +2,7 @@
 
 Unattended maintenance for Home Assistant: a daily health check, a push only
 when something changed, soaked updates with a backup, a health diff and
-rollback, and one admin chat.
+rollback, and a conversation with the agent on every item.
 
 Full documentation, the house profile format and the safety model:
 https://github.com/dipeshc/ha-ops-agent#readme

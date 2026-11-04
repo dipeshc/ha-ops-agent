@@ -769,3 +769,49 @@ async def test_the_maintenance_plan_never_proposes_a_rebase_from_a_log_line(worl
     response = await world.call("propose-rebase", domain=DOMAIN, keep="fan.py#1", reason="r")
     assert response["ok"], response
     # The admin's chat may still ask for one whatever the signal (test_the_ai_names_hunks_and_never_supplies_content).
+
+
+async def test_a_rebase_left_applying_outside_a_run_is_settled(pipe: tuple[Rig, ForkOps, Paths]) -> None:
+    rig, _ops, paths = pipe
+
+    def stuck(job_state: str, *, run_state: str = "done") -> dict[str, Any]:
+        record = propose(rig, paths)
+        run = rig.store.start_update_run(window_day="d", trigger="fork_rebase", mode="act", plan=[], now=rig.now)
+        assert run is not None
+        spec = {"entity_id": "fork.acme_fan", "kind": "fork_rebase", "title": "t", "from_version": ORIGIN_TAG,
+                "to_version": INSTALLED, "target": {"proposal": record["id"], "domain": DOMAIN}}  # fmt: skip
+        [job] = rig.store.add_update_jobs(run, [spec], now=rig.now)
+        if job_state != "pending":
+            rig.store.transition_job(job.id, expect=("pending",), to=job_state, now=rig.now, detail="why")
+        rig.store.set_update_run(run, now=rig.now, state=run_state)
+        forkrebase.move(rig.store, record["id"], expect=("open",), to="applying", now=rig.now, job=job.id)
+        return record
+
+    def state(record: dict[str, Any]) -> str:
+        return str(forkrebase.load(rig.store, record["id"])["state"])
+
+    # Its run is still active: resume carries it on, reconcile leaves it.
+    active = stuck("installing", run_state="installing")
+    assert rig.manager.reconcile_forks() == [] and state(active) == "applying"
+    rig.store.set_update_run(fork_job(rig).run_id, now=rig.now, state="done")
+    # Installing outside any run with the files untouched: nothing was written.
+    assert rig.manager.reconcile_forks() == [active["id"]] and state(active) == "failed"
+    assert "stopped before anything was written" in forkrebase.load(rig.store, active["id"])["detail"]
+    for job_state, expected in (("succeeded", "applied"), ("rolled_back", "rolled_back"),
+                                ("rollback_failed", "failed")):  # fmt: skip
+        record = stuck(job_state)
+        assert await rig.manager.reconcile() == [] and state(record) == expected
+    # The approval was used but nothing was installed: open again, and the owner is told.
+    skipped = stuck("skipped")
+    rig.manager.reconcile_forks()
+    assert (
+        state(skipped) == "open"
+        and "the approval was used without installing" in forkrebase.load(rig.store, skipped["id"])["detail"]
+    )
+    assert item(rig, skipped)["state"] == "waiting"
+    # Changed on disk and stopped mid-way: failed, asking to check.
+    changed = stuck("verifying")
+    (paths.custom_components / DOMAIN / "fan.py").write_text("X = 1\n")
+    rig.manager.reconcile_forks()
+    assert state(changed) == "failed" and "stopped mid-way" in forkrebase.load(rig.store, changed["id"])["detail"]
+    assert item(rig, changed)["need"]["kind"] == "ack"

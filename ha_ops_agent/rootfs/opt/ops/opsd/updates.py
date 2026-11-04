@@ -2186,7 +2186,62 @@ class UpdateManager:
                 _LOGGER.error("reconcile failed", extra={"error": str(err)[:200]})
                 return []
 
+    def reconcile_forks(self) -> list[str]:
+        """Settle fork rebase proposals left `applying` whose job is not in an active run (the daemon stopped, or
+        a run ended without settling them), so none stays stuck. At start, before each health check and every
+        minute; never while a pipeline runs. Returns the proposals it settled."""
+        if self._lock.locked():
+            return []
+        return self._reconcile_forks()
+
+    def _reconcile_forks(self) -> list[str]:
+        if self._forks is None:
+            return []
+        try:
+            active = self.store.active_update_run()
+            settled = []
+            for record in forkrebase.proposals(self.store):
+                if record["state"] == "applying" and self._settle_fork(record, active):
+                    settled.append(str(record["id"]))
+        except (StoreError, sqlite3.Error, OSError) as err:
+            _LOGGER.error("fork reconcile failed", extra={"error": str(err)[:200]})
+            return []
+        if settled:
+            self._publish()
+        return settled
+
+    def _settle_fork(self, record: Mapping[str, Any], active: Mapping[str, Any] | None) -> bool:
+        pid, now = str(record["id"]), self._clock()
+        job = self.store.update_job(int(record["job"])) if isinstance(record.get("job"), int) else None
+        if job is not None and active is not None and job.run_id == int(active["id"]):
+            # Its run is still active: `resume` carries it on.
+            return False
+        outcome = {"succeeded": ("applied", "applied (settled after a restart)"),
+                   "rolled_back": ("rolled_back", job.detail if job else ""),
+                   "failed": ("failed", job.detail if job else ""),
+                   "rollback_failed": ("failed", job.detail if job else "")}.get(job.state if job else "")  # fmt: skip
+        if outcome is not None:
+            return forkrebase.move(self.store, pid, expect=("applying",), to=outcome[0], now=now,
+                                   detail=outcome[1] or outcome[0])  # fmt: skip
+        forks = self._forks
+        untouched = forks is not None and forks.untouched(record)
+        if (job is not None and job.state == "skipped") or ((job is None or job.state == "pending") and untouched):
+            why = job.detail if job is not None and job.detail else "its update run ended before it started"
+            done = forkrebase.move(self.store, pid, expect=("applying",), to="open", now=now,
+                                   detail=f"not applied: {why}; the approval was used without installing,"
+                                          " approve it again")  # fmt: skip
+            self._note("Fork rebase not applied", f"{record['domain']}: {clean_text(why, 200)}. The approval was used"
+                       " but nothing was installed; approve it again on its item.", needs_admin=True,
+                       item=f"fork:{pid}")  # fmt: skip
+            return done
+        # Stopped mid-way outside any run: nothing resumes it, so the admin is asked to check.
+        why = ("stopped before anything was written" if untouched else
+               f"stopped mid-way ({job.state if job else 'no job'}); check custom_components/{record['domain']}"
+               " against the backup taken before it")  # fmt: skip
+        return forkrebase.move(self.store, pid, expect=("applying",), to="failed", now=now, detail=why)
+
     async def _reconcile_locked(self) -> list[str]:
+        self._reconcile_forks()
         since = self._clock() - RECONCILE_WINDOW
         waiting = self.store.update_jobs_where(kind="os", states=("reboot_pending",), since=since)
         if not waiting:

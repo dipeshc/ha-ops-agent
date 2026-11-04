@@ -46,7 +46,10 @@ Custom integrations that fork a Core one:
   anything is worse or the restart fails, the old files back with a second
   restart and a push. A good rebase is committed if git tracks the files.
   The approval is bound to the fork's files, the Core version and the
-  exact result, so any change in between voids it.
+  exact result, so any change in between voids it. A rebase interrupted
+  outside its run (the add-on restarted) is settled at the next start or
+  minute, never left running; if its approval was used without
+  installing, it asks you again.
 
 Safety:
 

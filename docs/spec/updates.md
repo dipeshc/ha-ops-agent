@@ -358,4 +358,17 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   unreadable answer refuses. Tests
   `test_access_hardware_and_never_reload_domains_are_never_rebased`,
   `test_the_executor_refuses_a_never_reload_domain`.
+- U33. **Never stuck.** At start, before each health check and every
+  minute (never while a pipeline runs), a proposal left `applying` whose
+  job is not in an active update run is settled from its job: `succeeded`
+  is `applied`; `rolled_back` is `rolled_back`; `failed` and
+  `rollback_failed` are `failed`; `skipped`, or a job that never started
+  with the fork's files untouched, is `open` again with "the approval was
+  used without installing, approve it again" and an activity entry that
+  needs the admin (the item is back in Needs you, and pushed); anything
+  else is `failed` ("stopped before anything was written" when the files
+  are untouched, otherwise "stopped mid-way; check custom_components/
+  <domain> against the backup"), with an `ack` need. A job in an active
+  run is left to `resume`. Test
+  `test_a_rebase_left_applying_outside_a_run_is_settled`.
 

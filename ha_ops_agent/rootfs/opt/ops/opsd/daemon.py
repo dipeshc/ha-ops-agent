@@ -511,6 +511,9 @@ class Daemon:
         """The minute tick: recompose what asked to be, decide the pushes time made due, send them."""
         if self.items is None:
             return
+        if self.updates is not None:
+            # A fork rebase left applying outside any run is settled (never stuck).
+            self.updates.reconcile_forks()
         self.items.tick()
         self._items_sent()
 

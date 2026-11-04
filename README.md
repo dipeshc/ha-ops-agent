@@ -49,6 +49,16 @@ plain, tested code for everything that acts.
   display-only cards: the agent backs the dashboard up, saves the change,
   reads it back and restores the backup if anything differs. A Core update that would remove something you still use always
   asks.
+- **Forks of Core integrations.** For a custom integration with the name
+  of a Core one, the agent can compare it with Home Assistant Core's own
+  source for the version you run (`opsctl core-compare`, fetched by the
+  add-on from GitHub, read-only) and say from that diff whether the fork
+  is still needed. It can also propose rebasing the fork onto your Core
+  version, keeping only the fork's changes Core still lacks: the add-on
+  builds the files from Core's source and your fork (the AI only picks
+  which changes to keep), you approve the exact result, and it is applied
+  like an update, with a backup, a Core restart, a health check and an
+  automatic rollback.
 
 Everything it does is an *item* on the panel's Home page, with its history.
 Every item has something you can do with it: at least *Ask the agent*,
@@ -235,7 +245,9 @@ much harm.
   precise rollback asks you first. A version that was rolled back is held
   until you approve it again in the panel.
 - **The agent never changes itself**, the Supervisor or the host, except an
-  operating-system update you approved.
+  operating-system update you approved. It restarts Core only inside one
+  update job: to load a HACS integration it updated, or a fork rebase you
+  approved.
 - **Untrusted text is data.** Device names, logs, release notes and chat
   messages are passed to the AI as fenced data, never as instructions.
 - **Bounded.** Daily run caps, turn and time limits, a memory guard and a

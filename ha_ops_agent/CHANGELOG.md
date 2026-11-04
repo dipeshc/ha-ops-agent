@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.21.0
+
+The agent can now answer "is this fork still needed?" itself, and bring a
+fork up to date with one approval. No store change (the store stays at
+schema 19); upgrading from 0.20.0 needs nothing, and existing options stay
+valid.
+
+Custom integrations that fork a Core one:
+
+- New `opsctl core-compare <domain>`: the add-on fetches Home Assistant
+  Core's own files for the exact Core version you run (from GitHub's
+  contents API and raw file host only, each file checked against its git
+  blob SHA, at most 40 files of 256 KiB, cached under `/data`) and
+  compares them with `custom_components/<domain>/`: a summary (files only
+  in the custom integration, only in Core, changed lines per file) and a
+  unified diff per file, redacted, fenced as data and capped at 32 KiB.
+  It is read-only and takes no approval. Chat, investigations ("Plan a
+  fix") and the maintenance plan can use it; the nightly triage cannot.
+  The agent reports what it shows as facts and cites the diff. The AI's
+  own sandbox still has no network: the add-on fetches.
+- `core-compare <domain> --fork` also finds the Core release the fork was
+  copied from (the closest of the last 18 monthly releases) and numbers
+  the fork's own changes against it.
+- New `opsctl propose-rebase <domain> --keep <ids> --reason …`: the agent
+  proposes rebasing the fork onto your Core version, keeping only the
+  changes it names. It never writes file content: the add-on builds the
+  files from Core's source and your fork, refuses anything that does not
+  apply cleanly, does not parse, imports something new or adds a file,
+  and sets the manifest's `version`. The proposal is an item on Home
+  ("Rebase onto Core") with the full diff, the changes kept and the Core
+  version, and a card in the chat when "Plan a fix" made it.
+- Approving it ("Rebase tonight" or "Rebase now") runs it as an update job:
+  an encrypted backup, the old files kept, the new files written in place
+  (mode and owner kept, never through a link), Core's config check, one
+  Core restart, the health check (locks and the alarm included) and, if
+  anything is worse or the restart fails, the old files back with a second
+  restart and a push. A good rebase is committed if git tracks the files.
+  The approval is bound to the fork's files, the Core version and the
+  exact result, so any change in between voids it.
+
+Safety:
+
+- A Core restart now passes the self-guard only inside one update job's
+  own scope (a HACS integration the agent updated, or an approved fork
+  rebase), never otherwise.
+
+Maintenance:
+
+- A Core log deprecation is tied to the integration that logged it (or the
+  one Core's own report names), never to words like "Core" or "helpers",
+  and is worded as what it is: "acme_fan uses `old_api`, which Home
+  Assistant removes in 2027.8". A line with no reliable integration is
+  dropped, and so is a log finding an earlier version titled "Core".
+
+Panel:
+
+- "Ask the agent" fills in "Its title: \"…\"" (quoted) instead of calling
+  every title "the device's own text".
+
 ## 0.20.0
 
 The agent handles day-to-day items itself and pulls you in only when it

@@ -64,9 +64,16 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
     states. Every approval read and decision names `kind = 'approval'`, so
     no request, change or fact can ever be read as a pending or approved
     approval. Numbered kinds count up per kind.
-  - `turns`: the one chat's turns. There is one implicit thread; its id,
-    start time and read mark are in `kv` (`chat.main_thread`,
-    `chat.created_at`, `chat.read`). Any other thread id reads as missing.
+  - `turns`: the conversations' turns. A turn's thread is `meta.thread`
+    (`item:<item id>` or `ask:<item id>`, [chat.md](chat.md) T1), written
+    by the store alone and never moved by a meta update; a thread exists
+    only while its item is stored. The turns without one are the earlier
+    one chat's, whose id, start time and read mark are in `kv`
+    (`chat.main_thread`, `chat.created_at`, `chat.read`); a conversation's
+    read mark is `chat.read:<thread>`. Any other thread id reads as
+    missing. 0.22.0 needed no schema change: the thread lives in the
+    existing `meta` column, and a question item is stored under the kind
+    `investigation` ([items-and-pushes.md](items-and-pushes.md) I1).
   - `runs`: the usage ledger, one row per AI run with its reservation and
     actuals ([budget.md](budget.md) B7); it records no cost.
   - `kv`: small state, one key each. Daily counters (`count:<day>:<name>`),
@@ -164,11 +171,12 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   cutoff; finished update runs after 180 days only when their backup is
   gone; review and seen keys after 180 days; finished non-system and retry
   tasks older than the cutoff. Audit rows older than 90 days and beyond
-  50 000 are pruned. Approvals, changes and the chat's turns are never
-  pruned. Run directories under `/data/runs` older than 60 days are
-  deleted. Tests `test_prune_bounds_the_store`,
-  `test_prune_keeps_the_rolling_week`, `test_audit_roundtrip_and_prune`,
-  `test_the_main_chat_is_never_pruned`.
+  50 000 are pruned. A conversation's turns older than 90 days go once
+  their item is gone (resolved items after 90 days); the earlier one chat's
+  item and turns are never pruned. Approvals and changes are never pruned.
+  Run directories under `/data/runs` older than 60 days are deleted. Tests
+  `test_prune_bounds_the_store`, `test_prune_keeps_the_rolling_week`,
+  `test_audit_roundtrip_and_prune`, `test_a_conversation_goes_with_its_item`.
 
 ## JSON files and locks
 

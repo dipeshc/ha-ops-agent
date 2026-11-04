@@ -1,7 +1,7 @@
 """Durable agent state in SQLite (`/data/ops.db`, root only, 0600).
 
 Ten tables (`docs/spec/storage.md`): the audit log of every capability request, the task schedule
-(compare-and-set claims), the per-run usage ledger, the chat's turns, the update runs and jobs, one
+(compare-and-set claims), the per-run usage ledger, the conversations' turns, the update runs and jobs, one
 `approvals` record for every approval and proposal (a kind and a payload), the items and their events,
 and `kv` for small state: daily counters, quiet-hours holds, push action ids, reload times, the chat's
 identity and read mark, update and maintenance flags. Files that the health check needs without the
@@ -33,6 +33,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import stat
 import sys
@@ -405,6 +406,11 @@ ACTION_KEY = "push.action:"
 MAIN_THREAD_KEY = "chat.main_thread"
 READ_KEY = "chat.read"
 CHAT_CREATED_KEY = "chat.created_at"
+# A conversation bound to an item (`item:<id>`) or a question item (`ask:<id>`); see the chat section.
+ITEM_THREAD_RE = re.compile(r"(item|ask):([a-z]-[0-9a-z]{1,40})")
+# Question items (`ask:<token>`) and the earlier one chat, kept as one read-only item.
+QUESTION_PREFIX = "ask:"
+EARLIER_KEY = "chat:earlier"
 ACTIVITY_SEQ_KEY = "activity.seq"
 _CHANGE_PAYLOAD = frozenset({"files", "diff", "base_sha", "commit_sha", "ref", "applied_sha", "reverted_sha"})
 _CHANGE_COLUMNS = frozenset({"detail", "decided_at", "expires_at"})
@@ -555,6 +561,14 @@ def _fact(row: sqlite3.Row) -> dict[str, Any]:
 
 ITEM_JSON = ("need", "actions", "phase", "facts", "agent", "change", "source", "push")
 _ITEM_DEFAULTS: dict[str, Any] = {"actions": [], "facts": [], "source": {}, "push": {}}
+
+
+def _merge_meta(current: dict[str, Any], update: dict[str, Any] | None) -> dict[str, Any]:
+    """A turn's meta with an update merged in; the thread a turn belongs to never moves."""
+    merged = {**current, **{k: v for k, v in (update or {}).items() if k != "thread"}}
+    if "thread" in current:
+        merged["thread"] = current["thread"]
+    return merged
 
 
 def _item(row: sqlite3.Row) -> dict[str, Any]:
@@ -1112,9 +1126,13 @@ class Store:
                               " updated_at = ? WHERE id = ? AND state = 'running'",
                               (_iso(next_fire_at), json.dumps(payload), _iso(now), task_id))  # fmt: skip
 
-    def finish_task(self, task_id: int, state: str, *, now: datetime) -> bool:
+    def finish_task(self, task_id: int, state: str, *, now: datetime, payload: dict[str, Any] | None = None) -> bool:
         if state not in ("done", "cancelled", "failed"):
             raise ValueError(f"not a final state: {state}")
+        if payload is not None:
+            return self._task_cas(task_id, "UPDATE tasks SET state = ?, next_fire_at = NULL, payload = ?,"
+                                  " updated_at = ? WHERE id = ? AND state = 'running'",
+                                  (state, json.dumps(payload), _iso(now), task_id))  # fmt: skip
         return self._task_cas(task_id, "UPDATE tasks SET state = ?, next_fire_at = NULL, updated_at = ?"
                               " WHERE id = ? AND state = 'running'", (state, _iso(now), task_id))  # fmt: skip
 
@@ -1174,6 +1192,24 @@ class Store:
             "SELECT * FROM tasks WHERE system_key IS NULL AND kind = 'followup' AND state IN ('pending', 'running')"
             " AND json_extract(payload, '$.investigation') = 1 ORDER BY id")  # fmt: skip
         return [_task(r) for r in rows]
+
+    def set_task_payload(self, task_id: int, payload: dict[str, Any], *, now: datetime) -> bool:
+        """Replace a user-visible task's payload (the daemon's own bookkeeping on it)."""
+        return self._task_cas(task_id, "UPDATE tasks SET payload = ?, updated_at = ? WHERE id = ?"
+                              " AND system_key IS NULL", (json.dumps(payload), _iso(now), task_id))  # fmt: skip
+
+    def plan_task(self, item: str) -> Task | None:
+        """The latest "Plan a fix" investigation of an item (`payload.plan_fix`, `payload.item`), in any state."""
+        row = self._one("SELECT * FROM tasks WHERE kind = 'followup' AND json_extract(payload, '$.plan_fix') = 1"
+                        " AND json_extract(payload, '$.item') = ? ORDER BY id DESC LIMIT 1", (item,))  # fmt: skip
+        return _task(row) if row else None
+
+    def plan_task_of_run(self, run_id: str) -> Task | None:
+        """The "Plan a fix" investigation one of whose steps was this run (`payload.runs`)."""
+        row = self._one("SELECT t.* FROM tasks t, json_each(t.payload, '$.runs') r WHERE t.kind = 'followup'"
+                        " AND json_extract(t.payload, '$.plan_fix') = 1 AND r.value = ? ORDER BY t.id DESC LIMIT 1",
+                        (run_id,))  # fmt: skip
+        return _task(row) if row else None
 
     def tasks_created_by(self, created_by: str) -> list[Task]:
         return [_task(r) for r in self._all("SELECT * FROM tasks WHERE created_by = ? ORDER BY id", (created_by,))]
@@ -1267,12 +1303,16 @@ class Store:
 
     # ---------------------------------------------------------------- chat
 
+    # A conversation is a thread of turns. Every thread but the earlier one chat is bound to an item: `item:<id>` is
+    # the conversation on that item, `ask:<id>` the one of a question (itself an item). The thread's key lives in the
+    # turn's `meta.thread`, written by the store only; the earlier one chat's turns have none (`chat_id`).
+
     def chat_id(self) -> str:
-        """The one chat's id (`kv` `chat.main_thread`), or "" before the first message."""
+        """The earlier one chat's id (`kv` `chat.main_thread`), or "" when this store never had one."""
         return self.kv_get(MAIN_THREAD_KEY)
 
     def create_thread(self, thread_id: str, *, principal: str, channel: str, now: datetime) -> None:
-        """Start the one chat as `thread_id`; a no-op once it exists (there is no other thread)."""
+        """Start the earlier one chat as `thread_id`; a no-op once it exists (0.22.0 never starts one)."""
         del principal, channel
         with self._tx():
             if self.chat_id():
@@ -1281,21 +1321,34 @@ class Store:
             self.kv_set(CHAT_CREATED_KEY, _iso(now), now=now)
             self.kv_set(READ_KEY, "0", now=now)
 
-    def _turn(self, row: sqlite3.Row, chat: str) -> Turn:
+    def _tag(self, thread_id: str) -> tuple[str, str | None] | None:
+        """(thread, its `meta.thread` value) for a thread that exists: an item's or a question's while the item is
+        stored, or the earlier one chat (no value). None for anything else."""
+        found = ITEM_THREAD_RE.fullmatch(thread_id)
+        if found is not None:
+            row = self._one("SELECT key FROM items WHERE id = ?", (found.group(2),))
+            key = str(row["key"]) if row is not None else EARLIER_KEY
+            # The earlier one chat's item has no conversation of its own: its thread is the chat (`chat_id`).
+            if key == EARLIER_KEY or (found.group(1) == "ask") != key.startswith(QUESTION_PREFIX):
+                return None
+            return thread_id, thread_id
+        chat = self.chat_id()
+        return (chat, None) if chat and thread_id == chat else None
+
+    def _turn(self, row: sqlite3.Row, chat: str | None = None) -> Turn:
         try:
             meta = json.loads(row["meta"] or "{}")
         except json.JSONDecodeError:
             meta = {}
-        return Turn(id=int(row["id"]), thread_id=chat, role=str(row["role"]), text=str(row["text"]),
-                    at=str(row["at"]), status=str(row["status"]), meta=meta if isinstance(meta, dict) else {},
-                    run_id=row["run_id"], reply_to=row["reply_to"], client_id=row["client_id"])  # fmt: skip
+        meta = meta if isinstance(meta, dict) else {}
+        tag = meta.get("thread")
+        thread = tag if isinstance(tag, str) and tag else (chat if chat is not None else self.chat_id())
+        return Turn(id=int(row["id"]), thread_id=thread, role=str(row["role"]), text=str(row["text"]),
+                    at=str(row["at"]), status=str(row["status"]), meta=meta, run_id=row["run_id"],
+                    reply_to=row["reply_to"], client_id=row["client_id"])  # fmt: skip
 
-    def _chat_or_none(self, thread_id: str) -> str | None:
-        chat = self.chat_id()
-        return chat if chat and thread_id == chat else None
-
-    def _turn_row(self, conn: sqlite3.Connection, turn_id: int, chat: str) -> Turn:
-        return self._turn(conn.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)).fetchone(), chat)
+    def _turn_row(self, conn: sqlite3.Connection, turn_id: int) -> Turn:
+        return self._turn(conn.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)).fetchone())
 
     def append_turn(
         self,
@@ -1330,15 +1383,19 @@ class Store:
         client_id: str | None,
         reply_to: int | None,
     ) -> Turn:
-        chat = self._chat_or_none(thread_id)
-        if chat is None:
+        found = self._tag(thread_id)
+        if found is None:
             raise StoreError("no such chat")
+        # The thread is the store's to write: whatever a caller's meta says, it is replaced.
+        stored = {k: v for k, v in (meta or {}).items() if k != "thread"}
+        if found[1] is not None:
+            stored["thread"] = found[1]
         cursor = conn.execute(
             "INSERT INTO turns (role, text, at, run_id, status, meta, client_id, reply_to)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (role, text, _iso(now), run_id, status, json.dumps(meta or {}, default=str), client_id, reply_to),
+            (role, text, _iso(now), run_id, status, json.dumps(stored, default=str), client_id, reply_to),
         )
-        return self._turn_row(conn, int(cursor.lastrowid or 0), chat)
+        return self._turn_row(conn, int(cursor.lastrowid or 0))
 
     def submit_turn(
         self, thread_id: str, *, text: str, now: datetime, client_id: str | None, meta: dict[str, Any] | None = None
@@ -1354,13 +1411,16 @@ class Store:
         return turn, True
 
     def turn_by_client(self, thread_id: str, client_id: str) -> Turn | None:
-        chat = self._chat_or_none(thread_id)
-        row = self._one("SELECT * FROM turns WHERE client_id = ?", (client_id,)) if chat else None
-        return self._turn(row, chat) if row and chat else None
+        found = self._tag(thread_id)
+        row = self._one("SELECT * FROM turns WHERE client_id = ?", (client_id,)) if found else None
+        if row is None or found is None:
+            return None
+        turn = self._turn(row, found[0])
+        return turn if turn.thread_id == found[0] else None
 
     def get_turn(self, turn_id: int) -> Turn | None:
         row = self._one("SELECT * FROM turns WHERE id = ?", (turn_id,))
-        return self._turn(row, self.chat_id()) if row else None
+        return self._turn(row) if row else None
 
     def set_turn_status(
         self, turn_id: int, status: str, *, expect: tuple[str, ...], meta: dict[str, Any] | None = None
@@ -1370,7 +1430,7 @@ class Store:
             row = conn.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)).fetchone()
             if row is None or str(row["status"]) not in expect:
                 return False
-            merged = {**self._turn(row, "").meta, **(meta or {})}
+            merged = _merge_meta(self._turn(row, "").meta, meta)
             conn.execute(
                 "UPDATE turns SET status = ?, meta = ? WHERE id = ?", (status, json.dumps(merged, default=str), turn_id)
             )
@@ -1381,9 +1441,9 @@ class Store:
             row = conn.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)).fetchone()
             if row is None:
                 return None
-            merged = {**self._turn(row, "").meta, **meta}
+            merged = _merge_meta(self._turn(row, "").meta, meta)
             conn.execute("UPDATE turns SET meta = ? WHERE id = ?", (json.dumps(merged, default=str), turn_id))
-            return self._turn_row(conn, turn_id, self.chat_id())
+            return self._turn_row(conn, turn_id)
 
     def update_card(self, turn_id: int, *, text: str, meta: dict[str, Any], now: datetime) -> Turn | None:
         """Rewrite a daemon-written `system` card in place (an investigation's progress)."""
@@ -1394,23 +1454,25 @@ class Store:
             row = conn.execute("SELECT * FROM turns WHERE id = ? AND role = 'system'", (turn_id,)).fetchone()
             if row is None:
                 return None
-            merged = {**self._turn(row, "").meta, **meta}
+            merged = _merge_meta(self._turn(row, "").meta, meta)
             conn.execute("UPDATE turns SET text = ?, meta = ? WHERE id = ?",
                          (text, json.dumps(merged, default=str), turn_id))  # fmt: skip
-            return self._turn_row(conn, turn_id, self.chat_id())
+            return self._turn_row(conn, turn_id)
 
     def card_by_status(self, thread_id: str, status: str, task_id: int) -> Turn | None:
-        """The `system` card of this status that belongs to a task (`meta.task`)."""
-        chat = self._chat_or_none(thread_id)
+        """The thread's `system` card of this status that belongs to a task (`meta.task`)."""
+        found = self._tag(thread_id)
         row = self._one(
             "SELECT * FROM turns WHERE role = 'system' AND status = ? AND json_extract(meta, '$.task') = ?"
-            " ORDER BY id DESC LIMIT 1", (status, task_id)) if chat else None  # fmt: skip
-        return self._turn(row, chat) if row and chat else None
+            " AND json_extract(meta, '$.thread') IS ? ORDER BY id DESC LIMIT 1",
+            (status, task_id, found[1])) if found else None  # fmt: skip
+        return self._turn(row, found[0]) if row and found else None
 
     def complete_turn(
         self, admin_turn: int, *, text: str, now: datetime, run_id: str | None, meta: dict[str, Any] | None = None
     ) -> Turn | None:
-        """The agent's reply and the admin turn's `ok`, in one transaction; None if it was not running."""
+        """The agent's reply (in the admin turn's thread) and the admin turn's `ok`, in one transaction; None if it
+        was not running."""
         if not text.strip():
             raise ValueError("an agent reply needs text")
         with self._tx() as conn:
@@ -1418,8 +1480,9 @@ class Store:
             if row is None or row["status"] != "running":
                 return None
             conn.execute("UPDATE turns SET status = 'ok' WHERE id = ?", (admin_turn,))
-            return self._insert_turn(conn, self.chat_id(), role="agent", text=text, now=now, run_id=run_id,
-                                     status="ok", meta=meta, client_id=None, reply_to=admin_turn)  # fmt: skip
+            return self._insert_turn(conn, self._turn(row).thread_id, role="agent", text=text, now=now,
+                                     run_id=run_id, status="ok", meta=meta, client_id=None,
+                                     reply_to=admin_turn)  # fmt: skip
 
     def refuse_turn(
         self,
@@ -1444,103 +1507,122 @@ class Store:
             row = conn.execute("SELECT * FROM turns WHERE id = ?", (admin_turn,)).fetchone()
             if row is None or str(row["status"]) not in expect:
                 return None
-            chat = self.chat_id()
-            merged = {**self._turn(row, chat).meta, **(turn_meta or {})}
+            current = self._turn(row)
+            merged = _merge_meta(current.meta, turn_meta)
             conn.execute(
                 "UPDATE turns SET status = ?, meta = ? WHERE id = ?",
                 (outcome, json.dumps(merged, default=str), admin_turn),
             )
-            updated = self._turn_row(conn, admin_turn, chat)
+            updated = self._turn_row(conn, admin_turn)
             if card is None:
                 return updated, None
             existing = conn.execute(
                 "SELECT id FROM turns WHERE reply_to = ? AND role = 'system' AND status != 'summary'", (admin_turn,)
             ).fetchone()
             if existing is None:
-                written = self._insert_turn(conn, chat, role="system", text=text, now=now, run_id=None, status=card,
-                                            meta=meta, client_id=None, reply_to=admin_turn)  # fmt: skip
+                written = self._insert_turn(conn, current.thread_id, role="system", text=text, now=now, run_id=None,
+                                            status=card, meta=meta, client_id=None, reply_to=admin_turn)  # fmt: skip
                 return updated, written
+            # The card keeps its thread: the store wrote it, the new meta never moves it.
+            replaced = _merge_meta({"thread": current.meta["thread"]} if "thread" in current.meta else {}, meta)
             conn.execute(
                 "UPDATE turns SET text = ?, status = ?, meta = ?, at = ? WHERE id = ?",
-                (text, card, json.dumps(meta or {}, default=str), _iso(now), existing["id"]),
+                (text, card, json.dumps(replaced, default=str), _iso(now), existing["id"]),
             )
-            return updated, self._turn_row(conn, int(existing["id"]), chat)
+            return updated, self._turn_row(conn, int(existing["id"]))
 
     def card_for(self, admin_turn: int) -> Turn | None:
         row = self._one("SELECT * FROM turns WHERE reply_to = ? AND role = 'system' AND status != 'summary'",
                         (admin_turn,))  # fmt: skip
-        return self._turn(row, self.chat_id()) if row else None
+        return self._turn(row) if row else None
 
     def turns_page(self, thread_id: str, *, before: int | None = None, limit: int = 30) -> list[Turn]:
-        """Up to `limit` turns before turn id `before` (all if None), oldest first."""
-        chat = self._chat_or_none(thread_id)
-        if chat is None:
+        """Up to `limit` of the thread's turns before turn id `before` (all if None), oldest first."""
+        found = self._tag(thread_id)
+        if found is None:
             return []
-        rows = self._all("SELECT * FROM turns WHERE id < ? ORDER BY id DESC LIMIT ?",
-                         (before if before is not None else sys.maxsize, limit))  # fmt: skip
-        return [self._turn(r, chat) for r in reversed(rows)]
+        rows = self._all("SELECT * FROM turns WHERE id < ? AND json_extract(meta, '$.thread') IS ?"
+                         " ORDER BY id DESC LIMIT ?",
+                         (before if before is not None else sys.maxsize, found[1], limit))  # fmt: skip
+        return [self._turn(r, found[0]) for r in reversed(rows)]
 
     def context_turns(self, thread_id: str, *, after: int, before: int, limit: int) -> list[Turn]:
-        """The conversation the model sees: admin and agent turns between two ids, oldest first."""
-        chat = self._chat_or_none(thread_id)
-        if chat is None:
+        """The conversation the model sees: the thread's admin and agent turns between two ids, oldest first."""
+        found = self._tag(thread_id)
+        if found is None:
             return []
         rows = self._all("SELECT * FROM turns WHERE id > ? AND id < ? AND role IN ('admin', 'agent')"
-                         " ORDER BY id DESC LIMIT ?", (after, before, limit))  # fmt: skip
-        return [self._turn(r, chat) for r in reversed(rows)]
+                         " AND json_extract(meta, '$.thread') IS ? ORDER BY id DESC LIMIT ?",
+                         (after, before, found[1], limit))  # fmt: skip
+        return [self._turn(r, found[0]) for r in reversed(rows)]
 
     def count_context(self, thread_id: str, *, after: int, before: int) -> int:
-        if self._chat_or_none(thread_id) is None:
+        found = self._tag(thread_id)
+        if found is None:
             return 0
-        row = self._one("SELECT COUNT(*) FROM turns WHERE id > ? AND id < ? AND role IN ('admin', 'agent')",
-                        (after, before))  # fmt: skip
+        row = self._one("SELECT COUNT(*) FROM turns WHERE id > ? AND id < ? AND role IN ('admin', 'agent')"
+                        " AND json_extract(meta, '$.thread') IS ?", (after, before, found[1]))  # fmt: skip
         return int(row[0]) if row else 0
 
     def latest_summary(self, thread_id: str) -> Turn | None:
-        chat = self._chat_or_none(thread_id)
-        row = self._one("SELECT * FROM turns WHERE role = 'system' AND status = 'summary' ORDER BY id DESC"
-                        " LIMIT 1") if chat else None  # fmt: skip
-        return self._turn(row, chat) if row and chat else None
+        found = self._tag(thread_id)
+        row = self._one("SELECT * FROM turns WHERE role = 'system' AND status = 'summary'"
+                        " AND json_extract(meta, '$.thread') IS ? ORDER BY id DESC LIMIT 1",
+                        (found[1],)) if found else None  # fmt: skip
+        return self._turn(row, found[0]) if row and found else None
 
     def in_flight(self, thread_id: str) -> Turn | None:
-        """The oldest queued or running admin turn of the chat."""
-        chat = self._chat_or_none(thread_id)
+        """The oldest queued or running admin turn of the thread."""
+        found = self._tag(thread_id)
         row = self._one("SELECT * FROM turns WHERE role = 'admin' AND status IN ('queued', 'running')"
-                        " ORDER BY id LIMIT 1") if chat else None  # fmt: skip
-        return self._turn(row, chat) if row and chat else None
+                        " AND json_extract(meta, '$.thread') IS ? ORDER BY id LIMIT 1",
+                        (found[1],)) if found else None  # fmt: skip
+        return self._turn(row, found[0]) if row and found else None
 
     def stuck_turns(self) -> list[Turn]:
-        """Admin turns left queued or running (by a restart)."""
+        """Admin turns left queued or running (by a restart), in any thread."""
         rows = self._all("SELECT * FROM turns WHERE role = 'admin' AND status IN ('queued', 'running') ORDER BY id")
-        return [self._turn(r, self.chat_id()) for r in rows]
+        return [self._turn(r) for r in rows]
+
+    def _read_key(self, tag: str | None) -> str:
+        return READ_KEY if tag is None else f"{READ_KEY}:{tag}"
 
     def get_thread(self, thread_id: str) -> dict[str, Any] | None:
-        """The one chat's summary; None for any other id."""
-        chat = self._chat_or_none(thread_id)
-        if chat is None:
+        """A thread's summary (`read_only` for the earlier one chat); None for a thread that does not exist."""
+        found = self._tag(thread_id)
+        if found is None:
             return None
+        thread, tag = found
         row = self._one(
-            "SELECT COUNT(*), MAX(at), (SELECT MAX(id) FROM turns WHERE role != 'admin' AND status != 'summary'),"
-            " (SELECT COUNT(*) FROM turns WHERE role = 'admin' AND status IN ('queued', 'running')) FROM turns"
-        )
-        count, last_at, last_reply, busy = (row[0], row[1], row[2], row[3]) if row else (0, None, None, 0)
-        created = self.kv_get(CHAT_CREATED_KEY)
-        read = int(self.kv_get(READ_KEY, "0") or 0)
-        return {"id": chat, "channel": "panel", "created_at": created, "updated_at": last_at or created,
+            "SELECT COUNT(*), MIN(at), MAX(at), MAX(CASE WHEN role != 'admin' AND status != 'summary' THEN id END),"
+            " SUM(CASE WHEN role = 'admin' AND status IN ('queued', 'running') THEN 1 ELSE 0 END)"
+            " FROM turns WHERE json_extract(meta, '$.thread') IS ?", (tag,))  # fmt: skip
+        count, first_at, last_at, last_reply, busy = tuple(row) if row else (0, None, None, None, 0)
+        created = self.kv_get(CHAT_CREATED_KEY) if tag is None else first_at
+        read = int(self.kv_get(self._read_key(tag), "0") or 0)
+        return {"id": thread, "channel": "panel", "created_at": created, "updated_at": last_at or created,
                 "turns": int(count or 0), "unread": last_reply is not None and int(last_reply) > read,
-                "in_flight": int(busy or 0) > 0}  # fmt: skip
+                "in_flight": int(busy or 0) > 0, "read_only": tag is None}  # fmt: skip
 
     def mark_read(self, thread_id: str, *, upto: int | None = None) -> bool:
-        if self._chat_or_none(thread_id) is None:
+        found = self._tag(thread_id)
+        if found is None:
             return False
+        key = self._read_key(found[1])
         with self._tx() as conn:
-            row = conn.execute("SELECT MAX(id) FROM turns").fetchone()
+            row = conn.execute("SELECT MAX(id) FROM turns WHERE json_extract(meta, '$.thread') IS ?",
+                               (found[1],)).fetchone()  # fmt: skip
             last = int(row[0] or 0)
             target = last if upto is None else min(upto, last)
-            if target <= int(self.kv_get(READ_KEY, "0") or 0):
+            if target <= int(self.kv_get(key, "0") or 0):
                 return False
-            self.kv_set(READ_KEY, str(target), now=datetime.now(UTC))
+            self.kv_set(key, str(target), now=datetime.now(UTC))
             return True
+
+    def legacy_turns(self) -> tuple[int, str | None, str | None]:
+        """The earlier one chat: how many turns it has, its first and last turn time."""
+        row = self._one("SELECT COUNT(*), MIN(at), MAX(at) FROM turns WHERE json_extract(meta, '$.thread') IS NULL")
+        return (int(row[0] or 0), row[1], row[2]) if row else (0, None, None)
 
     # --------------------------------------------------------- run ledger
 
@@ -2039,6 +2121,15 @@ class Store:
         row = self._one("SELECT * FROM approvals WHERE kind = 'change' AND id = ?", (str(change_id),))
         return _change(row) if row else None
 
+    def changes_of_runs(self, run_ids: list[str]) -> list[dict[str, Any]]:
+        """The config changes these runs proposed, newest first."""
+        if not run_ids:
+            return []
+        marks = ",".join("?" * len(run_ids))
+        rows = self._all(f"SELECT * FROM approvals WHERE kind = 'change' AND run_id IN ({marks})"  # noqa: S608
+                         " ORDER BY CAST(id AS INTEGER) DESC", tuple(run_ids))  # fmt: skip
+        return [_change(r) for r in rows]
+
     def changes(self, *, states: tuple[str, ...] | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return [_change(r) for r in self._of_kind("change", states, limit, order="CAST(id AS INTEGER) DESC")]
 
@@ -2186,9 +2277,13 @@ class Store:
                          (quarter,))  # fmt: skip
             conn.execute("DELETE FROM approvals WHERE kind = 'request' AND state != 'open' AND decided_at < ?",
                          (quarter,))  # fmt: skip
-            # Resolved items (never one in Needs you) and their events.
-            conn.execute("DELETE FROM items WHERE needs = 0 AND resolved_at IS NOT NULL AND resolved_at < ?",
-                         (quarter,))  # fmt: skip
+            # Resolved items (never one in Needs you, never the earlier one chat) and their events.
+            conn.execute("DELETE FROM items WHERE needs = 0 AND resolved_at IS NOT NULL AND resolved_at < ?"
+                         " AND key != ?", (quarter, EARLIER_KEY))  # fmt: skip
+            # An item's conversation goes with its item; the earlier one chat's turns (no thread) are kept.
+            conn.execute("DELETE FROM turns WHERE json_extract(meta, '$.thread') IS NOT NULL AND at < ? AND"
+                         " substr(json_extract(meta, '$.thread'), instr(json_extract(meta, '$.thread'), ':') + 1)"
+                         " NOT IN (SELECT id FROM items)", (quarter,))  # fmt: skip
             conn.execute("DELETE FROM item_events WHERE item_id NOT IN (SELECT id FROM items) AND at < ?", (quarter,))
             conn.execute("DELETE FROM kv WHERE substr(key, 1, ?) = ? AND json_extract(value, '$.state') != 'held'"
                          " AND json_extract(value, '$.settled_at') < ?", (len(HELD_KEY), HELD_KEY, week))  # fmt: skip
@@ -2310,13 +2405,17 @@ class Store:
         return int(row[0]) if row else 0
 
     def items_page(self, *, kinds: tuple[str, ...] | None, needs_only: bool, before: tuple[str, str] | None,
-                   limit: int) -> list[dict[str, Any]]:  # fmt: skip
-        """History: newest `at` first, keyset-paged by (`at`, `id`)."""
+                   limit: int, prefixes: tuple[str, ...] | None = None) -> list[dict[str, Any]]:  # fmt: skip
+        """History: newest `at` first, keyset-paged by (`at`, `id`); `prefixes` keeps keys that start with one."""
         where = ["1 = 1"]
         args: list[Any] = []
         if kinds:
             where.append(f"kind IN ({','.join('?' * len(kinds))})")
             args.extend(kinds)
+        if prefixes:
+            where.append("(" + " OR ".join("substr(key, 1, ?) = ?" for _ in prefixes) + ")")
+            for prefix in prefixes:
+                args.extend([len(prefix), prefix])
         if needs_only:
             where.append("needs = 1")
         if before is not None:

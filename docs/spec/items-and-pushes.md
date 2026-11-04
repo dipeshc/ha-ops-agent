@@ -210,6 +210,13 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   noted fact, info health items, items the agent acked, and the agent's
   own notes and messages.
 
+- I21. **Every item shown is actionable** ([panel.md](panel.md) N21):
+  every item in Needs you, In progress, Coming up or Suggestions offers at
+  least one action, and every item of any kind offers "Ask the agent".
+  Maintenance findings offer Plan a fix, Remind me and Hide until it
+  changes ([maintenance.md](maintenance.md) M14a). Test
+  `test_every_item_the_panel_shows_offers_an_action`.
+
 ## Pushes
 
 - N1. **Item pushes.** For each open item in Needs you, the push key is

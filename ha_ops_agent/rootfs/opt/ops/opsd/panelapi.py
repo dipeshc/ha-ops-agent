@@ -13,14 +13,14 @@ import logging
 import re
 import sqlite3
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from opsd import __version__, diagnostics, proposals
 from opsd.approvals import LIVE, ApprovalError, approvable
 from opsd.changes import ChangeRefused, propose_fact
 from opsd.conversation import CHAT_TURNS_PER_DAY
-from opsd.items import ACTION_RE, ITEM_ID_RE, ItemBook
+from opsd.items import ACTION_RE, ITEM_ID_RE, REMIND, ItemBook
 from opsd.panel import MAX_CHAT_CHARS, THREAD_RE
 from opsd.policy import Origin, same_version
 from opsd.runctx import Principal
@@ -476,7 +476,7 @@ class PanelHandlers:
         self._audit_item(found, action, user, status)
         fresh = book.get(ident) or found
         if status == 200:
-            return status, {"item": book.view(fresh, events=True)}
+            return status, {k: v for k, v in result.items() if k == "message"} | {"item": book.view(fresh, events=True)}
         if result.get("error") == "not_done":
             result = {"error": "not_available", "message": result.get("message")}
         return status, {k: v for k, v in result.items() if k in ("error", "message")} | {
@@ -568,12 +568,27 @@ class PanelHandlers:
         return await self._run("approve_update", {"approval": approval["id"]}, user)
 
     async def _act_maintenance(self, found: Mapping[str, Any], action: str, user: str) -> Result:
-        """A maintenance item: hide it, reject its dashboard plan, or approve that plan (the daemon re-checks it)."""
+        """A maintenance item: plan a fix (an investigation in the chat), a reminder, hide it until it changes,
+        reject its dashboard plan, or approve that plan (the daemon re-checks it)."""
         d = self._d
         manager = d.maintenance
         finding = str((found.get("source") or {}).get("finding") or "")
         if manager is None or not finding:
             return 503, {"error": "store_unavailable"}
+        if action == "plan_fix" or action in REMIND:
+            if d.assistant is None:
+                return 503, {"error": "store_unavailable"}
+            if action == "plan_fix":
+                outcome = d.assistant.plan_fix(found, user=user)
+                message = "The agent is planning a fix in the chat."
+            else:
+                at = self._remind_at(action, finding)
+                if at is None:
+                    return 409, {"error": "not_available", "message": "This item has no deadline to be reminded of."}
+                outcome = d.assistant.remind_about(found, at=at, user=user)
+                message = f"Reminder set for {at.astimezone(d.tz):%Y-%m-%d}."
+            return (200, {"message": message}) if outcome == "ok" else (409, {"error": "not_available",
+                                                                                "message": outcome})  # fmt: skip
         if action == "dismiss":
             done = manager.hide(finding)
         elif action == "reject":
@@ -585,6 +600,17 @@ class PanelHandlers:
         else:
             done = False
         return (200, {}) if done else (409, {"error": "not_available", "message": "Not open any more."})
+
+    def _remind_at(self, action: str, finding: str) -> datetime | None:
+        """When a maintenance reminder fires: in 30 or 90 days, or 30 days before the finding's deadline."""
+        now = datetime.now(UTC)
+        days = REMIND[action]
+        if days is not None:
+            return now + timedelta(days=days)
+        manager = self._d.maintenance
+        found = next((f for f in manager.findings() if f.key == finding), None) if manager is not None else None
+        start = found.asks_at() if found is not None else None
+        return start if start is not None and start > now else None
 
     def _withdraw(self, found: Mapping[str, Any], user: str) -> Result:
         """Withdraw the approval an item holds (always safe, one step)."""
@@ -640,8 +666,16 @@ class PanelHandlers:
             return 413, {"error": "too_long", "message": f"At most {MAX_CHAT_CHARS} characters."}
         if not isinstance(client_id, str) or not _CLIENT_ID_RE.fullmatch(client_id):
             return _bad("bad_client_id")
+        # "Ask the agent": the item the message is about (its record goes into the chat run's prompt, fenced).
+        raw_item = body.get("item")
+        item = None
+        if raw_item is not None:
+            item = self._book.get(raw_item) if isinstance(raw_item, str) else None
+            if item is None:
+                return _bad("bad_item", "That item is gone; ask without it.")
         principal = Principal(Origin.ADMIN_CHAT, user_id=user, channel="panel")
-        sent = await self._assistant.submit(thread, text, principal=principal, channel="panel", client_id=client_id)
+        sent = await self._assistant.submit(thread, text, principal=principal, channel="panel", client_id=client_id,
+                                            item=item)  # fmt: skip
         turn = sent.turn.to_json() if sent.turn is not None else None
         match sent.result:
             case "queued":

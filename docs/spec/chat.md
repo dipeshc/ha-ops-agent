@@ -49,6 +49,15 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   turn; old turns are kept and the chat's turns are never pruned. Tests
   `test_full_chat.py:376-411`, `test_chat_ux.py:341-381`,
   `test_the_main_chat_is_never_pruned`.
+- T6a. **Ask the agent about an item.** `POST threads/<t>/messages` takes
+  an optional `item` (an item id; 400 `bad_item` when it is not a current
+  item). The turn's meta keeps `item` and `item_title`, and that turn's run
+  gets the item's record fenced in an `<item>` block (`items.item_context`:
+  id, kind, state, title, gist, what it needs, about, up to 12 facts, the
+  agent's earlier text marked as model output, the admin's actions on it;
+  angle brackets replaced, the whole prompt redacted). It is an ordinary
+  chat run: the `chat` profile, the admin-chat origin and every chat cap.
+  Test `test_ask_the_agent_sends_the_item_with_the_message`.
 - T7. The reply schema is `{reply: null|<=1500, summary<=300}`; control
   characters are stripped and the strings `null`/`none` count as no reply.
   A null reply in chat is a `no_reply` failed card; in a follow-up it means
@@ -119,7 +128,9 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   tasks with `reply`, and quiet-ok only for admin reminders. A due
   follow-up runs the `followup` profile with the creator's origin (3 a day,
   retried after 6 hours, at most 3 attempts) and pushes its reply as
-  "Follow-up: ...". Firing is at-least-once with a `mark_fired` guard.
+  "Follow-up: ...". Firing is at-least-once with a `mark_fired` guard. A
+  reminder set from an item's Remind me action (maintenance.md M14a) opens
+  that item.
 
 ## Investigations
 
@@ -136,3 +147,11 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   `POST api/threads/<t>/cancel {task_id}` cancels the pending task or kills
   the running step and voids its approval requests. Tests
   `test_full_chat.py:271-375`.
+- T17a. **Plan a fix** (a maintenance item's `plan_fix` in the panel) starts
+  the same kind of investigation in the one chat for the admin (owner
+  admin, origin admin-chat, 2 steps) with a fixed daemon brief and the
+  item id in its payload; each step's prompt holds the item's `<item>`
+  block (T6a). It obeys T17's limits (one open investigation per chat, two
+  house-wide, the open-task cap) and counts against `task.investigate`'s
+  daily quota of 4; refused, the action answers 409 with the reason. Test
+  `test_plan_a_fix_starts_an_investigation_with_the_item`.

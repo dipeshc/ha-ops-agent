@@ -185,6 +185,9 @@ pre{font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(-
 .steps li::before{content:"\2713  ";color:var(--ok)}
 .steps li.now{color:var(--primary);font-weight:600}.steps li.now::before{content:"\203A  "}
 .composer{display:flex;gap:8px;align-items:flex-end;padding:10px 0 calc(10px + env(safe-area-inset-bottom));max-width:720px}
+.about{display:flex;align-items:center;gap:8px;max-width:720px;margin-top:8px;padding:4px 4px 4px 12px;border-radius:12px;background:var(--card-2);font-size:13px;color:var(--muted)}
+.about span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.about .x{border:0;background:none;color:inherit;font-size:18px;min-width:44px;min-height:36px;cursor:pointer}
 .composer textarea{flex:1;min-height:44px;max-height:160px;border-radius:22px;background:var(--card);border:0;box-shadow:0 0 0 1px var(--line);padding:10px 16px;font:inherit;font-size:15px;color:var(--fg);resize:none}
 .send{width:44px;height:44px;border-radius:50%;background:var(--primary);color:var(--on-primary);display:grid;place-items:center;flex:none}
 .send svg{width:20px;height:20px}
@@ -349,8 +352,8 @@ const S = {
 try { S.drafts = JSON.parse(sessionStorage.getItem("ops.drafts") || "{}") || {}; } catch (e) { S.drafts = {}; }
 let els = {};
 const wide = matchMedia("(min-width: 840px)");
-window.opsPanel = { h, btn, api, toast, render, S, els, go, row, section, icon, svg, minutes, fmtN, hhmm, dayKey, dayLabel, when, tz,
-  getJSON, loadHistory, loadSystem, loadState, ask, wide, rich, announce, saveDrafts, clock, loadThread, loadHome, markRead };
+window.opsPanel = { h, btn, api, toast, render, S, els, go, row, section, icon, svg, minutes, fmtN, askAbout, hhmm, dayKey, dayLabel, when, tz,
+  getJSON, loadHistory, loadSystem, loadState, wide, rich, announce, saveDrafts, clock, loadThread, loadHome, markRead };
 function saveDrafts() { try { sessionStorage.setItem("ops.drafts", JSON.stringify(S.drafts)); } catch (e) { /* private mode */ } }
 
 const app = document.getElementById("app");
@@ -456,7 +459,11 @@ function route() {
 }
 addEventListener("popstate", route);
 wide.addEventListener("change", () => { slots.wide = null; els.thread = null; render(); });
-function ask(what) { if (S.main) { S.drafts[S.main] = `About ${what}: `; saveDrafts(); } go("#chat"); }
+/* "Ask the agent" on an item: the chat opens with the item attached (its record goes to the run, fenced) and a first question. */
+function askAbout(t) {
+  if (S.main) { S.drafts[S.main] = `What should I do about "${t.title}"?`; S.askItem = { id: t.id, title: t.title }; saveDrafts(); }
+  go("#chat");
+}
 
 /* ---------------------------------------------------------------- shell */
 const slots = {};
@@ -611,7 +618,7 @@ function detail(t) {
     (t.events || []).length ? timeline(t.events) : null,
     t.change && t.change.diff ? h("pre", { class: "diff", "aria-label": "Diff" }, String(t.change.diff).split("\n").map((l) =>
       h("span", { class: /^\+(?!\+\+)/.test(l) ? "add" : /^-(?!--)/.test(l) ? "del" : "ctxl", text: `${l}\n` }))) : null,
-    h("div", { class: "foot" }, h("span", { text: t.footnote || "" }), btn("Ask about this", () => ask(`"${t.title}"`), "text")));
+    t.footnote ? h("div", { class: "foot" }, h("span", { text: t.footnote })) : null);
 }
 function phases(p) {
   if (!p || !(p.names || []).length) return null;
@@ -642,7 +649,8 @@ function actBlock(t) {
   const text = n ? n.text : t.about;
   if (!n && !text && !extra.length) return null;
   const all = [...(n && n.primary ? [{ ...n.primary, style: "fill" }] : []), ...(n ? n.secondary || [] : []), ...extra];
-  const b = (a) => h("button", { class: `btn ${a.style || ""}`, onclick: () => act(t, a) }, a.label);
+  // "Ask the agent" opens the chat with the item attached; every other action is the daemon's (api/items/<id>/act).
+  const b = (a) => h("button", { class: `btn ${a.style || ""}`, onclick: () => (a.id === "ask" ? askAbout(t) : act(t, a)) }, a.label);
   return h("div", { class: "act" }, text ? h("p", { text }) : null, all.length ? h("div", { class: "btns" }, all.map(b)) : null);
 }
 els.tried = new Set();

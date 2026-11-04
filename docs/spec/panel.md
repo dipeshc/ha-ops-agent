@@ -112,7 +112,8 @@ The record behind Home, History and the item page
     "expires_at": null
   },
   "about": "Runs tonight at 04:00 through the normal pipeline.",  // optional action-block text when need is null
-  "actions": [ { "id": "withdraw", "label": "Withdraw approval", "style": "text" } ],  // available outside a need
+  "actions": [ { "id": "withdraw", "label": "Withdraw approval", "style": "text" },
+               { "id": "ask", "label": "Ask the agent", "style": "text" } ],  // available outside a need; always ends with ask
   "phase": { "names": ["Backup", "Install", "Reboot", "Verify"], "current": 2,
              "started_at": "2026-01-15T03:59:00Z", "usual_s": 480 },  // null unless phased; current = names.length when all done
   "follows": { "id": "u-7f3a91c2", "title": "Home Assistant OS 17.0 → 17.1", "state": "waiting" },  // or null
@@ -157,9 +158,27 @@ The record behind Home, History and the item page
   of the finding's deadline waits with an `approval` need, primary
   `apply_dashboard`, secondary `reject` ([maintenance.md](maintenance.md)
   M12a). A deprecation within 30 days of its deadline or a dashboard
-  restore that failed waits with an `ack` need (`ack`); an open finding
-  offers `dismiss` ("Not relevant here"). Test
+  restore that failed waits with an `ack` need (`ack`). A finding offers
+  `plan_fix` ("Plan a fix"), `remind_month`, `remind_quarter` ("Remind me
+  in 30 / 90 days"), `remind_deadline` ("Remind me near the deadline",
+  only while its deadline is more than 31 days away) and `dismiss` ("Hide
+  until it changes", not while it asks); `plan_fix` is left out while a
+  config change answers it ([maintenance.md](maintenance.md) M14a). Test
   `test_the_panel_applies_an_approved_dashboard_plan_end_to_end`.
+
+- N21. **Every item shown is actionable.** Every item in Needs you, In
+  progress, Coming up or Suggestions has at least one action, and every
+  item of any kind ends its `actions` with `ask` ("Ask the agent"), added
+  when the record is served (it is not stored and never moves the
+  revision). The panel renders all of an item's actions as buttons on its
+  card (wrapping at phone width; text only, through `textContent`); `ask`
+  opens the chat with the item attached ("About: <title>", removable) and
+  the first question "What should I do about "<title>"?" filled in, never
+  sent by itself. The send carries the item id (`POST
+  threads/<t>/messages {item}`, [chat.md](chat.md) T6a); nothing else is
+  granted. Tests `test_every_item_the_panel_shows_offers_an_action`,
+  `test_every_update_item_offers_an_action`,
+  `test_ask_the_agent_sends_the_item_with_the_message`.
 
 ## Routes
 
@@ -217,11 +236,12 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
 
 - N15. Body `{"action": "<action id>", "revision": 7}`. `action` MUST be the
   id of `need.primary`, one of `need.secondary`, or one of `actions`. The
-  daemon re-checks everything; the panel's copy is never trusted.
+  daemon re-checks everything; the panel's copy is never trusted. `ask` is
+  never posted here: the panel handles it (N21).
 
 | status | body | meaning |
 | --- | --- | --- |
-| 200 | `{"item": Item}` | done or recorded |
+| 200 | `{"item": Item, "message"?: …}` | done or recorded (`message`: a daemon sentence for a toast, e.g. "Reminder set for …") |
 | 400 | `{"error": "bad_action" \| "bad_revision"}` | malformed |
 | 404 | `{"error": "no_such_item"}` | unknown id |
 | 409 | `{"error": "revision", "message": "The plan changed: …", "item": Item}` | stale revision; the panel shows the message and the new item |

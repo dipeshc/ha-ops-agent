@@ -405,3 +405,28 @@ def test_the_budget_rows_show_run_time_and_the_measured_account() -> None:
     assert "Account, 7 days" not in " ".join(
         _run(unmeasured + "console.log(JSON.stringify(V.system().map((n) => n.textContent)));")
     )
+
+
+@needs_node
+def test_every_action_is_a_button_and_ask_the_agent_opens_the_chat_with_the_item() -> None:
+    item = (
+        "{id: 'm-0123456789ab', title: 'acme_weather: Core may replace it', revision: 3, state: 'proposed',"
+        " actions: [{id: 'plan_fix', label: 'Plan a fix'}, {id: 'dismiss', label: 'Hide until it changes',"
+        " style: 'text'}, {id: 'ask', label: 'Ask the agent', style: 'text'}]}"
+    )
+    program = (
+        _RENDER
+        + _funcs("askAbout")
+        + "function saveDrafts() {}\nS.main = 'thread01'; S.drafts = {};\n"
+        + f"const t = {item}; const block = actBlock(t);\n"
+        + "const btns = block.kids[block.kids.length - 1].kids;\n"
+        + "btns[0].on.click(); btns[2].on.click();\n"
+        + "console.log(JSON.stringify({labels: btns.map((b) => b.textContent), calls, draft: S.drafts.thread01,"
+        + " item: S.askItem}));"
+    )
+    result = _run(program)
+    assert result["labels"] == ["Plan a fix", "Hide until it changes", "Ask the agent"]
+    # Plan a fix goes to the daemon; Ask the agent never does: it opens the chat with the item attached.
+    assert result["calls"] == [["act", "plan_fix"], ["go", "#chat"]]
+    assert result["draft"] == 'What should I do about "acme_weather: Core may replace it"?'
+    assert result["item"] == {"id": "m-0123456789ab", "title": "acme_weather: Core may replace it"}

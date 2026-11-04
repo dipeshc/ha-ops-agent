@@ -164,9 +164,23 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   Coming up; replacement candidates and suggestions are a separate Home
   section, `suggestions`; all are in History.
 - M14. **Resolution.** A finding the scan no longer reports is `done`
-  ("resolved"). The admin may hide any finding ("Not relevant here"): it is
-  `cancelled` until its evidence changes. Test
+  ("resolved"). The admin may hide any finding ("Hide until it changes"):
+  it is `cancelled` until its evidence changes. Test
   `test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home`.
+- M14a. **Every finding is actionable.** Besides "Ask the agent" (as on
+  every item, [panel.md](panel.md) N21), a finding offers **Plan a fix**
+  (an investigation in the chat that reads the evidence and writes a plan:
+  the steps, their risk, what the agent can and cannot do; where the fix
+  is inside the proposal rules it ends in an ordinary proposal for
+  approval; where it is not, for example a custom integration's own code,
+  it says that the admin or an engineering session must do it;
+  [chat.md](chat.md) T17a), **Remind me** in 30 or 90 days or near the
+  deadline (30 days before it, only for a finding with a deadline more
+  than 31 days away; an admin reminder task about the item, opening it
+  when it fires), and **Hide until it changes** (M14). A dashboard plan
+  still comes only from the plan run (M18). Tests
+  `test_plan_a_fix_starts_an_investigation_with_the_item`,
+  `test_remind_me_later_sets_a_reminder_about_the_item`.
 - M15. Stored findings of the wrong shape (key not 16 hex characters,
   unknown variant) are dropped. Test
   `test_stored_findings_of_the_wrong_shape_are_dropped`.

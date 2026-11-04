@@ -222,7 +222,8 @@ function turnParts(t) {
     const out = [h("div", { class: `msg me ${t.status === "sending" ? "sending" : ""}`, text: t.text })];
     const st = { sending: "Sending…", queued: "Sent", running: "Sent", ok: "Sent", refused: "Sent", failed: "Not answered" }[t.status] || "";
     const [mb, menu] = turnMenu(t);
-    out.push(h("div", { class: "meta r" }, [at, st, t.meta && t.meta.via ? "via notification" : ""].filter(Boolean).join(" · "), mb), menu);
+    out.push(h("div", { class: "meta r" }, [at, st, t.meta && t.meta.via ? "via notification" : "",
+      t.meta && t.meta.item_title ? `about: ${t.meta.item_title}` : ""].filter(Boolean).join(" · "), mb), menu);
     if (t.status === "unsent") out.push(h("button", { class: "fail", onclick: () => resend(t) }, "Not sent: tap to retry"));
     return out;
   }
@@ -306,7 +307,10 @@ function composer() {
   });
   send.addEventListener("click", () => submit(ta));
   els.composer = ta;
-  return { el: h("div", null, count, h("div", { class: "composer" }, ta, send)), sync, ta };
+  // The item "Ask the agent" attached: shown above the box until the message is sent or the admin drops it.
+  const about = S.askItem ? h("div", { class: "about" }, h("span", { text: `About: ${S.askItem.title}` }),
+    h("button", { class: "x", "aria-label": "Ask without the item", onclick: () => { S.askItem = null; P.render(); } }, "×")) : null;
+  return { el: h("div", null, about, count, h("div", { class: "composer" }, ta, send)), sync, ta };
 }
 function clientId() {
   const b = new Uint8Array(12); crypto.getRandomValues(b);
@@ -315,14 +319,18 @@ function clientId() {
 async function submit(ta) {
   const text = ta.value.trim();
   if (!text || text.length > MAX || !S.thread) return;
-  const turn = { id: null, client_id: clientId(), thread: S.thread, role: "admin", text, status: "sending", at: new Date().toISOString(), meta: {} };
-  S.drafts[S.thread] = ""; P.saveDrafts(); ta.value = "";
+  const item = S.askItem;
+  const turn = { id: null, client_id: clientId(), thread: S.thread, role: "admin", text, status: "sending", at: new Date().toISOString(),
+    meta: item ? { item: item.id, item_title: item.title } : {} };
+  S.drafts[S.thread] = ""; P.saveDrafts(); ta.value = ""; S.askItem = null;
   S.turns.push(turn); els.scrollDown = true; P.render();
   await deliver(turn);
   if (els.composer) els.composer.focus();
 }
 async function deliver(turn) {
-  const r = await api("POST", `api/threads/${turn.thread}/messages`, { text: turn.text, client_id: turn.client_id });
+  const body = { text: turn.text, client_id: turn.client_id };
+  if (turn.meta && turn.meta.item) body.item = turn.meta.item;
+  const r = await api("POST", `api/threads/${turn.thread}/messages`, body);
   if (r.data.turn) { Object.assign(turn, r.data.turn); }
   if (r.status === 202 || r.status === 200) {
     if (r.status === 202) S.inflight = S.inflight || { turn_id: turn.id, state: "queued", position: r.data.position, steps: [], started_at: new Date().toISOString() };
@@ -337,6 +345,7 @@ async function deliver(turn) {
 }
 function restoreDraft(turn) {
   S.drafts[turn.thread] = turn.text; P.saveDrafts();
+  if (turn.meta && turn.meta.item) S.askItem = { id: turn.meta.item, title: turn.meta.item_title || "" };
   if (els.thread && els.thread.id === turn.thread && els.thread.comp && !els.thread.comp.ta.value) els.thread.comp.ta.value = turn.text;
 }
 function resend(turn) { turn.status = "sending"; P.render(); deliver(turn); }

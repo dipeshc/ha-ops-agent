@@ -41,7 +41,7 @@ import dataclasses
 import hashlib
 import logging
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
@@ -73,6 +73,8 @@ from opsd.conversation import (
     validate_reply,
 )
 from opsd.events import Event
+from opsd.items import ITEM_ID_RE, item_context
+from opsd.items import deep_link as item_link
 from opsd.live import Hub
 from opsd.notify import deep_link
 from opsd.policy import Origin
@@ -80,6 +82,7 @@ from opsd.redact import Redactor
 from opsd.runctx import AGENT_SELF, Principal, RunContext
 from opsd.runner import BLOCKED_STATUSES, CHAT, FOLLOWUP, INVESTIGATE, SUMMARY, AgentRunner
 from opsd.store import IN_FLIGHT, RETRYABLE, Store, StoreError, Task, Turn
+from opsd.tasks import MAX_OPEN_INVESTIGATIONS, MAX_OPEN_TASKS, MAX_TITLE_CHARS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,6 +105,17 @@ INVESTIGATION_MAX_WAIT = timedelta(hours=24)
 # The next step's fire time must differ from the last one (the at-least-once guard keys on it).
 STEP_GAP = timedelta(seconds=5)
 CANCEL_KEY = "investigation.cancel:"
+# "Plan a fix" on a maintenance item: the brief of its investigation (daemon text; the item is fenced beside it).
+PLAN_FIX_STEPS = 2
+PLAN_FIX_BRIEF = (
+    "The admin tapped Plan a fix on the item below and wants a concrete plan for it in this chat. Read the evidence"
+    " (the item, the repairs, the logs, the config and the integration it names) and write the plan: the steps, the"
+    " risk of each, and which of them you can do yourself and which you cannot. The admin wants a fix proposed where"
+    " the proposal rules allow it: then propose it, so it waits for his approval like any proposal. Where the fix"
+    " is outside what you may propose (for example a custom integration's own code, an integration to replace, or"
+    " anything in the UI), say so plainly, say that the admin or an engineering session must do it, and that he can"
+    " use Remind me on the item to come back to it."
+)
 # Run ids an investigation keeps (its approval requests are voided if it is cancelled).
 MAX_RUN_IDS = 6
 INVESTIGATION_LIVE = ("queued", "running", "next", "waiting")
@@ -367,9 +381,12 @@ class Assistant:
         actions: tuple[Action, ...] = (Action(ActionKind.DONE, "Done"), Action(ActionKind.SNOOZE, "Snooze 1 day"))
         note = str(task.payload.get("note") or "")
         label = "Agent-scheduled" if task.owner == "agent" else "Reminder"
+        item = task.payload.get("item")
         message = agent_message(
             f"{label}: {task.title}", note or task.title, urgent=False, budget_class=BudgetClass.USER,
             tag_suffix=task_tag(task.id), actions=actions,
+            # A reminder about an item opens that item.
+            url=item_link(item) if isinstance(item, str) and ITEM_ID_RE.fullmatch(item) else None,
         )  # fmt: skip
         if task.owner == "admin":
             # The admin chose this time, quiet hours or not.
@@ -458,12 +475,14 @@ class Assistant:
         client_id: str | None = None,
         exclusive: bool = True,
         via: str | None = None,
+        item: Mapping[str, Any] | None = None,
     ) -> Submitted:
         """Store the admin's message at once, then queue its answer.
 
         `exclusive` (the panel): at most one message in flight per thread.
         The same `client_id` returns the stored turn instead of a second one.
-        The message is stored even when the daily cap refuses it.
+        The message is stored even when the daily cap refuses it. `item` (the panel's "Ask the agent"): the
+        item the message is about; its record is fenced into the run's prompt (`items.item_context`).
         """
         now = datetime.now(UTC)
         text = clean_text(text, MESSAGE_CHARS)
@@ -478,6 +497,8 @@ class Assistant:
         meta: dict[str, Any] = {"user": principal.user_id, "channel": channel}
         if via is not None:
             meta["via"] = via
+        if item is not None:
+            meta["item"], meta["item_title"] = str(item["id"]), clean_text(str(item.get("title") or ""), 120)
         turn, created = self.store.submit_turn(thread, text=text, now=now, client_id=client_id, meta=meta)
         if not created:
             return Submitted("duplicate", turn, self._position(turn.id))
@@ -599,7 +620,8 @@ class Assistant:
         context = self.store.context_turns(thread, after=covers, before=turn.id, limit=CONTEXT_TURNS)
         prompt = build_chat_prompt(
             turn.text, [t.to_json() for t in context], self.store.open_tasks(), now=now, tz=self._tz(),
-            channel=channel, summary=summary.text if summary else None, thread=thread, context=self._context_text(),
+            channel=channel, summary=summary.text if summary else None, thread=thread,
+            context=self._with_item(self._context_text(), turn.meta.get("item")),
         )  # fmt: skip
         outcome = await self.runner.run_agent(
             CHAT, redactor.redact(prompt), principal=principal, now=now, redactor=redactor, thread_id=thread,
@@ -636,6 +658,68 @@ class Assistant:
         self.publish("status", thread, {"turn_id": turn.id, "state": "ok"})
         self.audit("chat.turn", "agent", args={"role": "agent", "thread": thread, "run": outcome.context.run_id,
                     "chars": len(reply)}, outcome=run.status, detail=f"push {delivered}")  # fmt: skip
+
+    def _with_item(self, context: str, item: object) -> str:
+        """The run's context plus the item the admin asked about, if it still exists."""
+        record = self.store.item(item) if isinstance(item, str) and ITEM_ID_RE.fullmatch(item) else None
+        if record is None:
+            return context
+        block = item_context(record)
+        return f"{context}\n\n{block}" if context else block
+
+    # ------------------------------------------------------ item actions
+
+    def plan_fix(self, record: Mapping[str, Any], *, user: str) -> str:
+        """ "Plan a fix" on a maintenance item: an investigation in the one chat, as if the admin had asked for it
+        there (the `task.investigate` limits and daily quota, the `investigate` profile and its caps, the
+        admin-chat origin). Returns "ok" or why it did not start (daemon words)."""
+        now = datetime.now(UTC)
+        thread = self.main_thread()
+        open_now = self.store.open_investigations()
+        if any(t.thread_id == thread for t in open_now):
+            return "An investigation is already running in the chat; wait for it or cancel it there."
+        if len(open_now) >= MAX_OPEN_INVESTIGATIONS:
+            return f"{MAX_OPEN_INVESTIGATIONS} investigations are already open; try again later."
+        if self.store.count_open_tasks("admin") >= MAX_OPEN_TASKS["admin"]:
+            return "Too many open reminders and follow-ups; cancel some first."
+        quota = CAPABILITIES["task.investigate"].quota.per_day
+        if not self.store.bump(self._day(now), "cap:task.investigate", limit=quota or None):
+            return "Today's investigations are used up; try again tomorrow."
+        title = clean_text(f"Plan a fix: {record.get('title') or 'maintenance item'}", MAX_TITLE_CHARS)
+        task, _ = self.store.create_task(
+            kind="followup", title=title, owner="admin", created_by=f"panel:{user[:64]}", next_fire_at=now,
+            payload={"investigation": True, "note": PLAN_FIX_BRIEF, "max_steps": PLAN_FIX_STEPS, "step": 0,
+                     "findings": [], "origin": str(Origin.ADMIN_CHAT), "user_id": user, "item": str(record["id"])},
+            idempotency_key=f"plan_fix:{record['id']}:{record.get('revision')}:{now.date().isoformat()}", now=now,
+            thread_id=thread,
+        )  # fmt: skip
+        self.audit("task.investigate", f"admin-chat:{user[:64]}", args={"task": task.id, "item": record["id"]},
+                   outcome="accepted", detail="plan a fix (panel)")  # fmt: skip
+        self._investigation_card(task, now)
+        self.note("investigation", f"Investigation started: {task.title}", ref={"task": task.id})
+        self.publish("tasks", None, {})
+        self.wake()
+        return "ok"
+
+    def remind_about(self, record: Mapping[str, Any], *, at: datetime, user: str) -> str:
+        """A reminder about an item, set by the admin in the panel (one per item and due day). "ok" or why not."""
+        now = datetime.now(UTC)
+        if at < now + timedelta(minutes=1) or at > now + timedelta(days=366):
+            return "That reminder time is not between a minute and a year from now."
+        if self.store.count_open_tasks("admin") >= MAX_OPEN_TASKS["admin"]:
+            return "Too many open reminders and follow-ups; cancel some first."
+        title = clean_text(str(record.get("title") or "an item"), MAX_TITLE_CHARS)
+        self.store.create_task(
+            kind="reminder", title=title, owner="admin", created_by=f"panel:{user[:64]}", next_fire_at=at,
+            payload={"note": f"Reminder about the item {record['id']} on Home: open it to decide.", "reply": False,
+                     "origin": str(Origin.ADMIN), "user_id": user, "item": str(record["id"])},
+            idempotency_key=f"remind:{record['id']}:{at.date().isoformat()}", now=now,
+        )  # fmt: skip
+        self.audit("task.create", f"admin:{user[:64]}", args={"item": record["id"], "at": at.isoformat()},
+                   outcome="accepted", detail="remind me (panel)")  # fmt: skip
+        self.publish("tasks", None, {})
+        self.wake()
+        return "ok"
 
     def _context_text(self) -> str:
         if self._context is None:
@@ -860,7 +944,8 @@ class Assistant:
         self._set_card(card, task, "running", step, of, steps=[])
         redactor = self._redactor()
         prompt = build_investigation_prompt(task, step=step, max_steps=of, now=now, tz=self._tz(),
-                                            context=self._context_text())  # fmt: skip
+                                            context=self._with_item(self._context_text(),
+                                                                    task.payload.get("item")))  # fmt: skip
         self._investigating[thread] = card.id
         try:
             # Checked again once the AI slot is held: a cancel while waiting never starts the step.

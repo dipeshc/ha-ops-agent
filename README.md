@@ -51,8 +51,10 @@ plain, tested code for everything that acts.
   asks.
 
 Everything it does is an *item* on the panel's Home page, with its history.
-It pushes only when an item needs you, when Home Assistant is down, or when
-you asked for it.
+Every item has something you can do with it: at least *Ask the agent*,
+which opens the chat with that item attached, and for maintenance findings
+*Plan a fix*, *Remind me* and *Hide until it changes*. It pushes only when
+an item needs you, when Home Assistant is down, or when you asked for it.
 
 <img src="docs/images/panel-phone-dark.png" width="300" alt="The same Home page on a phone, in the dark theme.">
 

@@ -313,9 +313,11 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   one Core restart inside `approved_core_restart(<job>)`
   ([selfguard.md](selfguard.md) G9), only when the files on disk are
   exactly the approved result; then `verifying`. A refused or failed
-  restart, or Core not back within 15 minutes, is `rolling_back`; a
-  refused write whose files on disk still match the proposal's "before"
-  hashes is `failed` ("nothing was written"). A job found `installing`
+  restart, or Core not back within 15 minutes, is `rolling_back`. The
+  snapshot is always taken before any write, so a refused write with no
+  snapshot, or with the fork still matching its snapshot, is `failed`
+  ("nothing was written"), even when the fork was edited meanwhile (which
+  voids the approval). A job found `installing`
   after a daemon restart is `rolling_back` (what is on disk is unknown).
 - U29. **Verify.** The settle and comparison of U18 (the access-hardware
   rules included: a watched lock or the alarm that goes down is a
@@ -326,10 +328,9 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   rebase <domain> onto core <version>`) and pushed when `limits.git_push`
   is on; untracked files, or git off, are not committed (said on the
   item). A commit failure never undoes the rebase.
-- U30. **Rollback.** With no snapshot and the fork's files on disk
-  matching the proposal's "before" hashes, nothing was written and Core
-  was not restarted: the job is `failed` ("nothing was written"), never
-  `rollback_failed`. Otherwise `rolling_back` restores the snapshot (only from a
+- U30. **Rollback.** With no snapshot nothing was written and Core was
+  not restarted (the snapshot precedes every write): the job is `failed`
+  ("nothing was written"), never `rollback_failed`. Otherwise `rolling_back` restores the snapshot (only from a
   snapshot whose files match their own SHA-256s), restarts Core inside a
   new scope for the same job, and settles again: healthy is
   `rolled_back` and the proposal `rolled_back`; a failed restore or
@@ -342,7 +343,9 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   entity), and the fork executors refuse any other job, an entity other
   than `fork.<domain>` for the job's own domain, a missing proposal id, or
   a domain that names the agent (`self_path`) or is on the never-reload
-  list or the profile's `rebase.deny`. `fork.apply` is
+  list or the profile's `rebase.deny` (for the apply steps: the write, its
+  config check and its restart; restoring the fork's own files and the
+  restart that loads them are always allowed). `fork.apply` is
   daemon-internal ([capabilities.md](capabilities.md) K3), tier APPROVE,
   and `capabilities.never` can refuse it.
 - U32. **Never access hardware.** A fork rebase is refused for a domain on
@@ -368,11 +371,11 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   job is not in an active update run is settled from its job: `succeeded`
   is `applied`; `rolled_back` is `rolled_back`; `failed` and
   `rollback_failed` are `failed`; `skipped`, or a job that never started
-  with the fork's files untouched, is `open` again with "the approval was
+  with no snapshot (or the fork matching it), is `open` again with "the approval was
   used without installing, approve it again" and an activity entry that
   needs the admin (the item is back in Needs you, and pushed); anything
-  else is `failed` ("stopped before anything was written" when the files
-  are untouched, otherwise "stopped mid-way; check custom_components/
+  else is `failed` ("stopped before anything was written" with no
+  snapshot or the fork matching it, otherwise "stopped mid-way; check custom_components/
   <domain> against the backup"), with an `ack` need. A job in an active
   run is left to `resume`. Test
   `test_a_rebase_left_applying_outside_a_run_is_settled`.

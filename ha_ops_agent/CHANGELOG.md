@@ -52,6 +52,8 @@ Custom integrations that fork a Core one:
   outside its run (the add-on restarted) is settled at the next start or
   minute, never left running; if its approval was used without
   installing, it asks you again.
+  If you edit the fork while its rebase waits for the backup, the rebase
+  stops with nothing written (a plain failure, not a failed rollback).
 
 Safety:
 

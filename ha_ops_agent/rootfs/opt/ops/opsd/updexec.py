@@ -600,7 +600,7 @@ class Executors:
 
     # -------------------------------------------------------- fork rebases
 
-    def _check_fork(self, job: UpdateJob) -> str:
+    def _check_fork(self, job: UpdateJob, *, applying: bool = True) -> str:
         """A fork rebase job: its own kind, a `fork.<domain>` entity naming a custom integration that is not the
         agent, and a proposal id. Returns the domain."""
         match = FORK_ENTITY_RE.fullmatch(job.entity_id)
@@ -611,7 +611,8 @@ class Executors:
             raise ExecutorRefused("a fork rebase job names its proposal")
         if selfguard.self_path(f"custom_components/{match.group(1)}/") or selfguard.is_self_slug(match.group(1)):
             raise ExecutorRefused("the agent never changes itself")
-        if match.group(1) in NEVER_RELOAD_DOMAINS | self._options.profile.rebase.deny:
+        # The deny lists stop applying a rebase; putting the fork's own files back is always allowed.
+        if applying and match.group(1) in NEVER_RELOAD_DOMAINS | self._options.profile.rebase.deny:
             raise ExecutorRefused(f"{match.group(1)} is on the never-reload list or the profile's rebase.deny")
         for version in (job.from_version, job.to_version):
             if not VERSION_RE.fullmatch(version):
@@ -648,7 +649,7 @@ class Executors:
 
     async def fork_restore(self, job: UpdateJob, restore: Callable[[], None]) -> None:
         """Put the fork's snapshot back (a return to what was running, like a rollback)."""
-        domain = self._check_fork(job)
+        domain = self._check_fork(job, applying=False)
         audit_id = self._authorize("update.rollback", {"domain": domain, "job": job.id, "step": "restore"})
         try:
             await asyncio.to_thread(restore)
@@ -661,7 +662,7 @@ class Executors:
         """Restart Core for a fork rebase job, inside its one-restart scope: to load the approved files (`apply`:
         `proven` must say the job consumed its approval and the files on disk are the approved result) or the
         restored ones (`restore`). `done` or `unknown`."""
-        domain = self._check_fork(job)
+        domain = self._check_fork(job, applying=purpose == "apply")
         args = {"domain": domain, "job": job.id, "step": "restart", "purpose": purpose}
         if purpose == "apply":
             if not proven:

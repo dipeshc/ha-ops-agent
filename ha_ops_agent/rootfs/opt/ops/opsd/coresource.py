@@ -36,7 +36,7 @@ import re
 import shutil
 import stat
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -520,11 +520,11 @@ def compare_report(custom: LocalFiles, listing: Listing, core: Mapping[str, str]
         changed.append((name, added, removed))
         diffs.append("\n".join(lines))
     summary = [f"- files compared: {len(both)} ({len(changed)} changed, {len(identical)} identical)",
-               f"- only in the custom integration: {', '.join(only_custom) or 'none'}",
-               f"- only in Core: {', '.join(only_core) or 'none'}",
+               f"- only in the custom integration: {listed(only_custom, 'files')}",
+               f"- only in Core: {listed(only_core, 'files')}",
                "- changed lines (custom against Core): "
-               + ("; ".join(f"{n} +{a} -{r}" for n, a, r in changed) or "none"),
-               f"- identical: {', '.join(identical) or 'none'}"]  # fmt: skip
+               + listed([f"{n} +{a} -{r}" for n, a, r in changed], "files", sep="; "),
+               f"- identical: {listed(identical, 'files')}"]  # fmt: skip
     if custom.dirs or listing.dirs:
         summary.append(f"- subdirectories (not compared): custom {', '.join(custom.dirs) or 'none'};"
                        f" Core {', '.join(listing.dirs) or 'none'}")  # fmt: skip
@@ -540,6 +540,18 @@ def compare_report(custom: LocalFiles, listing: Listing, core: Mapping[str, str]
                 " \u2039 \u203a.",
                 "<core-compare-diff>", fence(body, len(body) + 1), "</core-compare-diff>"]  # fmt: skip
     return "\n".join(out)
+
+
+# The most names one summary line lists; the rest are counted (so the header stays small inside the budget).
+MAX_LISTED = 40
+
+
+def listed(names: Sequence[str], what: str, *, sep: str = ", ", limit: int = MAX_LISTED) -> str:
+    """At most `limit` names, then how many more are not listed; `none` when empty."""
+    if not names:
+        return "none"
+    more = len(names) - limit
+    return sep.join(names[:limit]) + (f"{sep}and {more} more {what} not listed" if more > 0 else "")
 
 
 def cut_text(body: str, budget: int, what: str, note: str) -> str:

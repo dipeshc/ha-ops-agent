@@ -188,7 +188,9 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   - **Answer.** A header with the Core version and the GitHub tree URL; a
     summary (files compared, changed and identical; files only in the
     custom integration; files only in Core; changed lines per file as
-    `+added -removed`; subdirectories; what was left out and why); then a
+    `+added -removed`; subdirectories; what was left out and why; each
+    list, and the `--fork` hunk list, names at most 40 and counts the rest
+    "not listed", so the header stays inside the shared budget); then a
     unified diff per changed file (`core/<version>/<file>` against
     `custom/<file>`), fenced in `<core-compare-diff>` as untrusted data
     (angle brackets replaced). The file contents of one answer share one

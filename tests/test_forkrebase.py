@@ -671,8 +671,8 @@ async def test_access_hardware_and_never_reload_domains_are_never_rebased(world:
     response = await world.call("propose-rebase", domain="acme_garage", keep="none", reason="r")
     assert not response["ok"] and "controls access hardware: it provides cover.big_door" in response["error"]
     # A domain on the never-reload list is refused before anything is read.
-    write_custom(paths, {**FORK_FILES, "manifest.json": MANIFEST.replace(DOMAIN, "yalexs_ble")}, "yalexs_ble")
-    response = await world.call("propose-rebase", domain="yalexs_ble", keep="none", reason="r")
+    write_custom(paths, {**FORK_FILES, "manifest.json": MANIFEST.replace(DOMAIN, "nuki")}, "nuki")
+    response = await world.call("propose-rebase", domain="nuki", keep="none", reason="r")
     assert not response["ok"] and "never-reload list" in response["error"]
     assert forkrebase.proposals(world.store) == []
     # Core unreadable refuses (fail closed).
@@ -811,7 +811,20 @@ async def test_a_rebase_left_applying_outside_a_run_is_settled(pipe: tuple[Rig, 
     )
     assert item(rig, skipped)["state"] == "waiting"
     # Changed on disk and stopped mid-way: failed, asking to check.
+    # With no snapshot nothing was written, whatever the fork holds now: never "stopped mid-way".
+    edited = stuck("pending")
+    early = stuck("installing")
+    (paths.custom_components / DOMAIN / "fan.py").write_text("X = 0\n")
+    rig.manager.reconcile_forks()
+    assert state(edited) == "open"
+    assert (
+        state(early) == "failed"
+        and "stopped before anything was written" in forkrebase.load(rig.store, early["id"])["detail"]
+    )
+    (paths.custom_components / DOMAIN / "fan.py").write_text(FORK_FAN)
     changed = stuck("verifying")
+    assert rig.manager._forks is not None
+    rig.manager._forks.snapshot(changed)
     (paths.custom_components / DOMAIN / "fan.py").write_text("X = 1\n")
     rig.manager.reconcile_forks()
     assert state(changed) == "failed" and "stopped mid-way" in forkrebase.load(rig.store, changed["id"])["detail"]
@@ -866,3 +879,51 @@ async def test_the_executor_refuses_a_rebase_deny_domain(tmp_path: Path, monkeyp
             assert written == ([] if refused else [True])
     finally:
         rig.store.close()
+
+
+async def test_the_fork_edited_during_the_backup_fails_cleanly(pipe: tuple[Rig, ForkOps, Paths]) -> None:
+    rig, ops, paths = pipe
+    record = propose(rig, paths)
+    await approve(rig, record)
+    backup = rig.ops.create_backup
+
+    async def edit_then_back_up() -> str | None:
+        (paths.custom_components / DOMAIN / "fan.py").write_text(FORK_FAN + "# edited by hand\n")
+        return await backup()
+
+    rig.ops.create_backup = edit_then_back_up  # type: ignore[method-assign]
+    await rig.manager.run_window("window")
+    job = fork_job(rig)
+    # The approval no longer binds the fork, nothing was written: a plain failure, never a failed rollback.
+    assert job.state == "failed" and "nothing was written" in job.detail
+    assert ops.restarts == [] and not rig.manager.paused()
+    assert (paths.custom_components / DOMAIN / "fan.py").read_text().endswith("# edited by hand\n")
+    assert forkrebase.load(rig.store, record["id"])["state"] == "failed"
+
+
+async def test_restoring_is_allowed_for_a_rebase_deny_domain(pipe: tuple[Rig, ForkOps, Paths]) -> None:
+    from opsd.profile import RebaseProfile
+    from opsd.updexec import Executors
+    from tests.conftest import SAMPLE_PROFILE, make_options
+
+    rig, _ops, _paths = pipe
+    profile = dataclasses.replace(SAMPLE_PROFILE, rebase=RebaseProfile(deny=frozenset({DOMAIN})))
+    options = make_options(strict=False, profile=profile, agent__mode="act", updates__auto_install="on")
+    executors = Executors(ops=rig.ops, store=rig.store, options=options, clock=lambda: rig.now)
+    run = rig.store.start_update_run(window_day="d", trigger="fork_rebase", mode="act", plan=[], now=rig.now) or 0
+    spec = {"entity_id": "fork.acme_fan", "kind": "fork_rebase", "title": "t", "from_version": ORIGIN_TAG,
+            "to_version": INSTALLED, "target": {"proposal": "0123456789abcdef", "domain": DOMAIN}}  # fmt: skip
+    [job] = rig.store.add_update_jobs(run, [spec], now=rig.now)
+    restored: list[bool] = []
+    await executors.fork_restore(job, partial(restored.append, True))
+    assert restored == [True]
+    assert await executors.fork_restart(job, proven=False, purpose="restore") == "done"
+    with pytest.raises(ExecutorRefused, match=r"rebase\.deny"):
+        await executors.fork_restart(job, proven=True, purpose="apply")
+
+
+def test_summary_lists_are_capped_with_a_count() -> None:
+    from opsd.coresource import listed
+
+    assert listed([], "files") == "none"
+    assert listed([f"f{n}.py" for n in range(45)], "hunks").endswith("f39.py, and 5 more hunks not listed")

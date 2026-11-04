@@ -60,6 +60,7 @@ from opsd.coresource import (
     cut_text,
     domain_fd,
     installed_core_version,
+    listed,
     read_at,
     read_custom,
     valid_domain,
@@ -785,7 +786,7 @@ def fork_report(source: CoreSource, custom: LocalFiles, domain: str, installed: 
              f" fork: {origin.score} changed lines; searched the installed {installed} and the .0 releases of the"
              f" last {FORK_MONTHS} months).",
              f"The fork's own changes against Core {origin.tag}, numbered for `opsctl propose-rebase {domain} --keep"
-             " <ids>` (" + (", ".join(f"{h.id} +{h.counts[0]} -{h.counts[1]}" for h in hunks) or "none")
+             " <ids>` (" + listed([f"{h.id} +{h.counts[0]} -{h.counts[1]}" for h in hunks], "hunks")
              + "):"]  # fmt: skip
     head = "\n".join(lines)
     room = max(512, budget - len(head.encode()) - 40)

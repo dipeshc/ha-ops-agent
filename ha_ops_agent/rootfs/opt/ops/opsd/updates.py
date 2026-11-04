@@ -2044,7 +2044,9 @@ class UpdateManager:
         try:
             await self.executors.fork_apply(job, proven=proven, write=write)
         except ExecutorRefused as err:
-            if await asyncio.to_thread(forks.untouched, record):
+            # The snapshot is always taken before any write: without one, or with the fork still matching it,
+            # nothing was written (even if someone edited the fork meanwhile, which voids the approval).
+            if forks.saved(record) is None or await asyncio.to_thread(forks.restored, record):
                 await self._fork_failed(ctx, job, record, f"nothing was written: {err}")
                 return
             # Something may have been written: put the fork back and restart.
@@ -2111,13 +2113,11 @@ class UpdateManager:
             job.id, expect=("rolling_back",), to="rolling_back", now=self._clock(), count_rollback=True
         ):
             return
-        if forks.saved(record) is None and await asyncio.to_thread(forks.untouched, record):
-            # Stopped before the snapshot (so before any write): the fork is as it was, Core never restarted.
+        if forks.saved(record) is None:
+            # The snapshot comes before any write: without one nothing was written and Core never restarted.
             await self._fork_failed(ctx, job, record, "nothing was written (stopped before the files were changed)")
             return
         try:
-            if forks.saved(record) is None:
-                raise ExecutorRefused("there is no snapshot of the fork's files")
             await self.executors.fork_restore(job, lambda: forks.restore(record))
             await self.executors.fork_restart(job, proven=False, purpose="restore")
         except ExecutorRefused as err:
@@ -2224,8 +2224,9 @@ class UpdateManager:
             return forkrebase.move(self.store, pid, expect=("applying",), to=outcome[0], now=now,
                                    detail=outcome[1] or outcome[0])  # fmt: skip
         forks = self._forks
-        untouched = forks is not None and forks.untouched(record)
-        if (job is not None and job.state == "skipped") or ((job is None or job.state == "pending") and untouched):
+        # The snapshot comes before any write: without one nothing was written.
+        unwritten = forks is not None and (forks.saved(record) is None or forks.restored(record))
+        if (job is not None and job.state == "skipped") or ((job is None or job.state == "pending") and unwritten):
             why = job.detail if job is not None and job.detail else "its update run ended before it started"
             done = forkrebase.move(self.store, pid, expect=("applying",), to="open", now=now,
                                    detail=f"not applied: {why}; the approval was used without installing,"
@@ -2235,7 +2236,7 @@ class UpdateManager:
                        item=f"fork:{pid}")  # fmt: skip
             return done
         # Stopped mid-way outside any run: nothing resumes it, so the admin is asked to check.
-        why = ("stopped before anything was written" if untouched else
+        why = ("stopped before anything was written" if unwritten else
                f"stopped mid-way ({job.state if job else 'no job'}); check custom_components/{record['domain']}"
                " against the backup taken before it")  # fmt: skip
         return forkrebase.move(self.store, pid, expect=("applying",), to="failed", now=now, detail=why)

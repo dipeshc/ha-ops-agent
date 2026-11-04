@@ -173,8 +173,10 @@ The record behind Home, History and the item page
   revision). The panel renders all of an item's actions as buttons on its
   card (wrapping at phone width; text only, through `textContent`); `ask`
   opens the chat with the item attached ("About: <title>", removable) and
-  the first question "What should I do about "<title>"?" filled in, never
-  sent by itself. The send carries the item id (`POST
+  the first question `What should I do about item <id>? Its title:
+  "<title>"` filled in (the title quoted as data; no item kind's title is
+  purely a device's or entity's own name, so it is never called "the
+  device's own text"), never sent by itself. The send carries the item id (`POST
   threads/<t>/messages {item}`, [chat.md](chat.md) T6a); nothing else is
   granted. Tests `test_every_item_the_panel_shows_offers_an_action`,
   `test_every_update_item_offers_an_action`,

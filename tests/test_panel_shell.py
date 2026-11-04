@@ -429,7 +429,6 @@ def test_every_action_is_a_button_and_ask_the_agent_opens_the_chat_with_the_item
     # Plan a fix goes to the daemon; Ask the agent never does: it opens the chat with the item attached.
     assert result["calls"] == [["act", "plan_fix"], ["go", "#chat"]]
     assert result["draft"] == (
-        "What should I do about item m-0123456789ab? Its title (the device's own text): \"acme_weather: Core may"
-        ' replace it"'
+        'What should I do about item m-0123456789ab? Its title: "acme_weather: Core may replace it"'
     )
     assert result["item"] == {"id": "m-0123456789ab", "title": "acme_weather: Core may replace it"}

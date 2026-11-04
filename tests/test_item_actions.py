@@ -428,9 +428,9 @@ async def test_a_question_is_an_item_that_opens_at_once(h: Harness, local_ingres
         await panel.server.stop()
 
 
-def test_a_running_plan_never_hides_the_findings_own_question(tmp_path: Path) -> None:
-    """A deprecation that asks (its deadline is near) keeps its need while a plan runs and while its plan's proposal
-    waits; the plan and the proposal are offered beside it."""
+def test_a_finding_that_asks_keeps_its_question_and_carries_nothing(tmp_path: Path) -> None:
+    """A deprecation that asks (its deadline is near) keeps its need while a plan runs; its plan's proposal is not
+    folded into it but asks on its own item."""
     from opsd import forkrebase
 
     store = Store.open(tmp_path / "ops.db")
@@ -457,11 +457,14 @@ def test_a_running_plan_never_hides_the_findings_own_question(tmp_path: Path) ->
               "updated_at": NOW.isoformat()}  # fmt: skip
     store.kv_set(forkrebase.PROPOSAL_KEY + record["id"], json.dumps(record), now=NOW)
     both = store.item(asking["id"])
-    assert both is not None and both["need"]["kind"] == "ack" and both["source"]["linked"] == {"fork": record["id"]}
-    assert {"approve_rebase", "reject"} <= {a["id"] for a in both["actions"]}
-    # Still one item: the rebase follows the finding and does not ask by itself.
+    # The finding asks by itself, so it carries nothing: no link, none of the rebase's actions, a fact naming it.
+    assert both is not None and both["need"]["kind"] == "ack" and "linked" not in both["source"]
+    assert not {"approve_rebase", "reject"} & {a["id"] for a in both["actions"]}
+    assert any(f["label"] == "Proposed by the plan" for f in both["facts"])
+    # The rebase asks on its own item, which follows the finding for information.
     fork = store.item_by_key(f"fork:{record['id']}")
-    assert fork is not None and not fork["needs"] and fork["follows"] == both["key"]
+    assert fork is not None and fork["needs"] and fork["need"]["primary"]["id"] == "approve_rebase"
+    assert fork["follows"] == both["key"] and not fork["quiet"]
     store.close()
 
 
@@ -516,3 +519,76 @@ async def test_ask_checks_its_limits_before_it_makes_a_question(h: Harness, loca
         assert d.store.items_all(prefix="ask:") == []
     finally:
         await panel.server.stop()
+
+
+NEAR = Finding(key="99887766554433aa", variant="deprecation", signal="repair", what="deprecated", domain="acme_pump",
+               removal=f"{NOW.year}.2", affected=["integration acme_pump"], sources=["repair acme_pump:deprecated"],
+               quote="Repair acme_pump:deprecated")  # fmt: skip
+
+
+def plan_change(store: Store, item: str, run: str, *, state: str = "open") -> dict[str, Any]:
+    plan_done(store, item, [run])
+    files = [{"path": "automations/acme_pump.yaml", "new_sha256": "b" * 64}]
+    return store.create_change(kind="change", subject="fix(automations): acme_pump", why="w", effect="e",
+                               state=state, requested_by="admin-chat:u", now=NOW, run_id=run,
+                               expires_at=NOW + timedelta(days=7), files=files,
+                               diff="+++ b/automations/acme_pump.yaml\n+x")  # fmt: skip
+
+
+async def test_reject_on_a_finding_with_its_own_dashboard_need_rejects_the_dashboard(
+    h: Harness,  # noqa: F811
+    local_ingress: None,  # noqa: F811
+) -> None:
+    d, panel = await started(h)
+    try:
+        assert d.store is not None
+        store_findings(d.store, NEAR, installed=f"{NOW.year}.1.0")
+        bound = {"url_path": "acme-pump", "paths": ["views[0].cards[1]"], "changes": 1, "after": "c" * 64}
+        d.store.kv_set(maintenance.DASHBOARD_KEY + NEAR.key, json.dumps({"url_path": "acme-pump", "binding": bound}),
+                       now=NOW)  # fmt: skip
+        finding = d.store.item_by_key(f"maint:{NEAR.key}")
+        assert finding is not None and finding["need"]["primary"]["id"] == "apply_dashboard"
+        change = plan_change(d.store, finding["id"], "run-pump-1")
+        await d.items_flush()
+        finding = d.store.item(finding["id"])
+        own = d.store.item_by_key(f"change:{change['id']}")
+        assert finding is not None and own is not None and "linked" not in finding["source"]
+        assert own["needs"] and own["need"]["primary"]["id"] == "apply"
+        status, _, _ = await panel.request("POST", f"/api/items/{finding['id']}/act",
+                                           body={"action": "reject", "revision": finding["revision"]})  # fmt: skip
+        assert status == 200
+        # The dashboard plan is gone; the config change is still open on its own item.
+        assert not maintenance.dashboard_plan(d.store, NEAR.key)
+        row = d.store.change(change["id"])
+        assert row is not None and row["state"] == "open"
+    finally:
+        await panel.server.stop()
+
+
+async def test_an_urgent_change_failure_asks_on_its_own_item_while_the_finding_asks(tmp_path: Path) -> None:
+    from opsd.changes import UNCLEAN_KEY
+
+    sent: list[Any] = []
+
+    async def send(message: Any) -> str:
+        sent.append(message)
+        return "sent"
+
+    store = Store.open(tmp_path / "ops.db")
+    book = ItemBook(store, Hub(), tz=lambda: UTC, clock=lambda: NOW, context=lambda: Context(acting=True), send=send)
+    store_findings(store, NEAR, installed=f"{NOW.year}.1.0")
+    finding = store.item_by_key(f"maint:{NEAR.key}")
+    assert finding is not None and finding["needs"]
+    with store.atomic():
+        change = plan_change(store, finding["id"], "run-pump-2", state="failed")
+        store.kv_set(f"{UNCLEAN_KEY}{change['id']}", "the restore failed", now=NOW)
+    own = store.item_by_key(f"change:{change['id']}")
+    assert own is not None and own["needs"] and own["need"]["kind"] == "ack" and own["source"]["urgent"]
+    assert "may be half applied" in own["need"]["text"]
+    book.flush()
+    await book.deliver()
+    assert any(m.tag == own["id"] and m.urgent for m in sent)
+    assert book.ack(own, now=NOW)
+    cleared = store.item(own["id"])
+    assert cleared is not None and not cleared["needs"]
+    store.close()

@@ -234,8 +234,10 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   its plan as `agent`, and its actions run as the proposal's own (bound to
   the finding's revision and the `change.shown` hash it shows;
   [panel.md](panel.md) N16); an acknowledgement is stored under the
-  proposal's key, so both items resolve. The finding carries the newest
-  such proposal (fork rebases first, then config changes); while it does,
+  proposal's key, so both items resolve. Only the finding's latest plan
+  counts: a proposal of an older plan is an ordinary item. The finding
+  carries the newest such proposal (fork rebases first, then config
+  changes); while it does,
   that proposal's own item has no need or action and never pushes. A
   plan-made proposal's own item always follows the finding and is quiet
   (off Home, in History); once it is rejected, expired, applied or done,
@@ -244,15 +246,20 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   only. It is composed again whenever the finding is (a finding the scan
   no longer lists carries nothing). Hiding a finding never splits it from
   its proposal: a finding that carries a proposal or runs a plan is shown
-  even when hidden. **The finding's own question wins:** a finding that
-  asks by itself (an `ack` need, or an urgent failure) keeps its need,
-  state and urgency while a plan runs (its gist adds the plan's progress
-  and Stop is offered) and while it carries a proposal (the proposal's
-  actions and `change` are offered beside its need). Rejected, expired or
-  done, the finding is composed as before. Tests
+  even when hidden. **A finding that asks by itself carries nothing:** a
+  finding with its own need (an acknowledgement, a dashboard plan to
+  approve) or urgency keeps its need, state, urgency and actions while a
+  plan runs (its gist adds the plan's progress and Stop is offered), and
+  folds no proposal: the proposal keeps its own need, urgency, actions
+  and pushes on its own item (which follows the finding, not quiet), and
+  the finding only names it in a fact ("Proposed by the plan"), with none
+  of its actions and no link, so each action reaches its own record.
+  Rejected, expired or done, the finding is composed as before. Tests
   `test_a_proposal_the_plan_made_is_decided_on_the_finding`,
   `test_a_plan_made_change_offers_its_own_revert_once_applied`,
-  `test_a_running_plan_never_hides_the_findings_own_question`,
+  `test_a_finding_that_asks_keeps_its_question_and_carries_nothing`,
+  `test_reject_on_a_finding_with_its_own_dashboard_need_rejects_the_dashboard`,
+  `test_an_urgent_change_failure_asks_on_its_own_item_while_the_finding_asks`,
   `test_a_hidden_finding_with_a_proposal_is_still_one_item`,
   `test_a_config_change_the_plan_made_is_applied_from_the_finding`,
   `test_a_plan_that_stopped_says_why_and_offers_a_retry`,

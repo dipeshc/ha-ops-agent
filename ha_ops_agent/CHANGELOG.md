@@ -29,7 +29,9 @@ What changes for you:
   "Apply and commit", "Reject"): one row in Needs you, and the proposal's
   own item stays in History. Once applied, a change offers its own
   **Revert** on its own item. A finding that asks by itself (its deadline
-  is near) keeps asking while a plan runs or a proposal waits. A plan that could not finish says why and
+  is near, or a dashboard plan waits) keeps its own question while a plan
+  runs, and then folds nothing: the plan's proposal asks on its own item,
+  and the finding names it. A plan that could not finish says why and
   offers **Retry the plan**.
 - **Push replies land on the item the push was about.** A Needs-you push
   now has a Reply button: your reply is a message in that item's

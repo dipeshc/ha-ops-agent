@@ -748,28 +748,46 @@ class Composer:
             return None
         return self._folded(spec, row.get("run_id"), {"change": int(row["id"])})
 
-    def _plan_finding(self, run_id: object) -> tuple[str, list[str]] | None:
-        """The finding's item key and the plan's runs when a "Plan a fix" step proposed this, while the scan lists
-        the finding (`maintenance` shows a finding that carries a link even when hidden, so hiding is no test here)."""
+    def _plan_finding(self, run_id: object) -> tuple[maint.Finding, list[str]] | None:
+        """The finding and its latest plan's runs when that plan (the one `_with_plan` reads) proposed this, while
+        the scan lists the finding (`maintenance` shows a finding that carries a link even when hidden, so hiding is
+        no test here). A proposal of an older plan is the finding's no more: None."""
         task = self.store.plan_task_of_run(run_id) if isinstance(run_id, str) and run_id else None
         ident = task.payload.get("item") if task is not None else None
-        record = self.store.item(ident) if isinstance(ident, str) and ITEM_ID_RE.fullmatch(ident) else None
+        if task is None or not isinstance(ident, str) or not ITEM_ID_RE.fullmatch(ident):
+            return None
+        latest = self.store.plan_task(ident)
+        record = self.store.item(ident)
         key = str(record["key"]) if record is not None else ""
-        if task is None or not key.startswith("maint:"):
+        if latest is None or latest.id != task.id or not key.startswith("maint:"):
             return None
-        if not any(f"maint:{f.key}" == key for f in maint.load(self.store)):
+        finding = next((f for f in maint.load(self.store) if f"maint:{f.key}" == key), None)
+        if finding is None:
             return None
-        return key, [str(r) for r in task.payload.get("runs") or [] if isinstance(r, str)]
+        return finding, [str(r) for r in task.payload.get("runs") or [] if isinstance(r, str)]
+
+    def _finding_asks(self, finding: maint.Finding) -> bool:
+        """Whether the finding asks by itself (its own need or urgency, before any plan), as `_with_plan` sees it."""
+        scanned = maint.meta(self.store)
+        live = {a["subject"]: a for a in self.store.approvals(states=LIVE, limit=200) if is_dashboard(a)}
+        own = self._maintenance(finding, str(scanned.get("installed") or ""), str(scanned.get("at") or "") or None,
+                                live)  # fmt: skip
+        return self._asks(own)
 
     def _folded(self, spec: Spec, run_id: object, ref: dict[str, Any]) -> Spec:
-        """A proposal a plan made: while its finding carries it (`_link`, the same choice `_linked` makes) the finding
-        asks and acts for it; once it is settled, or another proposal is the finding's, it acts for itself again (an
-        applied change offers its own Revert). Either way it follows its finding and stays off Home."""
+        """A proposal the finding's latest plan made: while its finding carries it (`_link`, the same choice
+        `_linked` makes) the finding asks and acts for it; once it is settled, or another proposal is the finding's,
+        it acts for itself again (an applied change offers its own Revert) and stays off Home. A finding that asks
+        by itself carries nothing: the proposal keeps its own need, urgency and actions on its own item, and only
+        follows the finding for information."""
         found = self._plan_finding(run_id)
         if found is None:
             return spec
         finding, runs = found
-        spec.follows, spec.quiet = finding, True
+        spec.follows = f"maint:{finding.key}"
+        if self._finding_asks(finding):
+            return spec
+        spec.quiet = True
         if self._link(runs) != ref:
             return spec
         spec.pushes, spec.urgent, spec.actions = False, False, []
@@ -1227,19 +1245,12 @@ class Composer:
         if proposal is None or link is None:
             return spec
         if self._asks(spec):
-            # The finding asks by itself: its own need, urgency and acknowledgement stay; the proposal's actions are
-            # offered beside them (bound to its diff as `change`).
-            spec.gist = f"{spec.gist}; {proposal.gist}" if proposal.gist else spec.gist
-            spec.actions = [*proposal.actions, *(proposal.need or {}).get("secondary", [])]
-            primary = (proposal.need or {}).get("primary")
-            if primary:
-                spec.actions.insert(0, primary)
-            spec.change = proposal.change
-            spec.facts = [*spec.facts, *proposal.facts]
-            spec.agent = spec.agent or proposal.agent
-            if "approval" in proposal.source:
-                spec.source["approval"] = proposal.source["approval"]
-            spec.source["linked"] = link
+            # The finding asks by itself: it carries nothing. The proposal keeps its own need, urgency and actions
+            # on its own item (`_folded`); the finding names it for information only.
+            spec.facts = [*spec.facts, {"label": "Proposed by the plan",
+                                        "value": f"{proposal.kicker} {proposal.ref}: {proposal.title} "
+                                                 f"({WORD[proposal.state].lower()}; decided on its own item)".strip(),
+                                        "at": spec.as_of}]  # fmt: skip
             return spec
         spec.state, spec.need, spec.gist, spec.actions = proposal.state, proposal.need, proposal.gist, proposal.actions
         spec.phase, spec.change, spec.footnote = proposal.phase, proposal.change, proposal.footnote

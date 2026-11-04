@@ -34,8 +34,11 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   you, never pruned). Its conversation is read only: messages, retries,
   auto-retry and cancel answer 409 `read_only`, a scheduled retry of one of
   its turns never runs, and a reply to a push that pointed at it starts a
-  question (T1b). No version creates the one chat again. Test
-  `test_the_earlier_one_chat_becomes_one_read_only_history_item`.
+  question (T1b). An investigation the one chat started and that is still
+  open at that start reports to its own item's conversation from then on.
+  No version creates the one chat again. Tests
+  `test_the_earlier_one_chat_becomes_one_read_only_history_item`,
+  `test_an_investigation_open_at_upgrade_reports_to_its_own_item`.
 - T1b. **Questions.** `POST api/ask {text, client_id}` (Ask in the panel) or
   a push reply about nothing that still exists creates a question item (key
   `ask:<token>`, the token derived from the client id, so the same
@@ -46,7 +49,12 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   reply under `agent`) and Failed when the message went unanswered (gist
   "not answered: <the card's text>"); a follow-up in its conversation runs
   it again. It never needs the admin and is never pushed by the item book.
-  Test `test_a_question_is_an_item_that_opens_at_once`.
+  Before a question is made, the day's message limit (T3) and the client id
+  are checked: at the limit `api/ask` answers 429 `chat_cap`, and a client
+  id already used for a message in another conversation answers 409
+  `client_id_used` (also on `messages`); neither leaves a question behind.
+  Tests `test_a_question_is_an_item_that_opens_at_once`,
+  `test_ask_checks_its_limits_before_it_makes_a_question`.
 - T2. Senders: the admin in the panel (admin header and CSRF), or a push
   reply from the admin's device (below). A conversation's run (a "chat"
   run) always carries the

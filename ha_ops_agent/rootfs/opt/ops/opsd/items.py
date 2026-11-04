@@ -744,34 +744,67 @@ class Composer:
     def change(self, row: Mapping[str, Any], live: Mapping[str, dict[str, Any]]) -> Spec | None:
         """A config change; one a "Plan a fix" proposed for a finding is decided on that finding's item."""
         spec = self._change(row, live)
-        finding = self._plan_finding(row.get("run_id"))
-        return self._fold(spec, finding) if spec is not None and finding is not None else spec
+        if spec is None:
+            return None
+        return self._folded(spec, row.get("run_id"), {"change": int(row["id"])})
 
-    def _plan_finding(self, run_id: object) -> str | None:
-        """The finding's item key when a "Plan a fix" step proposed this (and the finding is listed, not hidden)."""
+    def _plan_finding(self, run_id: object) -> tuple[str, list[str]] | None:
+        """The finding's item key and the plan's runs when a "Plan a fix" step proposed this, while the scan lists
+        the finding (`maintenance` shows a finding that carries a link even when hidden, so hiding is no test here)."""
         task = self.store.plan_task_of_run(run_id) if isinstance(run_id, str) and run_id else None
         ident = task.payload.get("item") if task is not None else None
         record = self.store.item(ident) if isinstance(ident, str) and ITEM_ID_RE.fullmatch(ident) else None
         key = str(record["key"]) if record is not None else ""
-        if not key.startswith("maint:"):
+        if task is None or not key.startswith("maint:"):
             return None
-        finding = next((f for f in maint.load(self.store) if f"maint:{f.key}" == key), None)
-        if finding is None or maint.hidden(self.store, finding):
+        if not any(f"maint:{f.key}" == key for f in maint.load(self.store)):
             return None
-        return key
+        return key, [str(r) for r in task.payload.get("runs") or [] if isinstance(r, str)]
 
-    @staticmethod
-    def _fold(spec: Spec, finding: str) -> Spec:
-        """A proposal folded into its finding: the finding's item asks and acts for it; this one stays in History
-        (quiet, following the finding) so the record is kept, and never asks or pushes by itself."""
-        spec.follows, spec.quiet, spec.pushes, spec.urgent, spec.actions = finding, True, False, False, []
+    def _folded(self, spec: Spec, run_id: object, ref: dict[str, Any]) -> Spec:
+        """A proposal a plan made: while its finding carries it (`_link`, the same choice `_linked` makes) the finding
+        asks and acts for it; once it is settled, or another proposal is the finding's, it acts for itself again (an
+        applied change offers its own Revert). Either way it follows its finding and stays off Home."""
+        found = self._plan_finding(run_id)
+        if found is None:
+            return spec
+        finding, runs = found
+        spec.follows, spec.quiet = finding, True
+        if self._link(runs) != ref:
+            return spec
+        spec.pushes, spec.urgent, spec.actions = False, False, []
         if spec.need is not None:
             spec.need = None
             if spec.state == "waiting":
                 spec.state = "proposed"
-        if spec.state not in TERMINAL:
-            spec.gist = f"decided on its finding: {spec.gist}" if spec.gist else "decided on its finding"
+        spec.gist = f"decided on its finding: {spec.gist}" if spec.gist else "decided on its finding"
         return spec
+
+    def _proposals(self, runs: list[str], changes: Mapping[str, dict[str, Any]] | None = None
+                   ) -> list[tuple[Spec, dict[str, Any]]]:  # fmt: skip
+        """The proposals the plan's runs made, newest fork rebase first, then config changes, unfolded."""
+        if changes is None:
+            changes = {a["subject"]: a for a in self.store.approvals(states=LIVE, limit=200) if is_change(a)}
+        found: list[tuple[Spec, dict[str, Any]]] = []
+        for record in sorted(forkrebase.proposals(self.store), key=lambda r: str(r.get("created_at") or ""),
+                             reverse=True):  # fmt: skip
+            if record.get("run_id") in runs:
+                fork = self._fork(record)
+                if fork is not None:
+                    found.append((fork, {"fork": str(record["id"])}))
+        for row in self.store.changes_of_runs(runs):
+            change = self._change(row, changes)
+            if change is not None:
+                found.append((change, {"change": int(row["id"])}))
+        return found
+
+    @staticmethod
+    def _carried(proposal: Spec) -> bool:
+        """A proposal its finding carries: still open, approved or running, or asking for an acknowledgement."""
+        return proposal.state not in TERMINAL or proposal.need is not None
+
+    def _link(self, runs: list[str]) -> dict[str, Any] | None:
+        return next((ref for p, ref in self._proposals(runs) if self._carried(p)), None)
 
     def _change(self, row: Mapping[str, Any], live: Mapping[str, dict[str, Any]]) -> Spec | None:
         cid = int(row["id"])
@@ -875,8 +908,9 @@ class Composer:
     def fork(self, record: Mapping[str, Any]) -> Spec | None:
         """A fork rebase proposal; one a "Plan a fix" proposed for a finding is decided on that finding's item."""
         spec = self._fork(record)
-        finding = self._plan_finding(record.get("run_id"))
-        return self._fold(spec, finding) if spec is not None and finding is not None else spec
+        if spec is None:
+            return None
+        return self._folded(spec, record.get("run_id"), {"fork": str(record["id"])})
 
     def _fork(self, record: Mapping[str, Any]) -> Spec | None:
         """A fork rebase proposal (`opsd.forkrebase`): the full diff, the hunks kept, the Core version; it asks for
@@ -1154,15 +1188,22 @@ class Composer:
             done = min(int(payload.get("step") or 0), of)
             names = PLAN_PHASES if of == len(PLAN_PHASES) else [f"Step {n}" for n in range(1, of + 1)]
             waiting = clean_text(str(payload.get("waiting") or ""), 160)
-            spec.state, spec.need, spec.urgent, spec.pushes = "running", None, False, False
-            spec.gist = f"planning a fix · waiting: {waiting}" if waiting else (
+            words = f"planning a fix · waiting: {waiting}" if waiting else (
                 f"planning a fix · step {min(done + 1, of)} of {of}")  # fmt: skip
             spec.phase = {"names": names, "current": done, "started_at": payload.get("started_at"),
                           "usual_s": PLAN_USUAL_S}  # fmt: skip
+            spec.source["plan"] = "running"
+            stop = act("stop", "Stop", "danger")
+            if self._asks(spec):
+                # The finding's own question (an acknowledgement, an urgent failure) stays: the plan runs beside it.
+                spec.gist = f"{spec.gist}; {words}" if spec.gist else words
+                spec.actions = [*(a for a in spec.actions if a["id"] != "plan_fix"), stop]
+                return spec
+            spec.state, spec.need, spec.urgent, spec.pushes = "running", None, False, False
+            spec.gist = words
             spec.about = ("The agent reads the evidence and writes a plan; it cannot change anything. The plan appears"
                           " here when it is done, and you get a push if you have left.")  # fmt: skip
-            spec.actions = [act("stop", "Stop", "danger")]
-            spec.source["plan"] = "running"
+            spec.actions = [stop]
             return spec
         if task.state == "done" and isinstance(payload.get("plan"), str) and payload["plan"]:
             spec.agent = {"text": str(payload["plan"]), "run_id": runs[-1] if runs else None, "not_read": [],
@@ -1174,22 +1215,31 @@ class Composer:
             spec.actions = [act("plan_fix", "Retry the plan") if a["id"] == "plan_fix" else a for a in spec.actions]
         return self._linked(spec, runs, changes) if runs else spec
 
+    @staticmethod
+    def _asks(spec: Spec) -> bool:
+        """The finding's own need or urgency, which nothing a plan does may hide."""
+        return spec.need is not None or spec.urgent
+
     def _linked(self, spec: Spec, runs: list[str], changes: Mapping[str, dict[str, Any]]) -> Spec:
         """The newest proposal the plan's runs made that is still open or asks: decided on the finding."""
-        found: list[tuple[Spec, dict[str, Any]]] = []
-        for record in sorted(forkrebase.proposals(self.store), key=lambda r: str(r.get("created_at") or ""),
-                             reverse=True):  # fmt: skip
-            if record.get("run_id") in runs:
-                fork = self._fork(record)
-                if fork is not None:
-                    found.append((fork, {"fork": str(record["id"])}))
-        for row in self.store.changes_of_runs(runs):
-            change = self._change(row, changes)
-            if change is not None:
-                found.append((change, {"change": int(row["id"])}))
-        proposal, link = next(((p, ref) for p, ref in found if p.state not in TERMINAL or p.need is not None),
+        proposal, link = next(((p, ref) for p, ref in self._proposals(runs, changes) if self._carried(p)),
                               (None, None))  # fmt: skip
         if proposal is None or link is None:
+            return spec
+        if self._asks(spec):
+            # The finding asks by itself: its own need, urgency and acknowledgement stay; the proposal's actions are
+            # offered beside them (bound to its diff as `change`).
+            spec.gist = f"{spec.gist}; {proposal.gist}" if proposal.gist else spec.gist
+            spec.actions = [*proposal.actions, *(proposal.need or {}).get("secondary", [])]
+            primary = (proposal.need or {}).get("primary")
+            if primary:
+                spec.actions.insert(0, primary)
+            spec.change = proposal.change
+            spec.facts = [*spec.facts, *proposal.facts]
+            spec.agent = spec.agent or proposal.agent
+            if "approval" in proposal.source:
+                spec.source["approval"] = proposal.source["approval"]
+            spec.source["linked"] = link
             return spec
         spec.state, spec.need, spec.gist, spec.actions = proposal.state, proposal.need, proposal.gist, proposal.actions
         spec.phase, spec.change, spec.footnote = proposal.phase, proposal.change, proposal.footnote
@@ -1634,6 +1684,17 @@ class ItemBook:
         for row in self.store.changes(states=("open",), limit=50):
             if str(row.get("requested_by") or "").startswith(maint.PROPOSER):
                 self._safely(f"change:{row['id']}", partial(self._change, composer, int(row["id"])))
+        # A proposal a finding's plan made follows the finding: composed again with it, so a finding the scan no
+        # longer lists never leaves its proposal folded (`Composer._folded`).
+        followers = [
+            r for r in self.store.items_all(prefix="change:") if str(r.get("follows") or "").startswith("maint:")
+        ]
+        for record in followers:
+            ref = (record.get("source") or {}).get("change")
+            if isinstance(ref, int):
+                self._safely(f"change:{ref}", partial(self._change, composer, ref))
+        if any(str(r.get("follows") or "").startswith("maint:") for r in self.store.items_all(prefix="fork:")):
+            self._safely("fork", partial(self._forks, composer))
 
     def write_health(self) -> list[dict[str, Any]]:
         """The health check saved its open items: write them (cleared ones resolve, new ones enter Needs you)."""

@@ -388,11 +388,11 @@ async def test_a_question_is_an_item_that_opens_at_once(h: Harness, local_ingres
     try:
         assert d.store is not None and d.assistant is not None
         h.claude_reply = {"reply": "Both acme locks report 80 %.", "summary": ""}
-        body = {"text": "How are the\nlock batteries?", "client_id": "q-client-01"}
+        body = {"text": "How are the\nacme lock batteries?", "client_id": "q-client-01"}
         status, _, sent = await panel.request("POST", "/api/ask", body=body)
         item = sent["item"]
         assert status == 202 and item["kind"] == "question" and item["state"] == "running"
-        assert item["title"] == "How are the lock batteries?" and item["conversation"] == "open"
+        assert item["title"] == "How are the acme lock batteries?" and item["conversation"] == "open"
         assert sent["turn"]["thread"] == f"ask:{item['id']}"
         # The same client id is the same question, never a second one.
         status, _, again = await panel.request("POST", "/api/ask", body=body)
@@ -410,7 +410,7 @@ async def test_a_question_is_an_item_that_opens_at_once(h: Harness, local_ingres
         assert item["id"] not in [i["id"] for i in other["items"]]
         # A follow-up runs it again, in its own conversation.
         h.claude_reply = {"reply": "Change them in spring.", "summary": ""}
-        follow = {"text": "When should I change them?", "client_id": "q-client-02"}
+        follow = {"text": "When should I change the acme lock batteries?", "client_id": "q-client-02"}
         status, _, _ = await panel.request("POST", f"/api/items/{item['id']}/messages", body=follow)
         running = d.store.item(item["id"])
         assert status == 202 and running is not None and running["state"] == "running"
@@ -424,5 +424,95 @@ async def test_a_question_is_an_item_that_opens_at_once(h: Harness, local_ingres
         ] == 413
         assert (await panel.request("POST", "/api/ask", body=body, csrf=False))[0] == 403
         assert (await panel.request("POST", "/api/ask", body=body, admin=False))[0] == 403
+    finally:
+        await panel.server.stop()
+
+
+def test_a_running_plan_never_hides_the_findings_own_question(tmp_path: Path) -> None:
+    """A deprecation that asks (its deadline is near) keeps its need while a plan runs and while its plan's proposal
+    waits; the plan and the proposal are offered beside it."""
+    from opsd import forkrebase
+
+    store = Store.open(tmp_path / "ops.db")
+    ItemBook(store, Hub(), tz=lambda: UTC, clock=lambda: NOW, context=lambda: Context(acting=True))
+    near = Finding(key="00112233445566aa", variant="deprecation", signal="repair", what="deprecated",
+                   domain="acme_fan", removal=f"{NOW.year}.2", affected=["integration acme_fan"],
+                   sources=["repair acme_fan:deprecated"], quote="Repair acme_fan:deprecated")  # fmt: skip
+    store_findings(store, near, installed=f"{NOW.year}.1.0")
+    asking = store.item_by_key(f"maint:{near.key}")
+    assert asking is not None and asking["needs"] and asking["need"]["kind"] == "ack"
+    task, _ = store.create_task(kind="followup", title="Plan a fix: x", owner="admin", created_by="panel:u",
+                                next_fire_at=NOW, payload={"investigation": True, "plan_fix": True,
+                                                           "item": asking["id"], "max_steps": 2, "step": 0},
+                                idempotency_key="near", now=NOW, thread_id=f"item:{asking['id']}")  # fmt: skip
+    running = store.item(asking["id"])
+    assert running is not None and running["needs"] and running["need"]["kind"] == "ack"
+    assert "planning a fix" in running["gist"] and "stop" in [a["id"] for a in running["actions"]]
+    store.claim_due(NOW + timedelta(seconds=1))
+    store.finish_task(task.id, "done", now=NOW, payload=task.payload | {"runs": ["run-near"], "plan": "p"})
+    record = {"id": "aabbccddeeff0011", "domain": "acme_fan", "core": "2026.11.2", "origin": "2026.10.1",
+              "keep": [], "reason": "r", "by": "admin-chat:u", "run_id": "run-near", "state": "open", "detail": "",
+              "files": {"fan.py": {"old": "a", "new": "b"}}, "unchanged": [], "result": "f" * 64, "fork": "e" * 64,
+              "hunks": [], "kept_text": "", "diff": "+x", "created_at": NOW.isoformat(),
+              "updated_at": NOW.isoformat()}  # fmt: skip
+    store.kv_set(forkrebase.PROPOSAL_KEY + record["id"], json.dumps(record), now=NOW)
+    both = store.item(asking["id"])
+    assert both is not None and both["need"]["kind"] == "ack" and both["source"]["linked"] == {"fork": record["id"]}
+    assert {"approve_rebase", "reject"} <= {a["id"] for a in both["actions"]}
+    # Still one item: the rebase follows the finding and does not ask by itself.
+    fork = store.item_by_key(f"fork:{record['id']}")
+    assert fork is not None and not fork["needs"] and fork["follows"] == both["key"]
+    store.close()
+
+
+def test_a_hidden_finding_with_a_proposal_is_still_one_item(tmp_path: Path) -> None:
+    from opsd import forkrebase
+
+    store = Store.open(tmp_path / "ops.db")
+    book = ItemBook(store, Hub(), tz=lambda: UTC, clock=lambda: NOW, context=lambda: Context(acting=True))
+    store_findings(store, SUGGESTION)
+    finding = store.item_by_key(f"maint:{SUGGESTION.key}")
+    assert finding is not None
+    store.kv_set(maintenance.HIDDEN_KEY + SUGGESTION.key, SUGGESTION.evidence, now=NOW)
+    hidden = store.item(finding["id"])
+    assert hidden is not None and hidden["state"] == "cancelled"
+    plan_done(store, finding["id"], ["run-hidden"])
+    record = {"id": "1122334455667788", "domain": "acme_weather", "core": "2026.11.2", "origin": "2026.10.1",
+              "keep": [], "reason": "r", "by": "admin-chat:u", "run_id": "run-hidden", "state": "open", "detail": "",
+              "files": {"w.py": {"old": "a", "new": "b"}}, "unchanged": [], "result": "f" * 64, "fork": "e" * 64,
+              "hunks": [], "kept_text": "", "diff": "+x", "created_at": NOW.isoformat(),
+              "updated_at": NOW.isoformat()}  # fmt: skip
+    store.kv_set(forkrebase.PROPOSAL_KEY + record["id"], json.dumps(record), now=NOW)
+    asks = [r for r in store.items_all() if r["needs"]]
+    assert [r["id"] for r in asks] == [finding["id"]]
+    assert [r["id"] for r in book.home()["needs"]] == [finding["id"]]
+    store.close()
+
+
+async def test_ask_checks_its_limits_before_it_makes_a_question(h: Harness, local_ingress: None) -> None:  # noqa: F811
+    d, panel = await started(h)
+    try:
+        assert d.store is not None and d.assistant is not None
+        # A client id already used for a message in another conversation: a clear 409, and no question.
+        store_findings(d.store, SUGGESTION)
+        await d.items_flush()
+        item = d.store.item_by_key(f"maint:{SUGGESTION.key}")
+        assert item is not None
+        h.claude_reply = {"reply": "ok", "summary": ""}
+        status, _, _ = await panel.request("POST", f"/api/items/{item['id']}/messages",
+                                           body={"text": "first", "client_id": "shared-01"})  # fmt: skip
+        assert status == 202
+        await d.assistant.drain()
+        status, _, body = await panel.request("POST", "/api/ask", body={"text": "second", "client_id": "shared-01"})
+        assert status == 409 and body["error"] == "client_id_used"
+        status, _, body = await panel.request("POST", f"/api/items/{item['id']}/messages",
+                                              body={"text": "x", "client_id": "shared-01"})  # fmt: skip
+        assert status == 200 and body["duplicate"]
+        # The day's message limit reached: 429, and no question left Running.
+        for _ in range(30):
+            d.store.bump(d.day(datetime.now(UTC)), "chat_turns")
+        status, _, body = await panel.request("POST", "/api/ask", body={"text": "third", "client_id": "fresh-001"})
+        assert status == 429 and body["error"] == "chat_cap"
+        assert d.store.items_all(prefix="ask:") == []
     finally:
         await panel.server.stop()

@@ -1198,6 +1198,12 @@ class Store:
         return self._task_cas(task_id, "UPDATE tasks SET payload = ?, updated_at = ? WHERE id = ?"
                               " AND system_key IS NULL", (json.dumps(payload), _iso(now), task_id))  # fmt: skip
 
+    def set_task_thread(self, task_id: int, thread_id: str, *, now: datetime) -> bool:
+        """Move an open user-visible task's reports to another conversation (an investigation from the earlier chat)."""
+        return self._task_cas(task_id, "UPDATE tasks SET thread_id = ?, updated_at = ? WHERE id = ?"
+                              " AND system_key IS NULL AND state IN ('pending', 'running')",
+                              (thread_id, _iso(now), task_id))  # fmt: skip
+
     def plan_task(self, item: str) -> Task | None:
         """The latest "Plan a fix" investigation of an item (`payload.plan_fix`, `payload.item`), in any state."""
         row = self._one("SELECT * FROM tasks WHERE kind = 'followup' AND json_extract(payload, '$.plan_fix') = 1"
@@ -1417,6 +1423,10 @@ class Store:
             return None
         turn = self._turn(row, found[0])
         return turn if turn.thread_id == found[0] else None
+
+    def client_used(self, client_id: str) -> bool:
+        """Whether any conversation already has a turn with this client id (client ids are unique store-wide)."""
+        return self._one("SELECT 1 FROM turns WHERE client_id = ?", (client_id,)) is not None
 
     def get_turn(self, turn_id: int) -> Turn | None:
         row = self._one("SELECT * FROM turns WHERE id = ?", (turn_id,))

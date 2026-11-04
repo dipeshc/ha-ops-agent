@@ -130,7 +130,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 - I9. Proposal items: `open` is `waiting` (`apply` / `reject`, with the row's
   expiry), except a maintenance finding's change before its finding may ask,
   which is `proposed` with the same actions ([maintenance.md](maintenance.md)
-  M12a); approved is `running`; applied is `done` with a `revert` action;
+  M12a); approved is `running`; applied is `done` with a `revert` action
+  (on its own item, also for a change a finding's plan proposed,
+  [maintenance.md](maintenance.md) M14b);
   failed is `failed` without a need when the daemon undid it cleanly (the
   files restored and, after a reload, reloaded again); a failure that may
   have left the house half applied (the restore or its reload failed, an
@@ -367,8 +369,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   failed is Failed with an `ack` need (urgent for `rollback_failed`),
   pushed by the item book; rejected is Cancelled; stale is Expired. A
   rebase a finding's "Plan a fix" proposed is decided on the finding
-  ([maintenance.md](maintenance.md) M14b): its own item then follows the
-  finding, is quiet, has no need or action and never pushes. A fork
+  ([maintenance.md](maintenance.md) M14b) while the finding carries it: its
+  own item then follows the finding, is quiet, has no need or action and
+  never pushes; settled, it follows the finding and keeps its own actions. A fork
   rebase job never makes an update item, and its run's item is titled
   "Approved fork rebase <day>". Tests `test_the_pipeline_happy_path`,
   `test_a_restart_failure_restores_the_fork_and_pushes`.

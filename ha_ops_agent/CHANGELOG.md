@@ -27,7 +27,9 @@ What changes for you:
   says where it is instead of repeating it. When the plan proposes a fork rebase or
   a config change, the approval is on the finding ("Rebase tonight",
   "Apply and commit", "Reject"): one row in Needs you, and the proposal's
-  own item stays in History. A plan that could not finish says why and
+  own item stays in History. Once applied, a change offers its own
+  **Revert** on its own item. A finding that asks by itself (its deadline
+  is near) keeps asking while a plan runs or a proposal waits. A plan that could not finish says why and
   offers **Retry the plan**.
 - **Push replies land on the item the push was about.** A Needs-you push
   now has a Reply button: your reply is a message in that item's
@@ -43,7 +45,9 @@ What changes for you:
   question links back to it.
 - **Your old chat is kept.** At the first start of 0.22.0 the one chat
   becomes one read-only History item, "Earlier conversation" (History
-  only, also under its Questions filter; never on Ask), never pruned. An item's conversation is otherwise kept as
+  only, also under its Questions filter; never on Ask), never pruned. An
+  investigation the old chat started that is still open reports to its
+  own item from then on. An item's conversation is otherwise kept as
   long as the item (resolved items go after 90 days).
 - The panel shows loading rows in the list's shape, an "item is gone"
   page with the way back to Home, and keeps what you are typing through
@@ -53,7 +57,9 @@ API and integration notes:
 
 - New panel routes `GET api/items/<id>/thread`, `POST
   api/items/<id>/messages|retry|autoretry|read|cancel|remember` and `POST
-  api/ask`; `api/history?filter=questions`. Removed: `GET api/chat` and
+  api/ask` (429 `chat_cap` at the day's message limit, 409
+  `client_id_used` for a client id reused across conversations, both
+  before any question is made); `api/history?filter=questions`. Removed: `GET api/chat` and
   every `api/threads/*` route. Live events and presence take `item=<id>`
   instead of `thread=<id>`; `api/state` `chat` no longer has `thread`. The
   item record gains `conversation` (`open` or `read_only`) and the kind

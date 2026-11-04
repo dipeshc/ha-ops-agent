@@ -538,6 +538,11 @@ class Assistant:
         key = f"{QUESTION_PREFIX}{hashlib.sha256(seed.encode()).hexdigest()[:16]}"
         record = self.store.item_by_key(key)
         if record is None:
+            # Checked before the question exists: no question is left Running for a message that never runs.
+            if client_id is not None and self.store.client_used(client_id):
+                return None, Submitted("client_id_used")
+            if self.store.count(self._day(now), "chat_turns") >= CHAT_TURNS_PER_DAY:
+                return None, Submitted("cap")
             record = self.items.question(key, state="running", gist=f"asked {self._hhmm(now)}", title=title,
                                          actor="you", now=now)  # fmt: skip
             record = record or self.store.item_by_key(key)
@@ -632,6 +637,9 @@ class Assistant:
             existing = self.store.turn_by_client(thread, client_id)
             if existing is not None:
                 return Submitted("duplicate", existing, self._position(existing.id))
+            if self.store.client_used(client_id):
+                # Used in another conversation: a client id names one message, store-wide.
+                return Submitted("client_id_used")
         if exclusive:
             busy = self.store.in_flight(thread)
             if busy is not None:
@@ -1368,12 +1376,19 @@ class Assistant:
                                       now=now)  # fmt: skip
 
     def keep_earlier(self) -> None:
-        """At start: the one chat of earlier versions becomes one read-only History item (written once)."""
+        """At start: the one chat of earlier versions becomes one read-only History item (written once), and an
+        investigation it started that is still open reports to its own item's conversation from now on."""
         try:
-            if self.items is None or not self.store.chat_id():
+            chat = self.store.chat_id()
+            if self.items is None or not chat:
                 return
             turns, first, last = self.store.legacy_turns()
             self.items.earlier(turns=turns, first=first, last=last)
+            now = datetime.now(UTC)
+            for task in self.store.open_investigations():
+                own = self.store.item_by_key(f"task:{task.id}")
+                if task.thread_id == chat and own is not None:
+                    self.store.set_task_thread(task.id, f"item:{own['id']}", now=now)
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.warning("earlier conversation not kept as an item", extra={"error": str(err)[:200]})
 

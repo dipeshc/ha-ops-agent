@@ -767,6 +767,11 @@ class PanelHandlers:
                 return 409, {"error": "in_flight", "message": "Wait for the answer to your last message.", "turn": turn}
             case "refused":
                 return 200, {"turn": turn, "state": "refused"}
+            case "client_id_used":
+                return 409, {"error": "client_id_used", "message": "That message id was used for another message;"
+                             " send it again."}  # fmt: skip
+            case "cap":
+                return 429, {"error": "chat_cap", "message": "Today's message limit is reached; try again tomorrow."}
         return 503, {"error": "busy", "message": "Not sent: the agent is busy.", "turn": turn}
 
     async def ask(self, body: dict[str, Any], user: str) -> Result:
@@ -778,6 +783,8 @@ class PanelHandlers:
         text, client_id = str(body["text"]), str(body["client_id"])
         principal = Principal(Origin.ADMIN_CHAT, user_id=user, channel="panel")
         record, sent = await self._assistant.ask(text, principal=principal, channel="panel", client_id=client_id)
+        if record is None and sent.result in ("client_id_used", "cap"):
+            return self._sent(sent.result, None, 0)
         if record is None:
             return 503, {"error": "busy", "message": "Not sent: the question could not be stored."}
         status, result = self._sent(sent.result, sent.turn.to_json() if sent.turn is not None else None,

@@ -198,3 +198,21 @@ async def test_an_answer_never_replaces_an_urgent_items_push(h: Harness) -> None
     assert plain.tag == f"ha-ops-agent-{item['id']}" and plain.thread_id == f"item:{item['id']}"
     d.store.put_item(item | {"source": source | {"urgent": False}})
     assert d.assistant.item_message(f"item:{item['id']}", "t", "b").tag == item["id"]
+
+
+async def test_an_investigation_open_at_upgrade_reports_to_its_own_item(h: Harness) -> None:
+    d = daemon(h)
+    now = datetime.now(UTC)
+    d.store.create_thread("b" * 16, principal="admin", channel="panel", now=now)
+    d.store.append_turn("b" * 16, role="admin", text="look into the fridge", now=now)
+    task, _ = d.store.create_task(kind="followup", title="Fridge alerts", owner="admin", created_by="chat:r",
+                                  next_fire_at=now + timedelta(minutes=5),
+                                  payload={"investigation": True, "note": "n", "max_steps": 2, "step": 0},
+                                  idempotency_key="old-inv", now=now, thread_id="b" * 16)  # fmt: skip
+    own = d.store.item_by_key(f"task:{task.id}")
+    assert own is not None
+    d.assistant.keep_earlier()
+    moved = d.store.get_task(task.id)
+    # Its steps and its card go to its own item's conversation, never the read-only earlier chat.
+    assert moved is not None and moved.thread_id == f"item:{own['id']}"
+    assert d.assistant.writable(moved.thread_id) and not d.assistant.writable("b" * 16)

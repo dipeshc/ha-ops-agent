@@ -1163,3 +1163,37 @@ def test_the_facts_document_changes_only_by_one_appended_fact(w: World) -> None:
     with pytest.raises(ChangeRefused, match="would grow past 16 KiB"):
         ch.propose_fact(w.store, w.repo, w.options, fact="One more.", why="noted", requested_by="panel:u-admin",
                         day="2026-01-28", now=w.now)  # fmt: skip
+
+
+async def test_a_plan_made_change_offers_its_own_revert_once_applied(w: World) -> None:
+    """While its finding carries it, the change is decided there; applied, it is settled and offers Revert itself,
+    on exactly one item, and the revert runs."""
+    from opsd.items import Context, ItemBook
+    from opsd.live import Hub
+    from tests.test_item_actions import DEPRECATION, plan_done, store_findings
+
+    book = ItemBook(w.store, Hub(), tz=lambda: UTC, clock=lambda: w.now, context=lambda: Context(acting=True))
+    store_findings(w.store, DEPRECATION)
+    finding = w.store.item_by_key(f"maint:{DEPRECATION.key}")
+    assert finding is not None
+    plan_done(w.store, finding["id"], ["run-plan-9"])
+    found = w.propose({ALERT: NEW_ALERT}, run_id="run-plan-9")
+    linked = w.store.item(finding["id"])
+    assert linked is not None and linked["source"]["linked"] == {"change": found["id"]}
+    assert (await w.run(found["id"])).state == "applied"
+
+    def offering(action: str) -> list[str]:
+        found_items = []
+        for record in w.store.items_all():
+            if action in book.offered(record):
+                found_items.append(str(record["key"]))
+        return found_items
+
+    assert offering("revert") == [f"change:{found['id']}"]
+    own = w.store.item_by_key(f"change:{found['id']}")
+    after = w.store.item(finding["id"])
+    assert own is not None and own["state"] == "done" and own["follows"] == f"maint:{DEPRECATION.key}"
+    assert after is not None and "linked" not in after["source"]
+    outcome = await w.run(found["id"], "revert")
+    assert outcome.state == "reverted", outcome.detail
+    assert w.read(ALERT) == FILES[ALERT]

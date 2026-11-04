@@ -373,6 +373,8 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   own item then follows the finding, is quiet, has no need or action and
   never pushes; settled, it follows the finding and keeps its own actions. A fork
   rebase job never makes an update item, and its run's item is titled
-  "Approved fork rebase <day>". Tests `test_the_pipeline_happy_path`,
+  "Approved fork rebase <day>". Its gist ends with the commit's status;
+  "not pushed yet" becomes "pushed" once origin holds the commit
+  ([updates.md](updates.md) U29). Tests `test_the_pipeline_happy_path`,
   `test_a_restart_failure_restores_the_fork_and_pushes`.
 

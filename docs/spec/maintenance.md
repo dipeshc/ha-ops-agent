@@ -46,10 +46,13 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
     else the one whose `homeassistant.components.<d>` /
     `custom_components.<d>` logger logged it. Never a word naming Home
     Assistant or its parts (`core`, `homeassistant`, `home_assistant`,
-    `integration`, `component`, `helpers` and the like, `NOT_A_DOMAIN`). A
-    line with no reliable domain is dropped (a debug log line records it),
-    and a log finding an earlier version stored without one is dropped at
-    the next scan. The domain is used in the title, the Affected fact and
+    `integration`, `component`, `helpers`, `none` and the like,
+    `NOT_A_DOMAIN`, in any letter case). A
+    line with no reliable domain is dropped (a debug log line records it).
+    A log finding without a usable domain (empty, None, or such a word) is
+    never emitted, never loaded from the store (an earlier version stored
+    some), never planned and never titled or worded with a stand-in such
+    as "Core" or "None" (`Finding.sound`, `usable_domain`). The domain is used in the title, the Affected fact and
     the daemon's plan steps (`about`);
   - the **deprecated thing**, only when the message names it in a safely
     code-like form (an identifier, a dotted name or a call of at most 80
@@ -79,7 +82,10 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   `test_a_log_removal_names_the_integration_that_uses_it_never_core`,
   `test_log_domain_comes_only_from_a_reliable_source`,
   `test_the_deprecated_thing_is_quoted_only_when_it_is_safely_code_like`,
-  `test_an_earlier_core_titled_log_finding_is_dropped`.
+  `test_an_earlier_core_titled_log_finding_is_dropped`,
+  `test_core_deprecation_lines_never_give_core_or_none_as_the_domain`,
+  `test_a_log_finding_without_a_usable_domain_is_never_loaded_titled_or_planned`,
+  `test_a_scan_never_plans_with_a_missing_domain`.
 - M4. **Release posts** of the installed Core minor, the two before it and
   every newer published one, newest first and at most `MAX_STEPS` (6) posts
   per scan (far behind, the newest win): backward-incompatible items, the developer-blog
@@ -102,9 +108,25 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   Core has (its `homeassistant/components/<domain>` listing holds a
   `manifest.json`), or that a read post adds under the same normalised name,
   becomes a replacement candidate. An answer without the expected shape is
-  unknown, never a finding. Tests
+  unknown, never a finding. A candidate of the custom integration's own
+  domain is checked against the installed Core version, as `core-compare
+  <domain> --fork` shows it (`forkrebase.fork_state`, no AI): when the
+  fork still carries its own changes (hunks against its origin release,
+  the manifest's `version` aside, new files included) that Core's text of
+  the file lacks, the candidate is settled and its item resolves as "Fork
+  still needed: <summary>" (the daemon's summary, e.g. `fan.py: 2 changes;
+  presets.py: new file`). The fingerprint (installed Core minor, the
+  fork's file hashes) is kept in `maintenance:fork:<domain>`; while it
+  holds no GitHub question is asked, and the candidate comes back only
+  when the Core minor or a fork file changes and the fork no longer
+  carries changes Core lacks. When GitHub or the fork cannot be read the
+  candidate stays as it is. Tests
   `test_the_weekly_checks_find_archived_repositories_and_replacements`,
-  `test_github_answers_without_the_expected_shape_are_unknown`.
+  `test_github_answers_without_the_expected_shape_are_unknown`,
+  `test_a_fork_that_is_still_needed_settles_its_replacement_candidate`,
+  `test_an_unreadable_fork_leaves_the_candidate_as_it_is`,
+  `test_a_fork_with_changes_core_lacks_is_still_needed`,
+  `test_a_fork_whose_changes_core_took_over_is_not_needed`.
 - M6. **Marketplace.** A read post with a heading naming a Marketplace,
   while HACS is installed, becomes one suggestion. Without HACS there is
   none. Test `test_without_hacs_there_is_no_marketplace_suggestion`.
@@ -199,6 +221,17 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   update rule (`removals`, M26). Test
   `test_a_hidden_removal_still_holds_core_back_and_asks_near_its_deadline`. Test
   `test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home`.
+- M14c. **A fix settles its findings at once.** When a fork rebase job
+  ends `succeeded`, or a config change proposed for a finding is
+  `applied`, `MaintenanceManager.settle(domain)` reads the live repairs and
+  log again and replaces that domain's repair and log findings with what
+  they report now (a log line no longer there is not kept for
+  `LOG_STICKY`); a replacement candidate of the domain is checked as in M5.
+  Other domains and signals, and the weekly checks, are untouched. It
+  never raises. Tests `test_a_successful_fix_settles_that_domains_findings_at_once`,
+  `test_a_fork_is_checked_again_right_after_a_rebase`,
+  `test_the_pipeline_happy_path`,
+  `test_an_applied_change_is_reported_and_a_push_moves_the_tracking_ref`.
 - M14a. **Every finding is actionable.** Besides its conversation (as on
   every item, [panel.md](panel.md) N21), a finding offers **Plan a fix**
   (an investigation on the finding itself that reads the evidence and

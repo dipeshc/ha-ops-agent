@@ -1680,7 +1680,8 @@ class ItemBook:
         state, gist = _GONE[prefix]
         for old in self.store.items_all(open_only=True, prefix=f"{prefix}:"):
             if old["key"] not in listed:
-                self._write(self._resolved(old, state, gist), old)
+                reason = maint.fork_reason(self.store, old["key"].removeprefix("maint:")) if prefix == "maint" else None
+                self._write(self._resolved(old, state, reason or gist), old)
 
     def _health(self, composer: Composer) -> None:
         specs = composer.health()

@@ -446,6 +446,23 @@ async def test_apply_writes_checks_reloads_commits_and_pushes(w: World) -> None:
     assert git(w.repo_path, "for-each-ref", REF_PREFIX) == ""  # deleted after apply
 
 
+async def test_an_applied_change_is_reported_and_a_push_moves_the_tracking_ref(w: World) -> None:
+    applied: list[dict[str, Any]] = []
+
+    async def seen(row: Any) -> None:
+        applied.append(row)
+
+    w.manager.applied = seen
+    found = w.propose({ALERT: NEW_ALERT})
+    assert (await w.run(found["id"])).state == "applied"
+    assert [r["id"] for r in applied] == [found["id"]]
+    # A later "is it pushed" check reads this ref, which a push to the URL alone would leave behind.
+    assert git(w.repo_path, "rev-parse", "refs/remotes/origin/main").strip() == w.head()
+    # A revert is not an applied change.
+    assert (await w.run(found["id"], "revert")).state == "reverted"
+    assert len(applied) == 1
+
+
 async def test_two_factors_binding_replay_and_expiry(w: World) -> None:
     found = w.propose({ALERT: NEW_ALERT})
     approval = await w.approve(found["id"])

@@ -499,11 +499,14 @@ class UpdateManager:
         approvals: Approvals | None = None,
         forks: forkrebase.ForkFiles | None = None,
         commit_fork: Callable[[Mapping[str, Any], Mapping[str, bytes]], Awaitable[str]] | None = None,
+        fix_settled: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.store = store
         # Approved fork rebases (`opsd.forkrebase`): their files, and the git commit after a good one; None: off.
         self._forks = forks
         self._commit_fork = commit_fork
+        # Called with the fork's domain after a rebase succeeded (maintenance settles its findings at once).
+        self._fix_settled = fix_settled
         self.approvals = approvals or Approvals(store, clock=clock)
         self.executors = executors
         self.ops = executors.ops
@@ -2102,6 +2105,8 @@ class UpdateManager:
                         detail=f"applied and healthy; {committed or 'not committed'}")  # fmt: skip
         self._note(f"Fork rebased: {domain}", f"Rebased onto Core {record['core']}; health matches the check before"
                    f" it. {committed}", item=f"fork:{record['id']}")  # fmt: skip
+        if self._fix_settled is not None:
+            await self._fix_settled(domain)
 
     async def _fork_rollback(self, ctx: RunCtx, job: UpdateJob, record: Mapping[str, Any]) -> None:
         forks = self._forks

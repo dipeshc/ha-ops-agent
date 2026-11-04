@@ -327,7 +327,15 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   are committed with the plumbing (`commit_files`, `chore(custom-components):
   rebase <domain> onto core <version>`) and pushed when `limits.git_push`
   is on; untracked files, or git off, are not committed (said on the
-  item). A commit failure never undoes the rebase.
+  item). A commit failure never undoes the rebase. The commit left
+  "not pushed yet" (origin moved or unreachable) is checked again on every
+  status refresh, with local git reads only: once `refs/remotes/origin/main`
+  holds the commit (a later push carried it; a successful push moves that
+  ref), the proposal's detail, and so its item, reads "committed <sha>,
+  pushed" (`forkrebase.settle_pushes`). When the job has succeeded,
+  maintenance reads that domain's findings again at once (M14c). Tests
+  `test_a_commit_a_later_push_carried_is_shown_as_pushed`,
+  `test_the_pipeline_happy_path`.
 - U30. **Rollback.** With no snapshot nothing was written and Core was
   not restarted (the snapshot precedes every write): the job is `failed`
   ("nothing was written"), never `rollback_failed`. Otherwise `rolling_back` restores the snapshot (only from a

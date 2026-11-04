@@ -830,6 +830,8 @@ class ChangeManager:
         self._clock = clock
         # `ActivityLog.record` (set by the daemon).
         self.activity: Callable[..., Any] | None = None
+        # Called with the proposal's row after a change was applied (the daemon settles a maintenance finding's).
+        self.applied: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None
 
     # ------------------------------------------------------------ admin side
 
@@ -1017,6 +1019,9 @@ class ChangeManager:
             self.activity("change", f"Config change #{change_id} ({action}): {outcome.state}", outcome.detail,
                           ref={"change": change_id}, item=f"change:{change_id}")  # fmt: skip
         self._publish()
+        row = self.store.change(change_id)
+        if self.applied is not None and action == "apply" and outcome.state == "applied" and row is not None:
+            await self.applied(row)
         return outcome
 
     async def _execute(self, approval_id: str, change_id: int, action: str) -> Outcome:

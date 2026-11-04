@@ -52,6 +52,7 @@ from opsd.channels import BudgetClass, CompanionPush, Message
 from opsd.claude_runner import RunResult
 from opsd.config import Options, Paths, claude_token, credential_kind
 from opsd.conversation import clean_text, context_block
+from opsd.coresource import CoreSource, CoreSourceError, read_custom
 from opsd.events import Dispatcher, Event, EventQueue, Priority, Schedule, TaskScheduler
 from opsd.evidence import EvidenceCache, EvidenceSource
 from opsd.gitops import GitBusyError, GitError, Repo
@@ -389,6 +390,7 @@ class Daemon:
                 before_plan=self._maintenance_before_plan,
                 forks=forkrebase.ForkFiles(paths.data, paths.custom_components),
                 commit_fork=self._commit_fork,
+                fix_settled=self._fix_settled,
             )
         # "Back up now" and the act-mode self-heal (same ops and audited executor as the updates).
         self.backups: Backups | None = None
@@ -415,6 +417,7 @@ class Daemon:
                 publish=self._changes_changed,
                 lock=self.git_lock,
             )
+            self.changes.applied = self._change_applied
         if self.store is not None:
             self.assistant = Assistant(
                 store=self.store,
@@ -444,6 +447,7 @@ class Daemon:
                 generated=options.profile.dashboards.generated, plan=self._maintenance_plan,
                 propose=self._propose_maintenance if self.repo is not None else None,
                 publish=lambda: self.hub.publish("maintenance", None, {}),
+                fork_print=self._fork_print, fork_check=self._fork_check,
             )  # fmt: skip
             self.dashboards = dashboards.DashboardWriter(
                 store=self.store, options=options, approvals=Approvals(self.store), ws=self._ws_command,
@@ -1458,6 +1462,7 @@ class Daemon:
                 await self.publish_status()
             if self.changes is not None:
                 self.changes.expire()
+            await self._settle_fork_pushes()
         finally:
             self._complete_task(event)
 
@@ -1539,6 +1544,56 @@ class Daemon:
             issues=issues.get("issues") if isinstance(issues, dict) else [],
             logs=logs, inventory=inv, configs=configs,
         )  # fmt: skip
+
+    async def _fix_settled(self, domain: str) -> None:
+        """A fix for `domain` succeeded: its maintenance findings are read again now."""
+        if self.maintenance is not None:
+            await self.maintenance.settle(domain)
+
+    async def _change_applied(self, row: Mapping[str, Any]) -> None:
+        """An applied config change proposed for a maintenance finding settles that finding's domain at once."""
+        who = str(row.get("requested_by") or "")
+        if self.maintenance is None or not who.startswith(maintenance.PROPOSER):
+            return
+        key = who.removeprefix(maintenance.PROPOSER)
+        finding = next((f for f in self.maintenance.findings() if f.key == key), None)
+        if finding is not None and finding.domain:
+            await self.maintenance.settle(finding.domain)
+
+    async def _fork_print(self, domain: str, installed: str) -> str | None:
+        """The fork's fingerprint (installed Core minor + its files' hashes); local reads only."""
+        try:
+            custom = await asyncio.to_thread(read_custom, self.paths.custom_components, domain)
+        except CoreSourceError, OSError:
+            return None
+        return forkrebase.fork_fingerprint(custom, installed)
+
+    async def _fork_check(self, domain: str, installed: str) -> tuple[bool, str, str] | None:
+        """Does the fork still carry changes the installed Core version lacks (GitHub reads, cached)? None when it
+        cannot be told: the candidate is then left as it is."""
+        if self.store is None:
+            return None
+        source = CoreSource(self.paths.data, store=self.store)
+
+        def check() -> forkrebase.ForkState | None:
+            try:
+                return forkrebase.fork_state(source, self.paths.custom_components, domain, installed)
+            except (CoreSourceError, forkrebase.RebaseRefused, OSError) as err:
+                _LOGGER.info("fork check unavailable", extra={"domain": domain, "error": str(err)[:160]})
+                return None
+            finally:
+                source.prune(installed)
+
+        state = await asyncio.to_thread(check)
+        return None if state is None else (state.needed, state.summary, state.fingerprint)
+
+    async def _settle_fork_pushes(self) -> None:
+        """Fork rebases left "not pushed yet": a later push may have carried the commit (local git reads only)."""
+        if self.store is None or self.repo is None:
+            return
+        repo, store = self.repo, self.store
+        async with self.git_lock:
+            await asyncio.to_thread(forkrebase.settle_pushes, store, repo, now=datetime.now(UTC))
 
     async def _maintenance_plan(self, prompt: str) -> RunResult:
         """The capability-free maintenance plan run; skipped (not an error) when AI is off or capped."""

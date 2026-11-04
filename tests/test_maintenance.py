@@ -857,3 +857,141 @@ async def test_an_earlier_core_titled_log_finding_is_dropped(tmp_path: Path) -> 
     rig.logs = []
     await rig.scan()
     assert by_signal(rig, "log") == []
+
+
+# ------------------------------------------------------------------ 0.22.1: unusable domains, settling, forks
+
+DEPRECATED_CORE_LINES = [
+    # Core's own logger names a custom integration: that one, not "core".
+    ("homeassistant.core", "Detected that custom integration 'acme_fan' calls `hass.async_add_job` which is deprecated"
+     " and will be removed in 2030.9", "acme_fan"),
+    ("homeassistant.core", "Something in Core is deprecated and will be removed in 2030.8", None),
+    ("homeassistant.core", "Detected that custom integration 'Core' is deprecated and will be removed in 2030.8", None),
+    ("homeassistant.helpers.frame", "Detected that custom integration 'None' uses `x_y` which is deprecated", None),
+    ("homeassistant.helpers.frame", "Detected that custom integration 'ACME_FAN' uses `x_y` which is deprecated",
+     "acme_fan"),
+    ("custom_components.Core.sensor", "deprecated", None),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(("logger", "message", "domain"), DEPRECATED_CORE_LINES)
+def test_core_deprecation_lines_never_give_core_or_none_as_the_domain(
+    logger: str, message: str, domain: str | None
+) -> None:
+    assert maintenance.log_domain(logger, message) == domain
+    found = maintenance.from_logs([{"name": logger, "message": [message]}], NOW)
+    assert [f.domain for f in found] == ([domain] if domain else [])
+    assert all("None" not in f.title() and not f.title().startswith("The Core log says Core ") for f in found)
+
+
+@pytest.mark.parametrize("domain", [None, "", "Core", "core", "None", "none", "helpers", "Home Assistant"])
+def test_a_log_finding_without_a_usable_domain_is_never_loaded_titled_or_planned(
+    domain: str | None, tmp_path: Path
+) -> None:
+    bad = Finding(key="0123456789abcdef", variant="deprecation", signal="log", what="x", domain=domain,
+                  removal="2030.9", affected=[f"custom integration {domain}"])  # fmt: skip
+    assert not bad.sound() and Finding.from_json(bad.to_json()) is None
+    prompt = maintenance.build_plan_prompt([bad], git=True)
+    assert "0123456789abcdef" not in prompt and "None" not in prompt
+    store = opened(tmp_path / "ops.db")
+    store.kv_set(maintenance.FINDINGS_KEY, json.dumps([bad.to_json()]), now=NOW)
+    assert maintenance.load(store) == []
+
+
+async def test_a_scan_never_plans_with_a_missing_domain(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.logs = [{"name": "homeassistant.core", "message": ["Something in Core is deprecated, removed in 2030.9"]}]
+    rig.answer = {"plans": []}
+    await rig.scan()
+    assert by_signal(rig, "log") == []
+    assert rig.prompts and all("None" not in p and "Core log says Core" not in p for p in rig.prompts)
+
+
+async def test_a_successful_fix_settles_that_domains_findings_at_once(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    await rig.scan()
+    assert by_signal(rig, "log") and by_signal(rig, "repair")
+    # The fix restarted Core: the log no longer holds the line. The next scan would keep it for a week.
+    rig.logs = []
+    rig.issues = []
+    await rig.manager.settle("acme_weather")
+    assert by_signal(rig, "log") == []
+    # Only that domain's repairs and log lines are read again; everything else stays until its own scan.
+    assert by_signal(rig, "repair") and by_signal(rig, "notes") and by_signal(rig, "replacement")
+    await rig.manager.settle("acme_sprinkler")
+    assert by_signal(rig, "repair") == []
+    # A line the log still holds keeps its finding.
+    rig.logs = list(LOGS)
+    await rig.manager.settle("acme_weather")
+    assert [f.domain for f in by_signal(rig, "log")] == ["acme_weather"]
+    # A word for Home Assistant is no domain to settle.
+    before = len(rig.manager.findings())
+    await rig.manager.settle("core")
+    assert len(rig.manager.findings()) == before
+
+
+class Forks:
+    """The daemon's two fork callbacks, scripted."""
+
+    def __init__(self) -> None:
+        self.print = "2030.2:aaa"
+        self.state: tuple[bool, str, str] | None = (True, "fan.py: 2 changes", "2030.2:aaa")
+        self.checks = 0
+
+    async def fingerprint(self, domain: str, installed: str) -> str | None:
+        return self.print
+
+    async def check(self, domain: str, installed: str) -> tuple[bool, str, str] | None:
+        self.checks += 1
+        return self.state
+
+
+async def test_a_fork_that_is_still_needed_settles_its_replacement_candidate(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    forks = Forks()
+    await rig.scan()
+    assert len(by_signal(rig, "replacement")) == 1
+    rig.manager._fork_print, rig.manager._fork_check = forks.fingerprint, forks.check
+    rig.now += timedelta(days=8)
+    await rig.scan()
+    # The candidate (acme_weather's own domain is in Core) resolved with the daemon's reason.
+    assert by_signal(rig, "replacement") == [] and forks.checks == 1
+    resolved = next(r for r in rig.store.items_all() if r["kind"] == "maintenance" and r["state"] == "done"
+                    and "Fork still needed" in r["gist"])  # fmt: skip
+    assert resolved["gist"] == "Fork still needed: fan.py: 2 changes"
+    # A week later the same Core minor and files: no GitHub question, still settled.
+    rig.now += timedelta(days=8)
+    await rig.scan()
+    assert by_signal(rig, "replacement") == [] and forks.checks == 1
+    # The installed Core minor (or a file) changed and the fork no longer carries changes: it comes back.
+    forks.print = "2030.3:aaa"
+    forks.state = (False, "", "2030.3:aaa")
+    rig.now += timedelta(days=8)
+    await rig.scan()
+    assert forks.checks == 2 and len(by_signal(rig, "replacement")) == 1
+
+
+async def test_an_unreadable_fork_leaves_the_candidate_as_it_is(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    forks = Forks()
+    forks.state = None
+    rig.manager._fork_print, rig.manager._fork_check = forks.fingerprint, forks.check
+    await rig.scan()
+    assert len(by_signal(rig, "replacement")) == 1 and forks.checks == 1
+    # Once it can be told, the next weekly scan settles it.
+    forks.state = (True, "fan.py: 1 change", "2030.2:aaa")
+    rig.now += timedelta(days=8)
+    await rig.scan()
+    assert by_signal(rig, "replacement") == []
+
+
+async def test_a_fork_is_checked_again_right_after_a_rebase(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    forks = Forks()
+    forks.state = None
+    rig.manager._fork_print, rig.manager._fork_check = forks.fingerprint, forks.check
+    await rig.scan()
+    assert len(by_signal(rig, "replacement")) == 1
+    forks.state = (True, "fan.py: 1 change", "2030.2:bbb")
+    await rig.manager.settle("acme_weather")
+    assert by_signal(rig, "replacement") == [] and forks.checks == 2

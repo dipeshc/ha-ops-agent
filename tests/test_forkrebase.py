@@ -344,6 +344,13 @@ def pipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Rig,
     rig.book._context = lambda: Context(window=rig.options.updates.window, gate=rig.manager.gate(),
                                         paused=rig.manager.paused(), acting=True)  # fmt: skip
     rig.manager._commit_fork = commit
+    settled: list[str] = []
+
+    async def fix_settled(domain: str) -> None:
+        settled.append(domain)
+
+    rig.manager._fix_settled = fix_settled
+    rig.settled = settled  # type: ignore[attr-defined]
     rig.commits = commits  # type: ignore[attr-defined]
     ops = ForkOps(rig, paths.custom_components)
     yield rig, ops, paths
@@ -403,6 +410,8 @@ async def test_the_pipeline_happy_path(pipe: tuple[Rig, ForkOps, Paths]) -> None
     assert rig.store.approval(approval)["state"] == "used"
     assert forkrebase.load(rig.store, record["id"])["state"] == "applied"
     assert rig.commits == [(DOMAIN, ["__init__.py", "fan.py", "manifest.json"])]  # type: ignore[attr-defined]
+    # Maintenance reads the domain's findings again at once, not at the next scheduled scan.
+    assert rig.settled == [DOMAIN]  # type: ignore[attr-defined]
     done = item(rig, record)
     assert done["state"] == "done" and "committed abc1234567" in done["gist"]
     # The old files were kept root-only.
@@ -927,3 +936,64 @@ def test_summary_lists_are_capped_with_a_count() -> None:
 
     assert listed([], "files") == "none"
     assert listed([f"f{n}.py" for n in range(45)], "hunks").endswith("f39.py, and 5 more hunks not listed")
+
+
+# ------------------------------------------------------------------ is the fork still needed (0.22.1)
+
+
+def state(paths: Paths) -> forkrebase.ForkState:
+    return forkrebase.fork_state(CoreSource(paths.data), paths.custom_components, DOMAIN, INSTALLED)
+
+
+def test_a_fork_with_changes_core_lacks_is_still_needed(paths: Paths, gh: FakeGitHub, fork: Path) -> None:
+    found = state(paths)
+    # The fork's preset lines (Core's fan.py lacks them) and its own file; the manifest's version is no change.
+    assert found.needed and found.summary == "fan.py: 1 change; presets.py: new file"
+    assert found.fingerprint.startswith("2026.10:")
+    # The fingerprint follows the fork's files and the Core minor, nothing else.
+    custom = forkrebase.read_custom(paths.custom_components, DOMAIN)
+    assert forkrebase.fork_fingerprint(custom, "2026.10.1") == found.fingerprint
+    assert forkrebase.fork_fingerprint(custom, "2026.11.0") != found.fingerprint
+    (fork / "presets.py").write_text("BREEZE = 'gale'\n")
+    assert state(paths).fingerprint != found.fingerprint
+
+
+def test_a_fork_whose_changes_core_took_over_is_not_needed(paths: Paths, gh: FakeGitHub) -> None:
+    gh.publish(INSTALLED, DOMAIN, {**BASE_FILES, "fan.py": REBASED_FAN})
+    write_custom(paths, {k: v for k, v in FORK_FILES.items() if k != "presets.py"}, DOMAIN)
+    found = state(paths)
+    assert not found.needed and found.summary == ""
+
+
+def test_a_fork_that_unreachable_github_cannot_judge_raises(
+    paths: Paths, fork: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def offline(url: str, **_: object) -> str:
+        raise evidence.FetchError("offline")
+
+    monkeypatch.setattr(evidence, "fetch_text", offline)
+    with pytest.raises(CoreSourceError):
+        state(paths)
+
+
+class PushedRepo:
+    def __init__(self, pushed: set[str]) -> None:
+        self.pushed = pushed
+
+    def is_ancestor(self, older: str, newer: str) -> bool:
+        assert newer == "refs/remotes/origin/main"
+        return older in self.pushed
+
+
+def test_a_commit_a_later_push_carried_is_shown_as_pushed(pipe: tuple[Rig, ForkOps, Paths]) -> None:
+    rig, _, paths = pipe
+    record = propose(rig, paths)
+    stale = "applied and healthy; committed abc1234567, not pushed yet (origin moved or unreachable)"
+    forkrebase.move(rig.store, record["id"], expect=("open",), to="applied", now=rig.now, detail=stale)
+    # Still ahead of origin: unchanged.
+    assert forkrebase.settle_pushes(rig.store, PushedRepo(set()), now=rig.now) == 0
+    assert forkrebase.load(rig.store, record["id"])["detail"] == stale
+    assert forkrebase.settle_pushes(rig.store, PushedRepo({"abc1234567"}), now=rig.now) == 1
+    assert forkrebase.load(rig.store, record["id"])["detail"] == "applied and healthy; committed abc1234567, pushed"
+    assert "committed abc1234567, pushed" in item(rig, record)["gist"]
+    assert forkrebase.settle_pushes(rig.store, PushedRepo({"abc1234567"}), now=rig.now) == 0

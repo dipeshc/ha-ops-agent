@@ -92,6 +92,10 @@ ENTITY_PREFIX = "fork."
 STATES = frozenset({"open", "applying", "applied", "rolled_back", "failed", "rejected", "stale"})
 FINAL = frozenset({"applied", "rolled_back", "failed", "rejected", "stale"})
 KEEP_PROPOSALS = 20
+# The detail `Daemon._commit_fork` leaves when the push did not go out.
+STALE_PUSH_RE = re.compile(
+    r"(?P<head>.*?)committed (?P<sha>[0-9a-f]{7,40}), not pushed yet \(origin moved or unreachable\)"
+)
 
 
 class RebaseRefused(ValueError):
@@ -792,6 +796,114 @@ def fork_report(source: CoreSource, custom: LocalFiles, domain: str, installed: 
     room = max(512, budget - len(head.encode()) - 40)
     body = cut_text("\n\n".join(h.text() for h in hunks), room, "hunks", "the list above names every hunk")
     return "\n".join([head, "<fork-hunks>", fence(body, len(body) + 1), "</fork-hunks>"])
+
+
+# ------------------------------------------------------------------ is the fork still needed
+
+
+@dataclass(frozen=True, slots=True)
+class ForkState:
+    """Whether a fork still carries changes its installed Core version lacks, and a fingerprint of that check."""
+
+    needed: bool
+    summary: str
+    fingerprint: str
+
+
+def fork_fingerprint(custom: LocalFiles, installed: str) -> str | None:
+    """The installed Core minor and the fork's file hashes: what a "still needed" answer holds for. None when the
+    installed version has no minor."""
+    at = maintenance.minor(installed)
+    if at is None:
+        return None
+    return f"{at[0]}.{at[1]}:{files_hash({n: t.encode() for n, t in custom.files.items()})}"
+
+
+def _contains(haystack: Sequence[str], needle: Sequence[str]) -> bool:
+    size = len(needle)
+    return size > 0 and any(
+        haystack[i] == needle[0] and list(haystack[i : i + size]) == list(needle)
+        for i in range(len(haystack) - size + 1)
+    )
+
+
+def _carried(hunk: Hunk, core: str | None) -> bool:
+    """True when the fork's change in `hunk` is not in Core's text of the file: an added line block Core lacks, or
+    a removed block Core still has."""
+    if core is None:
+        return True
+    lines = [line.strip() for line in core.splitlines()]
+    matcher = difflib.SequenceMatcher(None, hunk.old, hunk.new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        added = [line.strip() for line in hunk.new[j1:j2]]
+        if added:
+            if not _contains(lines, added):
+                return True
+        elif _contains(lines, [line.strip() for line in hunk.old[i1:i2]]):
+            return True
+    return False
+
+
+def _manifest_differs(core: str, fork: str) -> bool:
+    try:
+        a, b = json.loads(core), json.loads(fork)
+    except ValueError:
+        return core.strip() != fork.strip()
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return bool(a != b)
+    return {k: v for k, v in a.items() if k != "version"} != {k: v for k, v in b.items() if k != "version"}
+
+
+def fork_state(source: CoreSource, custom_components: Path, domain: str, installed: str) -> ForkState:
+    """What `core-compare --fork` shows, decided by the daemon: the fork's own changes (hunks against its origin
+    release) that Core's installed version lacks. RebaseRefused or CoreSourceError when it cannot be told."""
+    fork = read_custom(custom_components, domain)
+    print_ = fork_fingerprint(fork, installed)
+    if print_ is None:
+        raise RebaseRefused(f"Core version {installed[:30]!r} has no minor")
+    listing = source.listing(installed, domain)
+    if listing.missing:
+        return ForkState(False, "", print_)
+    core = {name: source.text(listing, name) for name in sorted(set(fork.files) & set(listing.files))}
+    origin = find_origin(source, domain, installed, fork.files)
+    counts: dict[str, int] = {}
+    for hunk in fork_hunks(origin.texts, fork.files):
+        # A custom integration's manifest always differs by its `version`, which is no change of the fork's own.
+        if hunk.file != "manifest.json" and _carried(hunk, core.get(hunk.file)):
+            counts[hunk.file] = counts.get(hunk.file, 0) + 1
+    if "manifest.json" in core and _manifest_differs(core["manifest.json"], fork.files["manifest.json"]):
+        counts["manifest.json"] = 1
+    only_fork = set(fork.files) - set(listing.files)
+    if not counts and not only_fork:
+        return ForkState(False, "", print_)
+    labels = {name: f"{name}: {n} change{'s' if n != 1 else ''}" for name, n in counts.items()}
+    labels |= {name: f"{name}: new file" for name in only_fork}
+    shown = [labels[name] for name in sorted(labels)[:3]]
+    counts = dict.fromkeys(labels, 1)
+    more = len(counts) - len(shown)
+    summary = "; ".join(shown) + (f"; and {more} more file{'s' if more != 1 else ''}" if more > 0 else "")
+    return ForkState(True, clean_text(summary, 120), print_)
+
+
+def settle_pushes(store: Store, repo: Any, *, now: datetime) -> int:
+    """Applied rebases whose commit was left "not pushed yet": once `origin/main` holds the commit (a later push
+    or fetch carried it), the record says it is pushed. Local git reads only; returns how many were updated."""
+    settled = 0
+    for record in proposals(store):
+        found = STALE_PUSH_RE.fullmatch(str(record.get("detail") or ""))
+        if record.get("state") != "applied" or found is None:
+            continue
+        try:
+            carried = repo.is_ancestor(found.group("sha"), "refs/remotes/origin/main")
+        except Exception:  # noqa: BLE001 - a git failure leaves the status as it was
+            _LOGGER.info("push status not checked", extra={"proposal": record.get("id")})
+            return settled
+        if carried and move(store, str(record["id"]), expect=("applied",), to="applied", now=now,
+                            detail=f"{found.group('head')}committed {found.group('sha')}, pushed"):  # fmt: skip
+            settled += 1
+    return settled
 
 
 def exec_internal(_ctx: ExecContext, _args: Args) -> Any:

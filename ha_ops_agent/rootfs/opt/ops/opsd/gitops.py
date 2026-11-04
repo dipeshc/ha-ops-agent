@@ -264,3 +264,9 @@ class Repo:
         if behind:
             raise GitError(f"origin/main is {behind} commit(s) ahead; not pushing")
         self.run("push", "--no-recurse-submodules", "--end-of-options", url, "HEAD:refs/heads/main")
+        # Pushing to a URL does not move the tracking ref: later checks of "is it pushed" read it.
+        try:
+            self.run("update-ref", "refs/remotes/origin/main", "HEAD")
+        except GitError:
+            # The push went out: a stale tracking ref only delays the "pushed" status until the next fetch.
+            _LOGGER.info("tracking ref not updated after a push")

@@ -231,7 +231,10 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   finding's `agent` text, and a proposal it makes is decided on the finding
   ([maintenance.md](maintenance.md) M14b). The last step's push is "Plan
   ready: <the finding's title>" unless the finding now asks (the item
-  book's push says so). It obeys T17's limits (one open investigation per
+  book's push says so). The last step's findings are shown once, as the
+  finding's plan: the conversation gets no agent turn for them, only its
+  investigation card, which then reads "Plan ready: it is above, under
+  The agent says." (earlier steps' findings stay agent turns). It obeys T17's limits (one open investigation per
   conversation, two house-wide, the open-task cap) and counts against
   `task.investigate`'s daily quota of 4 (the same item, revision and day
   again is a duplicate: no second run, the quota unit given back); refused,

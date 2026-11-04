@@ -292,7 +292,12 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `Agent: <title>` (70 characters), tagged `ha-ops-agent-…` (or, for an
   answer in an item's conversation, the item's id unless its push is
   urgent, [chat.md](chat.md) T10), and are never SAFETY class; the full
-  text stays in the panel. A push from the agent's own run (`notify.admin`)
+  text stays in the panel. An answer in a conversation takes its item's id
+  as its tag, so it replaces the push the admin replied to, except for an
+  item whose push is urgent (SAFETY class): its answer is tagged
+  `ha-ops-agent-<item id>`, so model text never replaces a daemon safety
+  push. Test `test_an_answer_never_replaces_an_urgent_items_push`. A push
+  from the agent's own run (`notify.admin`)
   is its own item (the words under `agent`) and opens it, but carries no
   Reply button: model text never invites an answer. It goes out
   only with a reason class (`needs_action`, `physical_task`, `security`);

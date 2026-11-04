@@ -186,3 +186,15 @@ def test_health_check_with_a_critical_item_needs_the_admin() -> None:
     # The items are in Needs you themselves; the check's own line is never a need.
     assert [c.get("chat", False) for c in calls] == [False, True, False]
     assert not any(c.get("needs_admin") for c in calls)
+
+
+async def test_an_answer_never_replaces_an_urgent_items_push(h: Harness) -> None:
+    d = daemon(h)
+    d.activity.record("backup", "Backup failed", "disk full", needs_admin=True)
+    [item] = [i for i in d.store.items_all(prefix="activity:") if i["needs"]]
+    source = dict(item["source"]) | {"urgent": True}
+    d.store.put_item(item | {"source": source})
+    plain = d.assistant.item_message(f"item:{item['id']}", "t", "b")
+    assert plain.tag == f"ha-ops-agent-{item['id']}" and plain.thread_id == f"item:{item['id']}"
+    d.store.put_item(item | {"source": source | {"urgent": False}})
+    assert d.assistant.item_message(f"item:{item['id']}", "t", "b").tag == item["id"]

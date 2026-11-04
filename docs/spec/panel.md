@@ -319,8 +319,9 @@ Not served (404): `api/tasks`, `api/changes`, `api/facts`, `api/activity`,
   that opens that item.
 - N23. **Destinations.** Home, Ask and History (bottom bar on phones, rail
   from 840 px), System behind the gear. Home has Needs you, In progress,
-  Coming up, Suggestions and Today; Ask lists the questions (History's
-  `questions` filter) with the composer "Ask about the house or the agent"
+  Coming up, Suggestions and Today; Ask lists the questions the admin asked
+  (History's `questions` filter without the earlier one chat, which is in
+  History only) with the composer "Ask about the house or the agent"
   and opens the new question at once; History has the filters of N14.
   Nothing the agent does by itself appears on Ask. Every item opens as its
   page (`#t/<id>`), with its conversation at the end. Loading, offline

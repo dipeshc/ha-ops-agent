@@ -400,8 +400,8 @@ async function loadItem(id) {
   const r = await getJSON(url);
   if (r.status === 200) put(r.data.item);
   else if (r.status === 404) S.items[id] = { gone: true };
-  /* A question opened from a push or a link goes back to Ask. */
-  if (r.status === 200 && r.data.item.kind === "question" && S.route === "t" && S.arg === id && !els.navigated) S.from = "ask";
+  /* A question opened from a push or a link goes back to Ask; the earlier one chat to History. */
+  if (r.status === 200 && r.data.item.kind === "question" && S.route === "t" && S.arg === id && !els.navigated) S.from = r.data.item.conversation === "read_only" ? "history" : "ask";
   render();
 }
 /* Live events can overtake a response: an older revision never replaces a newer one. */
@@ -410,10 +410,11 @@ function put(it) {
   if (cur && !cur.gone && cur.revision > it.revision) return;
   S.items[it.id] = it.events || !cur ? it : { ...it, events: cur.events };
 }
-/* Ask lists the questions: History's `questions` filter (newest first). */
+/* Ask lists the questions the admin asked (History's `questions` filter, newest first); the earlier one chat is in
+   History only. */
 async function loadAsks() {
   const r = await getJSON("api/history?filter=questions");
-  if (r.status === 200) S.asks = r.data.items;
+  if (r.status === 200) S.asks = r.data.items.filter((t) => t.conversation !== "read_only");
   render();
 }
 async function loadHistory(filter, more) {

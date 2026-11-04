@@ -194,8 +194,11 @@ async def test_plan_a_fix_runs_on_the_finding_itself(h: Harness, local_ingress: 
         await d.assistant.drain()
         prompt = h.claude_calls[-1]
         assert "<item>" in prompt and item["id"] in prompt and "Plan a fix" in prompt
-        statuses = [t.status for t in d.store.turns_page(task.thread_id, limit=20)]
-        assert "investigation" in statuses
+        turns = d.store.turns_page(task.thread_id, limit=20)
+        # The plan is shown once, on the finding: no agent turn repeats it; the card says where it is.
+        assert [t for t in turns if t.role == "agent"] == []
+        [card] = [t for t in turns if t.status == "investigation"]
+        assert "under The agent says" in card.text
         # Done: the plan is the finding's "The agent says", and the finding is a suggestion again.
         await d.items_flush()
         done = d.store.item(item["id"])

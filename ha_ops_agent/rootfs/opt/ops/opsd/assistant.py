@@ -1022,7 +1022,9 @@ class Assistant:
             "running": f"Step {step} of {of} running" + (f": {detail}." if detail else "."),
             "next": f"Step {step} of {of} done; continuing.",
             "waiting": f"Waiting: {detail}",
-            "done": f"Finished after {step} step{'s' if step != 1 else ''}.",
+            "done": "Plan ready: it is above, under The agent says."
+            if task.payload.get("plan_fix")
+            else f"Finished after {step} step{'s' if step != 1 else ''}.",
             "cancelled": "Cancelled.",
             "failed": f"Stopped: {detail}",
         }[state]
@@ -1159,10 +1161,14 @@ class Assistant:
             return
         reply = redactor.redact(reply)
         run_meta = self._run_meta(outcome.context.run_id)
-        findings = self.store.append_turn(thread, role="agent", text=reply, now=now, run_id=outcome.context.run_id,
-                                          meta={"investigation": task.id, "step": step, "of": of,
-                                                "duration_s": round(run.duration_s, 1), **run_meta})  # fmt: skip
-        self._turn_changed(findings)
+        final = not (following and step < of)
+        if not (task.payload.get("plan_fix") and final):
+            # A plan's last findings are the plan itself: shown once, as the finding's "The agent says"; its card in
+            # the conversation says so in one line.
+            findings = self.store.append_turn(thread, role="agent", text=reply, now=now, run_id=outcome.context.run_id,
+                                              meta={"investigation": task.id, "step": step, "of": of,
+                                                    "duration_s": round(run.duration_s, 1), **run_meta})  # fmt: skip
+            self._turn_changed(findings)
         if not task.payload.get("plan_fix"):
             # A plan's proposals are decided on its finding; anything else the step made gets a link card.
             self._link_cards(thread, outcome.context.run_id, run_meta, now)

@@ -301,6 +301,12 @@ def test_a_conversation_renders_text_only_with_link_cards_and_its_composer() -> 
 
 
 @needs_node
+def test_ask_never_lists_the_earlier_conversation() -> None:
+    load = re.search(r"async function loadAsks\(\) \{.*?\n\}\n", BODY, re.S)
+    assert load is not None and 'filter((t) => t.conversation !== "read_only")' in load.group(0)
+
+
+@needs_node
 def test_ask_lists_the_questions_and_says_where_item_questions_go() -> None:
     q = {"id": "q-1", "kind": "question", "title": EVIL, "state": "done", "gist": "answered 09:40",
          "at": "2026-01-30T09:40:00Z", "revision": 1}  # fmt: skip

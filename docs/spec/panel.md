@@ -105,7 +105,7 @@ The record behind Home, History and the item page
   "created_at": "2026-01-11T04:00:00Z", "updated_at": "2026-01-15T04:12:00Z",
 
   "need": {                           // non-null only while the item is in Needs you
-    "kind": "approval",               // approval | confirm | physical | answer | ack (0.20.0 produces approval and ack)
+    "kind": "approval",               // approval | confirm | physical | answer | ack (0.21.0 produces approval and ack)
     "text": "17.1 is installed and waiting for one reboot. …",  // what happens, when, cost, what cannot be undone
     "primary": { "id": "reboot_window", "label": "Reboot tonight at 04:00" },
     "secondary": [ { "id": "reject", "label": "Reject", "style": "text" } ],
@@ -254,8 +254,9 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
   item's hash ([approvals.md](approvals.md)). Every action is audited as
   `item.act` with the item id, action, revision and the admin's user id;
   the high-impact kinds (approve_update, approve_reboot, approve_change,
-  approve_dashboard, updates_on, ai_on) also audit `panel.<kind>` with
-  their outcome. Actions in 0.20.0: `ack`, `resume_updates`, `withdraw`,
+  approve_dashboard, approve_fork, updates_on, ai_on) also audit
+  `panel.<kind>` with their outcome. Actions in 0.21.0: `ack`,
+  `resume_updates`, `withdraw`,
   update `approve`, `approve_now`, `reject`, `reboot_window`, change
   `apply`, `reject`, `revert`, health `accept`, `snooze`,
   task `cancel`, `stop`, maintenance `plan_fix` (an investigation in the
@@ -265,7 +266,10 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
   plan) and
   `apply_dashboard` (request the dashboard approval for the shown `change`
   and confirm it in the same request, as `approve_dashboard`; see
-  [maintenance.md](maintenance.md) M21). Test `test_approve_then_withdraw_binds_each_action_to_its_revision`.
+  [maintenance.md](maintenance.md) M21), fork rebase `approve_rebase`,
+  `approve_rebase_now` (request the fork approval for the shown `change`
+  hash, for the window or now, and confirm it in the same request, as
+  `approve_fork`; [approvals.md](approvals.md) A18) and `reject`. Test `test_approve_then_withdraw_binds_each_action_to_its_revision`.
 
 Not served (404): `api/tasks`, `api/changes`, `api/facts`, `api/activity`,
 `api/ack`, `api/approvals*`, `api/updates/plan|holds/clear|skip|notes`,

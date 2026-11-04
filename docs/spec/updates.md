@@ -262,3 +262,72 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   the last 24 hours and under the daily cap. Chat can only ask for a backup.
   Tests `test_self_heal_is_due_only_when_everything_says_so`,
   `test_observe_mode_never_heals`, `test_chat_can_ask_for_a_backup_but_never_runs_one`.
+
+## Fork rebases
+
+A custom integration that forks a Core one (`custom_components/<domain>`
+with the domain of a Core integration) can be rebased onto the installed
+Core version. The AI only proposes it ([proposals.md](proposals.md) C11);
+the update pipeline applies it after the admin's approval.
+Implementation: `opsd/forkrebase.py`, `UpdateManager._approved_rebases`
+and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
+`fork_check`, `fork_restore`, `fork_restart` in `opsd/updexec.py`. Tests
+`tests/test_forkrebase.py`.
+
+- U26. **When.** An approved fork rebase ([approvals.md](approvals.md)
+  A18) runs in the update window after the night's plan and installs and
+  before an approved reboot, or at once when the admin chose "now" (the
+  `approved` trigger). It needs the same gate as installs (U11: valid
+  options, act mode, `updates.auto_install: on`, not paused, no failed
+  night), its 25-minute budget inside the window (U12), and a quiet
+  Supervisor; otherwise it stays approved and waits until its approval
+  expires. It gets an update run of its own (trigger `fork_rebase`, the
+  latest plan copied with nothing to execute) with one job: kind
+  `fork_rebase`, entity `fork.<domain>`, from the fork's origin tag to the
+  Core version, naming the proposal and the approval.
+- U27. **Consume, then back up.** The job's creation consumes the approval
+  (single use) only while its binding, recomputed from the files on disk
+  and the live Core version, still matches; otherwise the job is
+  `skipped` and the proposal `stale`. Then the encrypted backup of U14 and
+  the baseline of U15; when either fails the job is `skipped` and the
+  proposal is open again ("approve it again").
+- U28. **Steps.** `pending` → `installing`: the executor refuses unless the
+  job consumed the approval and it still binds; it snapshots the files
+  the proposal replaces (bytes, mode and owner, root-only under
+  `/data/fork-rebase/<id>/old/`), then writes the approved bytes (each
+  checked against its recorded SHA-256) to a temporary file in the same
+  directory, fsyncs it, keeps the old file's mode and owner and renames it
+  over the old one; a link or non-regular file is never written through.
+  Then Core's config check (`POST /core/check`); a failure puts the old
+  files back (Core has not loaded the new ones) and the job `failed`. Then
+  one Core restart inside `approved_core_restart(<job>)`
+  ([selfguard.md](selfguard.md) G9), only when the files on disk are
+  exactly the approved result; then `verifying`. A refused or failed
+  restart, or Core not back within 15 minutes, is `rolling_back`. A job
+  found `installing` after a daemon restart is `rolling_back` (what is on
+  disk is unknown).
+- U29. **Verify.** The settle and comparison of U18 (the access-hardware
+  rules included: a watched lock or the alarm that goes down is a
+  regression) plus: more unavailable entities of the fork's domain than
+  before is a regression. Healthy: `succeeded`, the proposal `applied`,
+  then the files git already tracks under `custom_components/<domain>/`
+  are committed with the plumbing (`commit_files`, `chore(custom-components):
+  rebase <domain> onto core <version>`) and pushed when `limits.git_push`
+  is on; untracked files, or git off, are not committed (said on the
+  item). A commit failure never undoes the rebase.
+- U30. **Rollback.** `rolling_back` restores the snapshot (only from a
+  snapshot whose files match their own SHA-256s), restarts Core inside a
+  new scope for the same job, and settles again: healthy is
+  `rolled_back` and the proposal `rolled_back`; a failed restore or
+  restart, or health still worse, is `rollback_failed`, which pauses
+  automatic updates (U20) and keeps the snapshot. Every outcome but
+  success puts the proposal's item in Needs you with an `ack` need and
+  the item book pushes it (`rollback_failed` urgent).
+- U31. **Never otherwise.** A `fork_rebase` job is never installed or
+  rolled back by the update executors (`_check_job` refuses its kind and
+  entity), and the fork executors refuse any other job, an entity other
+  than `fork.<domain>` for the job's own domain, a missing proposal id, or
+  a domain that names the agent (`self_path`). `fork.apply` is
+  daemon-internal ([capabilities.md](capabilities.md) K3), tier APPROVE,
+  and `capabilities.never` can refuse it.
+

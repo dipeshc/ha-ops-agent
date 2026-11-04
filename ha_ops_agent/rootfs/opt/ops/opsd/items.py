@@ -53,9 +53,9 @@ from datetime import UTC, datetime, time, timedelta, tzinfo
 from functools import partial
 from typing import Any
 
-from opsd import dashboards
+from opsd import dashboards, forkrebase
 from opsd import maintenance as maint
-from opsd.approvals import LIVE, approvable, dashboard_subject, is_change, is_dashboard
+from opsd.approvals import LIVE, approvable, dashboard_subject, fork_subject, is_change, is_dashboard, is_fork
 from opsd.changes import UNCLEAN_KEY, diff_complete
 from opsd.channels import BudgetClass, Message
 from opsd.conversation import clean_text, fence
@@ -85,7 +85,7 @@ ACTORS = ("you", "daemon", "agent")
 ITEM_ID_RE = re.compile(r"[a-z]-[0-9a-z]{1,40}")
 ACTION_RE = re.compile(r"[a-z_]{1,32}")
 _PREFIX = {"updates": "u", "window": "w", "change": "p", "fact": "p", "task": "r", "health": "c", "activity": "a",
-           "maint": "m"}  # fmt: skip
+           "maint": "m", "fork": "p"}  # fmt: skip
 KINDS = {"core": "Core update", "addon": "Add-on update", "hacs": "HACS update", "firmware": "Firmware update",
          "os": "Operating system update"}  # fmt: skip
 USUAL_S = {"core": 600, "addon": 240, "hacs": 120, "firmware": 600, "os": 900}
@@ -352,11 +352,12 @@ class Sources:
         runs = store.recent_update_runs(limit=1)
         latest = runs[0] if runs else None
         plan = {str(i.get("entity_id")): i for i in (latest or {}).get("plan", []) if isinstance(i, dict)}
-        jobs = store.recent_update_jobs(since=now - JOBS_SINCE)
+        # A fork rebase job is its proposal's item (`Composer.fork`), never an update item.
+        jobs = [j for j in store.recent_update_jobs(since=now - JOBS_SINCE) if j.kind != forkrebase.JOB_KIND]
         live: dict[str, dict[str, Any]] = {}
         decided: dict[str, dict[str, Any]] = {}
         for found in store.approvals(limit=200):  # newest first
-            if is_change(found) or is_dashboard(found):
+            if is_change(found) or is_dashboard(found) or is_fork(found):
                 continue
             (live if found["state"] in LIVE else decided).setdefault(str(found["subject"]), found)
         return cls(latest=latest, plan=plan, plan_at=_parse((latest or {}).get("created_at")), jobs=jobs,
@@ -673,9 +674,11 @@ class Composer:
             return None
         state = str(run.get("state"))
         day = str(run.get("window_day") or "")
-        title = {"window": f"Update night {day}", "reboot": f"Approved reboot {day}"}.get(
-            str(run.get("trigger")), f"Approved update run {day}"
-        )
+        title = {
+            "window": f"Update night {day}",
+            "reboot": f"Approved reboot {day}",
+            "fork_rebase": f"Approved fork rebase {day}",
+        }.get(str(run.get("trigger")), f"Approved update run {day}")
         key = window_key(int(run["id"]))
         spec = Spec(key=key, kind="window", title=title, state="running", kicker="Update window",
                     ref=f"#{run['id']}", source={"run": int(run["id"])}, created=str(run.get("created_at") or ""),
@@ -815,6 +818,106 @@ class Composer:
                 spec.since = str(row["updated_at"])
             case "expired":
                 spec.state, spec.gist, spec.since = "expired", "not applied in time", str(row["updated_at"])
+            case _:
+                return None
+        return spec
+
+    # ------------------------------------------------------------ fork rebases
+
+    def fork(self, record: Mapping[str, Any]) -> Spec | None:
+        """A fork rebase proposal (`opsd.forkrebase`): the full diff, the hunks kept, the Core version; it asks for
+        the admin's approval, then runs as an update job (backup, write, restart, verify, rollback)."""
+        if not forkrebase.valid_record(record):
+            return None
+        pid, domain, core = str(record["id"]), str(record["domain"]), str(record["core"])
+        key = f"fork:{pid}"
+        files = sorted(record.get("files") or {})
+        spec = Spec(key=key, kind="proposal", title=f"Rebase {domain} onto Home Assistant Core {core}",
+                    state="proposed", kicker="Rebase onto Core", created=str(record.get("created_at") or ""),
+                    as_of=str(record.get("updated_at") or ""), source={"fork": pid})  # fmt: skip
+        spec.change = {"diff": str(record.get("diff") or ""),
+                       "files": [f"custom_components/{domain}/{n}" for n in files],
+                       "shown": [str(record.get("result") or "")]}  # fmt: skip
+        hunks = [h for h in record.get("hunks") or [] if isinstance(h, dict)]
+        kept = [f"{h.get('id')} (+{h.get('added')} -{h.get('removed')})" for h in hunks if h.get("kept")]
+        dropped = [str(h.get("id")) for h in hunks if not h.get("kept")]
+        facts = [("Core version", f"{core} (the version running now; each file checked against GitHub's blob SHA)"),
+                 ("Fork origin", f"Home Assistant Core {record.get('origin')} (closest to the fork's files)"),
+                 ("Fork changes kept", ", ".join(kept) or "none"),
+                 ("Fork changes dropped", ", ".join(dropped) or "none"),
+                 ("Files rebased", ", ".join(files))]  # fmt: skip
+        if record.get("unchanged"):
+            facts.append(("Left as they are", ", ".join(str(n) for n in record["unchanged"])))
+        spec.facts = [{"label": label, "value": clean_text(value, 600), "at": record.get("created_at")}
+                      for label, value in facts]  # fmt: skip
+        if record.get("kept_text"):
+            facts_text = f"The kept changes, as the daemon applies them:\n{record['kept_text']}"
+            spec.facts.append({"label": "Kept changes", "value": clean_text(facts_text, 600),
+                               "at": record.get("created_at")})  # fmt: skip
+        # The proposer's reason is model text: data under `agent`, never the need or a fact.
+        spec.agent = {"text": clean_text(str(record.get("reason") or ""), 300), "sources": ["core-compare"],
+                      "not_read": [], "run_id": record.get("run_id")}  # fmt: skip
+        spec.about = (f"The daemon built these files from Home Assistant Core {core} and the fork's changes listed as"
+                      " kept; the agent supplied no file content. Approved, it runs as an update job: an encrypted"
+                      " backup, the old files kept, Core's config check, a Core restart, the health check, and the"
+                      " old files back with a second restart if anything gets worse.")  # fmt: skip
+        spec.source["push_title"] = "Rebase onto Core"
+        detail = clean_text(str(record.get("detail") or ""), 200)
+        job = self.store.update_job(int(record["job"])) if isinstance(record.get("job"), int) else None
+        approval = next((a for a in self.store.approvals(states=LIVE, limit=200)
+                         if a["subject"] == fork_subject(pid)), None)  # fmt: skip
+        match str(record.get("state")):
+            case "open":
+                if approval is not None and approval["state"] == "approved":
+                    when = "now" if approval["run_when"] == "now" else f"in the update window at {self.ctx.window}"
+                    spec.state, spec.gist = "scheduled", f"approved; runs {when}"
+                    if self.ctx.gate:
+                        spec.gist += f" (waits: {clean_text(self.ctx.gate, 120)})"
+                    spec.when = None if approval["run_when"] == "now" else self._window_at()
+                    spec.actor, spec.event = "you", "Approved by you"
+                    spec.actions = [act("withdraw", "Withdraw approval", "text")]
+                    spec.source["approval"] = approval["id"]
+                    return spec
+                if not self.ctx.acting:
+                    spec.gist = "observe mode: it can be approved once the agent acts"
+                    spec.actions = [act("reject", "Reject", "text")]
+                    return spec
+                text = (f"Rebase {domain} onto Home Assistant Core {core}, keeping {len(kept)} of the fork's"
+                        f" {len(hunks)} changes. It runs in the update window (or now) with a backup, a Core restart,"
+                        " a health check and automatic rollback.")  # fmt: skip
+                spec.gist = f"waiting for your approval{f' ({detail})' if detail else ''}"
+                secondary = [act("approve_rebase_now", "Rebase now"), act("reject", "Reject", "text")]
+                spec.need = need("approval", text, act("approve_rebase", "Rebase tonight"), secondary)
+                spec.state, spec.since = "waiting", str(record.get("created_at") or "")
+                if approval is not None:
+                    spec.source["approval"] = approval["id"]
+            case "applying":
+                step = {"pending": 0, "installing": 1, "verifying": 3, "rolling_back": 3}.get(
+                    job.state if job else "", 0
+                )
+                spec.state, spec.gist = "running", clean_text(job.detail if job else "starting", 200) or "running"
+                spec.phase = {"names": ["Backup", "Write", "Restart", "Verify"], "current": step,
+                              "started_at": job.started_at if job else None, "usual_s": 900}  # fmt: skip
+            case "applied":
+                spec.state, spec.gist, spec.since = "done", detail or "applied", str(record.get("updated_at") or "")
+            case "rolled_back" | "failed":
+                spec.state, spec.since = "failed", str(record.get("updated_at") or "")
+                token = f"fork:{pid}:{record.get('updated_at')}"
+                spec.gist = detail or str(record["state"]).replace("_", " ")
+                if not acked(self.store, key, token):
+                    hard = job is not None and job.state == "rollback_failed"
+                    text = (f"The rebase of {domain} did not stay: {detail}. "
+                            + ("Automatic updates are paused; check the integration and restore the backup if"
+                               " needed." if hard else "The fork's own files are back."))  # fmt: skip
+                    spec.need = need("ack", text, act("ack", "OK"))
+                    spec.source["ack"] = token
+                    spec.urgent = hard
+            case "rejected":
+                spec.state, spec.gist, spec.actor = "cancelled", "rejected", "you"
+                spec.since = str(record.get("updated_at") or "")
+            case "stale":
+                spec.state, spec.gist = "expired", detail or "the fork or Core changed; no longer applies"
+                spec.since = str(record.get("updated_at") or "")
             case _:
                 return None
         return spec
@@ -1182,10 +1285,13 @@ class ItemBook:
         facts: set[int] = set()
         tasks: set[int] = set()
         maintenance = False
+        forks = False
         for kind, ref in touched:
             if kind == "job":
                 job = self.store.update_job(int(ref))
-                if job is not None and updates is not None:
+                if job is not None and job.kind == forkrebase.JOB_KIND:
+                    forks = True
+                elif job is not None and updates is not None:
                     updates.add(f"{job.entity_id}@{job.to_version}")
                 if job is not None:
                     runs.add(job.run_id)
@@ -1199,6 +1305,8 @@ class ItemBook:
                     changes.add(int(subject.split(":")[1]))
                 elif subject.startswith("dashboard:"):
                     maintenance = True
+                elif subject.startswith("fork_rebase:"):
+                    forks = True
                 elif updates is not None and "@" in subject:
                     updates.add(subject.removeprefix(REBOOT_SUBJECT))
             elif kind == "change":
@@ -1228,7 +1336,9 @@ class ItemBook:
                     changes.add(int(key.rsplit(":", 1)[1]))
                 elif key.startswith((f"{ACK_KEY}maint:", _MAINTENANCE_STATE)):
                     maintenance = True
-        if not (updates is None or updates or runs or changes or facts or tasks or maintenance):
+                elif key.startswith((f"{ACK_KEY}fork:", forkrebase.PROPOSAL_KEY)):
+                    forks = True
+        if not (updates is None or updates or runs or changes or facts or tasks or maintenance or forks):
             return
         composer = self._composer()
         if updates is None or updates:
@@ -1243,6 +1353,14 @@ class ItemBook:
             self._safely(f"task:{task_id}", partial(self._task, composer, task_id))
         if maintenance:
             self._safely("maint", partial(self._maintenance, composer))
+        if forks:
+            self._safely("fork", partial(self._forks, composer))
+
+    def _forks(self, composer: Composer) -> None:
+        for record in forkrebase.proposals(self.store):
+            spec = composer.fork(record)
+            if spec is not None:
+                self._write(spec)
 
     @staticmethod
     def _safely(what: str, write: Callable[[], None]) -> None:
@@ -1393,6 +1511,7 @@ class ItemBook:
             for run in self.store.recent_update_runs(limit=30):
                 self._safely(f"window:{run['id']}", partial(self._window, composer, int(run["id"])))
             self._safely("maint", partial(self._maintenance, composer))
+            self._safely("fork", partial(self._forks, composer))
             self._safely("health", partial(self._health, composer))
             for record in self.store.items_all(open_only=True, prefix="change:"):
                 ref = (record.get("source") or {}).get("change")
@@ -1418,6 +1537,8 @@ class ItemBook:
                     self._safely("health", partial(self._health, composer))
                 if any(str(r["key"]).startswith("maint:") for r in due):
                     self._safely("maint", partial(self._maintenance, composer))
+                if any(str(r["key"]).startswith("fork:") for r in due):
+                    self._safely("fork", partial(self._forks, composer))
                 for record in due:
                     if str(record["key"]).startswith("change:"):
                         change_id = int(str(record["key"]).removeprefix("change:"))

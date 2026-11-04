@@ -53,6 +53,8 @@ SUPPRESS_VERIFIER_RE = re.compile(r"[a-z_]{1,40}")
 SUPPRESS_VALUE_RE = re.compile(r"[a-z0-9_.]{1,140}")
 # An update entity, or `backup` ("Back up now").
 APPROVAL_SUBJECT_RE = re.compile(r"update\.[a-z0-9_]{1,128}|backup")
+# Hunk ids of a fork's own changes (opsd.forkrebase.KEEP_RE), or `none`.
+FORK_KEEP_RE = re.compile(r"none|[A-Za-z0-9_.-]{1,64}#[1-9][0-9]{0,2}(?:,[A-Za-z0-9_.-]{1,64}#[1-9][0-9]{0,2}){0,39}")
 AT_RE = re.compile(r"\+\d{1,4}[mhd]|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 _VERB_RE = re.compile(r"[a-z][a-z0-9-]{0,30}")
 _CAP_NAME_RE = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+")
@@ -246,6 +248,12 @@ REGISTRY: tuple[Capability, ...] = (
         "opsd.coresource:cmd_core_compare",
         {
             "domain": Arg(str, None, pattern=SLUG_RE, positional=True, help="custom integration domain, e.g. acme"),
+            "fork": Arg(
+                bool,
+                False,
+                help="also find the Core release the fork was copied from and number its own changes for"
+                " propose-rebase --keep",
+            ),
         },
         quota=Quota(per_run=3, per_day=12),
         validator="opsd.coresource:validate_compare",
@@ -488,6 +496,28 @@ REGISTRY: tuple[Capability, ...] = (
         validator="opsd.house.suppress:validate_suppression",
         requires=frozenset({"git", "suppress"}),
     ),
+    # A fork rebase: the AI names the fork, the reason and which of the fork's own changes to keep (hunk ids from
+    # `core-compare --fork`); it never supplies file content. The daemon builds the files from Core's source and the
+    # fork (opsd.forkrebase) and records a proposal; applying it is `fork.apply`, inside the update pipeline only.
+    Capability(
+        "fork.propose",
+        "propose-rebase",
+        "propose rebasing a custom integration that forks a Core one onto the installed Core version, keeping only"
+        " the fork's own changes you name (the admin approves it; it is applied in the update window)",
+        "opsd.forkrebase:exec_propose",
+        {
+            "domain": Arg(str, None, pattern=SLUG_RE, positional=True, help="the fork's domain, e.g. acme_fan"),
+            "keep": Arg(
+                str, None, pattern=FORK_KEEP_RE, help="hunk ids from core-compare --fork (fan.py#2,...) or none"
+            ),
+            "reason": Arg(str, None, pattern=TEXT_RE, help="why the fork needs the rebase"),
+        },
+        effects=frozenset({Effect.PROPOSE}),
+        origins=frozenset({Origin.ADMIN, Origin.ADMIN_CHAT, Origin.AGENT_SELF}),
+        quota=Quota(per_run=1, per_day=3),
+        validator="opsd.forkrebase:validate_propose",
+        refund_refused=True,
+    ),
     Capability(
         "change.apply",
         "change-apply",
@@ -516,6 +546,18 @@ REGISTRY: tuple[Capability, ...] = (
         "dashboard-save",
         "save one storage dashboard as the approved migration plan shows it",
         "opsd.dashboards:exec_internal",
+        tier=PolicyTier.APPROVE,
+        effects=frozenset({Effect.MUTATE_HA}),
+        origins=frozenset({Origin.AGENT_SELF}),
+        internal=True,
+    ),
+    # Writes an approved fork rebase's files and restarts Core, as a job of the update pipeline (opsd.updates,
+    # opsd.updexec): approval-only and daemon-internal.
+    Capability(
+        "fork.apply",
+        "fork-apply",
+        "write an approved fork rebase into custom_components and restart Core, inside the update pipeline",
+        "opsd.forkrebase:exec_internal",
         tier=PolicyTier.APPROVE,
         effects=frozenset({Effect.MUTATE_HA}),
         origins=frozenset({Origin.AGENT_SELF}),

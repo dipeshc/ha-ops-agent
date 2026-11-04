@@ -74,8 +74,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
 
-from opsd import proposals, updatefix
-from opsd.approvals import ApprovalError, Approvals, approvable, is_reboot
+from opsd import forkrebase, proposals, updatefix
+from opsd.approvals import ApprovalError, Approvals, approvable, is_fork, is_reboot
 from opsd.backups import wait_for_backup
 from opsd.baseline import honoured_expected
 from opsd.capabilities import Args
@@ -103,7 +103,8 @@ WINDOW_MAX = timedelta(minutes=90)
 # Nothing starts this close to Core's next automatic backup.
 AUTO_BACKUP_MARGIN = timedelta(minutes=20)
 JOB_BUDGET = {"core": timedelta(minutes=30), "addon": timedelta(minutes=15), "hacs": timedelta(minutes=15),
-              "firmware": timedelta(minutes=20), "os": timedelta(minutes=40)}  # fmt: skip
+              "firmware": timedelta(minutes=20), "os": timedelta(minutes=40),
+              forkrebase.JOB_KIND: timedelta(minutes=25)}  # fmt: skip
 INSTALL_TIMEOUT = {"core": timedelta(minutes=35), "addon": timedelta(minutes=20), "hacs": timedelta(minutes=15),
                    "firmware": timedelta(minutes=25), "os": timedelta(minutes=45)}  # fmt: skip
 BACKUP_TIMEOUT = timedelta(minutes=40)
@@ -496,8 +497,13 @@ class UpdateManager:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         approvals: Approvals | None = None,
+        forks: forkrebase.ForkFiles | None = None,
+        commit_fork: Callable[[Mapping[str, Any], Mapping[str, bytes]], Awaitable[str]] | None = None,
     ) -> None:
         self.store = store
+        # Approved fork rebases (`opsd.forkrebase`): their files, and the git commit after a good one; None: off.
+        self._forks = forks
+        self._commit_fork = commit_fork
         self.approvals = approvals or Approvals(store, clock=clock)
         self.executors = executors
         self.ops = executors.ops
@@ -725,8 +731,11 @@ class UpdateManager:
                 return {"result": "resumed"}
             result = await self._run_window_locked(trigger)
             if trigger == "window" and result.get("result") != "already_ran":
-                # After tonight's plan and installs, so the reboot always comes last.
+                await self._approved_rebases(now_only=False)
+                # After tonight's plan, installs and rebases, so the reboot always comes last.
                 await self._approved_reboots()
+            elif trigger == "approved":
+                await self._approved_rebases(now_only=True)
             return result
 
     async def refresh(self) -> dict[str, Any]:
@@ -1325,6 +1334,9 @@ class UpdateManager:
         )
 
     async def _step(self, ctx: RunCtx, job: UpdateJob) -> UpdateJob:
+        if job.kind == forkrebase.JOB_KIND:
+            await self._fork_step(ctx, job)
+            return self._stepped(job)
         match job.state:
             case "pending":
                 await self._start(ctx, job)
@@ -1340,6 +1352,9 @@ class UpdateManager:
             case _:
                 self.store.transition_job(job.id, expect=(job.state,), to="failed", now=self._clock(),
                                           detail=f"unknown state {job.state}")  # fmt: skip
+        return self._stepped(job)
+
+    def _stepped(self, job: UpdateJob) -> UpdateJob:
         fresh = self.store.update_job(job.id)
         if fresh is None or fresh == job:
             # No transition happened (a lost compare-and-set): never loop.
@@ -1891,6 +1906,264 @@ class UpdateManager:
         # update asks for approval again.
         self._note("Update night", summary, item=f"window:{ctx.run_id}")
         self._publish()
+
+    # ------------------------------------------------------- fork rebases
+
+    async def _approved_rebases(self, *, now_only: bool) -> None:
+        """Each approved fork rebase (`opsd.forkrebase`) gets an update run of its own, after the night's updates
+        (or at once for "now"): the gate, the window, a quiet Supervisor, the job consuming its approval, an
+        encrypted backup, the health before it, then the job's steps (`_fork_step`)."""
+        if self._forks is None:
+            return
+        for found in self.store.approvals(states=("approved",), limit=50):
+            if not is_fork(found) or (now_only and found["run_when"] != "now"):
+                continue
+            try:
+                await self._rebase(found, now_only=now_only)
+            except (StoreError, sqlite3.Error, OSError, ValueError) as err:
+                _LOGGER.error("fork rebase not started", extra={"error": str(err)[:200]})
+
+    async def fork_binding(self, proposal: str) -> dict[str, Any] | None:
+        """The fork proposal's binding as it is now: the files on disk and the live Core version."""
+        forks = self._forks
+        if forks is None:
+            return None
+        try:
+            core = (await self.ops.core_info()).get("version")
+        except ApiError, OSError, ValueError:
+            return None
+        return await asyncio.to_thread(forkrebase.binding_now, self.store, forks.data, forks.custom, proposal,
+                                       str(core) if core else None)  # fmt: skip
+
+    async def _rebase(self, found: Mapping[str, Any], *, now_only: bool) -> None:
+        binding = (found.get("plan") or {}).get("binding") or {}
+        proposal = str(binding.get("proposal") or "")
+        record = forkrebase.load(self.store, proposal)
+        now = self._clock()
+        if record is None or record["state"] != "open":
+            self.store.decide_approval(str(found["id"]), expect=("approved",), to="void", now=now,
+                                       detail="the rebase proposal is no longer open")  # fmt: skip
+            return
+        start = now if now_only else self._window_start(now)
+        day = start.astimezone(self._tz()).date().isoformat()
+        deadline = await self._deadline(start)
+        why = self.gate()
+        if why is None and self._clock() + JOB_BUDGET[forkrebase.JOB_KIND] > deadline:
+            why = "the update window is over"
+        why = why or await self._wait_quiet(deadline)
+        if why is not None:
+            # Stays approved (Scheduled) until it can run or the approval expires.
+            self._audit("fork.rebase", outcome="waiting", detail=why, proposal=proposal)
+            return
+        latest = next(iter(self.store.recent_update_runs(limit=1)), None)
+        # The night's plan is kept as it was (nothing in it runs), so the update items keep reading it.
+        plan = [i | {"execute": False} for i in (latest or {}).get("plan") or [] if isinstance(i, dict)]
+        run_id = self.store.start_update_run(window_day=day, trigger="fork_rebase", mode="act", plan=plan,
+                                             now=self._clock())  # fmt: skip
+        if run_id is None:
+            return
+        spec = {"entity_id": forkrebase.entity_of(str(record["domain"])), "kind": forkrebase.JOB_KIND,
+                "title": f"{record['domain']} rebased onto Core {record['core']}"[:120],
+                "from_version": str(record["origin"]), "to_version": str(record["core"]),
+                "target": {"proposal": proposal, "domain": record["domain"], "approval": found["id"]}}  # fmt: skip
+        [job] = self.store.add_update_jobs(run_id, [spec], now=self._clock())
+        ctx = RunCtx(run_id=run_id, day=day, deadline=deadline, plan={}, backup={})
+        if not self.approvals.consume_fork(str(found["id"]), job.id, await self.fork_binding(proposal)):
+            self._move(job, "skipped", "the approval no longer matches the fork, Core or the proposal")
+            forkrebase.move(self.store, proposal, expect=("open",), to="stale", now=self._clock(),
+                            detail="the fork, Core or the proposal changed since it was approved")  # fmt: skip
+            await self._finish(ctx)
+            return
+        forkrebase.move(self.store, proposal, expect=("open",), to="applying", now=self._clock(), job=job.id)
+        self._audit("fork.rebase", outcome="started", proposal=proposal, run=run_id, job=job.id)
+        self._publish()
+        if not self.store.set_update_run(run_id, now=self._clock(), state="backing_up", expect=("planned",)):
+            return
+        if not await self._backup(ctx) or not await self._baseline(ctx):
+            fresh = self.store.update_job(job.id) or job
+            forkrebase.move(self.store, proposal, expect=("applying",), to="open", now=self._clock(),
+                            detail=f"not applied: {fresh.detail or 'the backup or the health check failed'};"
+                                   " approve it again")  # fmt: skip
+            return
+        await self._run_jobs(ctx)
+
+    async def _fork_step(self, ctx: RunCtx, job: UpdateJob) -> None:
+        record = forkrebase.load(self.store, str(job.target.get("proposal") or ""))
+        if record is None or self._forks is None:
+            self._move(job, "failed", "its rebase proposal is gone; nothing was written")
+            return
+        match job.state:
+            case "pending":
+                await self._fork_install(ctx, job, record)
+            case "installing":
+                # Interrupted while writing: what is on disk is unknown, so the fork is restored.
+                self._move(job, "rolling_back", "interrupted while writing the files; restoring the fork")
+            case "verifying":
+                await self._fork_verify(ctx, job, record)
+            case "rolling_back":
+                await self._fork_rollback(ctx, job, record)
+            case _:
+                self._move(job, "failed", f"unknown state {job.state}")
+
+    async def _fork_proven(self, job: UpdateJob, record: Mapping[str, Any], *, written: bool) -> bool:
+        """The job consumed its approval and it still binds: before writing, the fork's files and Core as approved;
+        after writing, the approved result is what is on disk."""
+        forks = self._forks
+        approval = job.target.get("approval")
+        if forks is None or not isinstance(approval, str):
+            return False
+        if not written:
+            return self.approvals.proves_fork(approval, job, await self.fork_binding(str(record["id"])))
+        found = self.store.approval(approval) or {}
+        bound = dict((found.get("plan") or {}).get("binding") or {})
+        on_disk = await asyncio.to_thread(forkrebase.current_files, forks.custom, record)
+        if on_disk is None:
+            return False
+        # The approval as it was given (its own hash checks it was not edited), and on disk exactly its result.
+        return self.approvals.proves_fork(approval, job, bound) and bound.get("result") == record[
+            "result"
+        ] == forkrebase.files_hash(on_disk)
+
+    async def _fork_install(self, ctx: RunCtx, job: UpdateJob, record: Mapping[str, Any]) -> None:
+        forks = self._forks
+        if forks is None:
+            return
+        if not self.store.transition_job(job.id, expect=("pending",), to="installing", now=self._clock(),
+                                         detail="writing the rebased files", count_install=True):  # fmt: skip
+            return
+        job = self.store.update_job(job.id) or job
+        files = await asyncio.to_thread(forkrebase.new_files, forks.data, record)
+        proven = files is not None and await self._fork_proven(job, record, written=False)
+
+        def write() -> None:
+            if files is None:
+                raise ValueError("the proposal's rebased files are missing or changed")
+            forks.snapshot(record)
+            forks.write(record, files)
+
+        try:
+            await self.executors.fork_apply(job, proven=proven, write=write)
+        except ExecutorRefused as err:
+            if forks.saved(record) is not None and not await asyncio.to_thread(forks.restored, record):
+                # Something was written: put the fork back and restart.
+                self._move(job, "rolling_back", f"writing failed: {err}")
+                return
+            await self._fork_failed(ctx, job, record, f"nothing was written: {err}")
+            return
+        try:
+            await self.executors.fork_check(job)
+        except ExecutorRefused as err:
+            # Core has not loaded the new files: putting the old ones back is enough.
+            try:
+                await self.executors.fork_restore(job, lambda: forks.restore(record))
+            except ExecutorRefused as again:
+                await self._fork_rollback_failed(ctx, job, record, f"{err}; and the restore failed: {again}")
+                return
+            await self._fork_failed(ctx, job, record, f"{err}; the fork's files were restored")
+            return
+        try:
+            await self.executors.fork_restart(job, proven=await self._fork_proven(job, record, written=True),
+                                              purpose="apply")  # fmt: skip
+        except ExecutorRefused as err:
+            self._move(job, "rolling_back", f"the restart failed: {err}")
+            return
+        if not await self._wait_core_up():
+            self._move(job, "rolling_back", "Core did not come back after the restart")
+            return
+        self._move(job, "verifying", "rebased files written; Core restarted")
+
+    async def _fork_verify(self, ctx: RunCtx, job: UpdateJob, record: Mapping[str, Any]) -> None:
+        run = self.store.update_run(ctx.run_id) or {}
+        before = HealthPoint.from_json(run.get("before") or {})
+        result, after = await self._settle(job, before)
+        regressions = list(result.regressions)
+        domain = str(record["domain"])
+        was, now = before.custom.get(domain) or {}, (after.custom.get(domain) if after else None) or {}
+        if after is not None and now.get("unavailable", 0) > was.get("unavailable", 0):
+            regressions.append(f"{domain}: entities went unavailable")
+        if regressions:
+            self._move(job, "rolling_back", "health regressed: " + "; ".join(regressions[:3]),
+                       regressions=regressions)  # fmt: skip
+            return
+        self._move(job, "succeeded", "; ".join(result.notes[:3]) or "healthy")
+        if after is not None:
+            self.store.set_update_run(ctx.run_id, now=self._clock(), before=after.to_json())
+        committed = ""
+        forks = self._forks
+        files = await asyncio.to_thread(forkrebase.new_files, forks.data, record) if forks is not None else None
+        if self._commit_fork is not None and files is not None:
+            try:
+                committed = await self._commit_fork(record, files)
+            except Exception as err:  # noqa: BLE001 - the rebase is applied; the commit is reported
+                committed = f"not committed: {clean_text(str(err), 120)}"
+        forkrebase.move(self.store, str(record["id"]), expect=("applying",), to="applied", now=self._clock(),
+                        detail=f"applied and healthy; {committed or 'not committed'}")  # fmt: skip
+        self._note(f"Fork rebased: {domain}", f"Rebased onto Core {record['core']}; health matches the check before"
+                   f" it. {committed}", item=f"fork:{record['id']}")  # fmt: skip
+
+    async def _fork_rollback(self, ctx: RunCtx, job: UpdateJob, record: Mapping[str, Any]) -> None:
+        forks = self._forks
+        if forks is None:
+            return
+        run = self.store.update_run(ctx.run_id) or {}
+        before = HealthPoint.from_json(run.get("before") or {})
+        if job.rollback_attempts == 0 and not self.store.transition_job(
+            job.id, expect=("rolling_back",), to="rolling_back", now=self._clock(), count_rollback=True
+        ):
+            return
+        try:
+            if forks.saved(record) is None:
+                raise ExecutorRefused("there is no snapshot of the fork's files")
+            await self.executors.fork_restore(job, lambda: forks.restore(record))
+            await self.executors.fork_restart(job, proven=False, purpose="restore")
+        except ExecutorRefused as err:
+            await self._fork_rollback_failed(ctx, job, record, f"restoring the fork failed: {err}")
+            return
+        result, _ = await self._settle(job, before)
+        if not result.healthy:
+            why = "still unhealthy after restoring the fork: " + "; ".join(result.regressions[:3])
+            await self._fork_rollback_failed(ctx, job, record, why)
+            return
+        fresh = self.store.update_job(job.id) or job
+        reasons = "; ".join((fresh.regressions or [fresh.detail or "the rebase failed"])[:2])
+        self._move(fresh, "rolled_back", f"restored the fork and restarted; health is back ({reasons})"[:300])
+        forkrebase.move(self.store, str(record["id"]), expect=("applying",), to="rolled_back", now=self._clock(),
+                        detail=f"rolled back: {reasons}")  # fmt: skip
+        await self._critical(
+            ctx,
+            "Ops Agent: fork rebase rolled back",
+            f"Rebasing {record['domain']} onto Core {record['core']} made things worse ({clean_text(reasons, 300)}),"
+            " so I put the fork's files back and restarted Core. Health is back to normal.",
+            item=f"fork:{record['id']}",
+        )
+
+    async def _fork_failed(self, ctx: RunCtx, job: UpdateJob, record: Mapping[str, Any], why: str) -> None:
+        """Nothing of the rebase is in effect (nothing written, or written and put back before any restart)."""
+        fresh = self.store.update_job(job.id) or job
+        self._move(fresh, "failed", why[:300])
+        forkrebase.move(self.store, str(record["id"]), expect=("applying",), to="failed", now=self._clock(),
+                        detail=why)  # fmt: skip
+        await self._critical(ctx, "Ops Agent: fork rebase not applied",
+                             f"Rebasing {record['domain']} onto Core {record['core']} did not go ahead:"
+                             f" {clean_text(why, 300)}. The fork is unchanged.",
+                             item=f"fork:{record['id']}")  # fmt: skip
+
+    async def _fork_rollback_failed(self, ctx: RunCtx, job: UpdateJob, record: Mapping[str, Any], why: str) -> None:
+        fresh = self.store.update_job(job.id) or job
+        self._move(fresh, "rollback_failed", why[:300])
+        forkrebase.move(self.store, str(record["id"]), expect=("applying",), to="failed", now=self._clock(),
+                        detail=why)  # fmt: skip
+        ctx.stop = f"stopped after the failed rollback of {fresh.title}"
+        self._stop_after_failure(ctx)
+        name = ctx.backup.get("name") or "the backup taken before it"
+        await self._critical(
+            ctx,
+            "Ops Agent: fork rebase rollback FAILED",
+            f"Rebasing {record['domain']} onto Core {record['core']} went wrong and I could not put it back:"
+            f" {clean_text(why, 250)}. Automatic updates are paused. The fork's old files are kept by the agent;"
+            f" restore {name} under Settings > System > Backups if the house is affected.",
+            item=f"fork:{record['id']}",
+        )
 
     # ---------------------------------------------------------- reconcile
 

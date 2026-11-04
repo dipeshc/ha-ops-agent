@@ -21,7 +21,7 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   `test_http_self_targets_are_refused`, `test_the_client_refuses_before_any_network`.
 - G2. Allowed POSTs: `/core/update` with `{"version": <non-empty>,
   "backup": false}`; `/store/addons/<slug>/update` with `{"backup": false}`
-  and a slug that is not the agent; `/core/check`, `/core/restart`,
+  and a slug that is not the agent; `/core/check`,
   `/core/api/config/core/check_config`,
   `/core/api/config/config_entries/entry/<id>/reload`,
   `/core/api/services/automation/reload`,
@@ -33,7 +33,8 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   switch only; `/core/api/services/notify/mobile_app_<x>`;
   `/core/api/states/sensor.ops_agent[_x]`. Never: the agent's own add-on,
   the Supervisor, other add-ons' start/stop/install, backups and restores,
-  `hassio.*` services, Core stop, host reboot or shutdown outside G4. Tests
+  `hassio.*` services, Core stop, a Core restart outside G9, host reboot
+  or shutdown outside G4. Tests
   `test_ordinary_calls_still_pass`, `test_update_executor_calls_still_reach_the_supervisor`,
   `test_reload_and_check_config_still_reach_core`.
 - G3. **Self identity.** The slug `local_ha_ops_agent`, `self`, and any
@@ -109,3 +110,19 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   `test_the_scope_lets_exactly_one_save_of_its_own_dashboard_through`,
   `test_the_scope_is_never_opened_for_the_default_a_generated_or_a_malformed_dashboard`,
   `test_a_generated_dashboard_is_refused_even_with_a_forged_approval`.
+
+## Core restarts
+
+- G9. **Approved Core restart.** `POST /core/restart` with an empty body
+  passes only inside `approved_core_restart(job)`, a context-variable scope
+  like G4: single use, closed when the block ends, inherited only by tasks
+  and threads created inside it, opened only for a positive update job id.
+  Only `updexec.Executors` enters it: to load a HACS integration it
+  installed or rolled back (that job's own tier and audit), and for a fork
+  rebase job ([updates.md](updates.md) U28, U30): to load the approved files
+  (only when the job consumed its approval and the files on disk are the
+  approved result) or the restored ones. Nothing else ever restarts Core,
+  and the AI has no capability that does. Tests
+  `test_a_core_restart_passes_only_once_inside_its_job_scope`,
+  `test_the_selfguard_refuses_a_restart_outside_the_scope`.
+

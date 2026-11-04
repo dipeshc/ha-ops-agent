@@ -8,10 +8,13 @@ Assistant call passes through:
 
 - `check_http` in `SupervisorClient.request`. GET (and HEAD) are reads. Any other call must be one
   of the shapes in `_POST` below, by exact path (no query, no other spelling) and body: the update
-  pipeline (Core, add-on and HACS installs, Core's config check and restart), config entry and
+  pipeline (Core, add-on and HACS installs, Core's config check), config entry and
   automation/template reloads, the agent's own status sensors, its AI switch and the push to the
   admin. Nothing else: not the agent's add-on, the Supervisor, other add-ons, backups or restores,
   the `hassio` services, Core's stop or restart services, or any other state.
+- A Core restart: `POST /core/restart {}` only inside `approved_core_restart(<job>)`, which
+  `updexec.Executors` enters for one update job (a HACS integration it installed or rolled back, or an approved
+  fork rebase and its restore); single use, closed when the block ends. Never anywhere else.
 - The approved HAOS-update flow: `POST /os/update {"version"}` and `POST /host/reboot {}`
   (never `force`), each only inside `approved_os_flow(<that path>)`, which `updexec.Executors`
   enters after it verified the approval of that OS job; single use, closed when the block ends.
@@ -115,6 +118,57 @@ def approved_os_flow(path: str) -> Iterator[None]:
     finally:
         scope.close()
         _OS_FLOW.reset(token)
+
+
+CORE_RESTART_PATH = "/core/restart"
+
+
+class _RestartScope:
+    """One Core restart for one update job: single use, closed when its `with` block ends (like `_OsFlowScope`)."""
+
+    def __init__(self, job: int) -> None:
+        self.job = job
+        self._lock = threading.Lock()
+        self._open = True
+
+    def take(self) -> bool:
+        with self._lock:
+            if not self._open:
+                return False
+            self._open = False
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._open = False
+
+
+_RESTART: ContextVar[_RestartScope | None] = ContextVar("opsd_selfguard_core_restart", default=None)
+
+
+@contextlib.contextmanager
+def approved_core_restart(job: int) -> Iterator[None]:
+    """Let exactly one `POST /core/restart {}` through, for the calls made inside, on behalf of update job `job`.
+
+    Only `updexec.Executors` enters it: to load a HACS integration it installed or rolled back (the update rule's
+    own tier for that job), and for an approved fork rebase job (its consumed approval, re-proven) and its restore.
+    Nothing else ever restarts Core.
+    """
+    if not isinstance(job, int) or isinstance(job, bool) or job <= 0:
+        raise ValueError("a Core restart needs the update job it is for")
+    scope = _RestartScope(job)
+    token = _RESTART.set(scope)
+    try:
+        yield
+    finally:
+        scope.close()
+        _RESTART.reset(token)
+
+
+def _restart_allows(path: str, body: Any) -> bool:
+    scope = _RESTART.get()
+    plain = body is None or (isinstance(body, Mapping) and not body)
+    return scope is not None and path == CORE_RESTART_PATH and plain and scope.take()
 
 
 # Home Assistant's rule for a storage dashboard's url_path: lower case, with a hyphen. The default dashboard
@@ -255,7 +309,6 @@ _POST: tuple[tuple[re.Pattern[str], Callable[[re.Match[str], Any], bool]], ...] 
         (r"/core/update", _core_update),
         (r"/store/addons/([a-z0-9_]{1,64})/update", _addon_update),
         (r"/core/check", _empty),
-        (r"/core/restart", _empty),
         (r"/core/api/config/core/check_config", _empty),
         (r"/core/api/config/config_entries/entry/[A-Za-z0-9_-]{1,64}/reload", _empty),
         (r"/core/api/services/update/install", _one_update),
@@ -274,7 +327,7 @@ def check_http(method: str, path: str, body: Any = None) -> None:
     if verb in ("GET", "HEAD"):
         return
     if verb == "POST":
-        if _os_flow_allows(path, body):
+        if _os_flow_allows(path, body) or _restart_allows(path, body):
             return
         for pattern, ok in _POST:
             match = pattern.fullmatch(path)

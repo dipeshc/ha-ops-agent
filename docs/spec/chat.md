@@ -63,8 +63,11 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   A null reply in chat is a `no_reply` failed card; in a follow-up it means
   no push. Actions are not in the JSON: they are `opsctl` calls during the
   run (`remind`, `tasks`, `cancel`, `investigate`, `request-approval`,
-  `propose-change`, `propose-fact`). After the run the daemon attaches
-  cards for investigations and approval requests the run created.
+  `propose-change`, `propose-fact`, `propose-rebase`). After the run the
+  daemon attaches cards for investigations, approval requests and fork
+  rebase proposals the run created; a rebase card names the domain, the
+  Core version and how many of the fork's changes it keeps (daemon
+  records only) and points at the proposal's item ("Review on Home").
 - T8. **Sources** are built from the run's audit rows, never from model
   text: at most 6 named sources with one validated detail each, plus the
   refused verbs; a footer of at most 240 characters. Tests

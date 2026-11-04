@@ -58,6 +58,8 @@ NOT_STARTED = frozenset({"export_failed", "setup_failed"})
 # Reads that make the daemon fetch from the internet (opsd.coresource). Granted to the runs that answer or plan
 # for the admin (chat, investigate, the maintenance plan), never to triage.
 NETWORK_READS = frozenset({"ha.core_compare"})
+# Proposing a fork rebase (opsd.forkrebase): the same runs; the admin approves it, the update pipeline applies it.
+FORK_PROPOSALS = frozenset({"fork.propose"})
 READ_CAPABILITIES = frozenset(c.name for c in CAPABILITIES.values() if c.read_only) - NETWORK_READS
 
 
@@ -125,6 +127,7 @@ CHAT = Profile(
     schema_file="reply-result.schema.json",
     capabilities=READ_CAPABILITIES
     | NETWORK_READS
+    | FORK_PROPOSALS
     | TASK_CAPABILITIES
     | {
         "task.investigate",
@@ -160,6 +163,7 @@ INVESTIGATE = Profile(
     schema_file="investigate-result.schema.json",
     capabilities=READ_CAPABILITIES
     | NETWORK_READS
+    | FORK_PROPOSALS
     | {"task.list", "approval.request", "change.propose", "facts.propose", "suppress.propose", "integration.reload"},
     budget_class=BudgetClass.USER,
     settings=lambda options: RunSettings(
@@ -204,14 +208,15 @@ UPDATE_REVIEW = Profile(
     settings=lambda options: RunSettings(options.claude.model_standard, 6, min(0.5, options.limits.run_max_usd)),
 )
 
-# A plan for each new maintenance finding (opsd.maintenance) from its (fenced, untrusted) evidence. Its one
-# capability compares a custom integration with Core's (read-only): its answer is advice shown as the agent's
-# words, and the YAML or dashboard edits it suggests only become a proposal or a plan the admin approves.
+# A plan for each new maintenance finding (opsd.maintenance) from its (fenced, untrusted) evidence. It may compare
+# a custom integration with Core's (read-only) and propose a fork rebase (the admin approves it): its answer is
+# advice shown as the agent's words, and the YAML or dashboard edits it suggests only become a proposal or a plan
+# the admin approves.
 MAINTENANCE_PLAN = Profile(
     name="maintenance_plan",
     prompt_file="profiles/maintenance_plan.md",
     schema_file="maintenance-plan.schema.json",
-    capabilities=NETWORK_READS,
+    capabilities=NETWORK_READS | FORK_PROPOSALS,
     budget_class=BudgetClass.AGENT,
     settings=lambda options: RunSettings(options.claude.model_standard, 8, min(0.5, options.limits.run_max_usd)),
 )

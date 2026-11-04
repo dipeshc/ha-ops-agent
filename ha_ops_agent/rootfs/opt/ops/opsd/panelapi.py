@@ -522,6 +522,8 @@ class PanelHandlers:
             return await self._run("approve_change", {"approval": approval["id"]}, user)
         if key.startswith("maint:"):
             return await self._act_maintenance(found, action, user)
+        if key.startswith("fork:"):
+            return await self._act_fork(found, action, user)
         if key.startswith("fact:") and action == "dismiss":
             done = self._store.decide_fact(int(source.get("fact") or 0), "rejected", now=now)
             self._d.hub.publish("facts", None, {})
@@ -600,6 +602,21 @@ class PanelHandlers:
         else:
             done = False
         return (200, {}) if done else (409, {"error": "not_available", "message": "Not open any more."})
+
+    async def _act_fork(self, found: Mapping[str, Any], action: str, user: str) -> Result:
+        """A fork rebase proposal: approve it for the update window or now (the daemon re-checks the files on disk
+        and the live Core version against what the admin saw), or reject it."""
+        d = self._d
+        proposal = str((found.get("source") or {}).get("fork") or "")
+        if action == "reject":
+            done = d.reject_fork(proposal, user)
+            return (200, {}) if done else (409, {"error": "not_available", "message": "Not open any more."})
+        if action not in ("approve_rebase", "approve_rebase_now"):
+            return 409, {"error": "not_available", "message": "That action is not offered any more."}
+        shown = [str(x) for x in (found.get("change") or {}).get("shown") or []]
+        when = "now" if action == "approve_rebase_now" else "window"
+        approval = await d.request_fork(proposal, user, shown, when)
+        return await self._run("approve_fork", {"approval": approval["id"]}, user)
 
     def _remind_at(self, action: str, finding: str) -> datetime | None:
         """When a maintenance reminder fires: in 30 or 90 days, or 30 days before the finding's deadline."""

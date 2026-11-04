@@ -184,8 +184,15 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   live under `/data/snapshots`. Dashboard backups taken before a dashboard
   save live under `/data/maintenance/dashboards/<url_path>/` (directories
   0700, files 0600 written with `O_EXCL | O_NOFOLLOW`, the last 10 per
-  dashboard kept; [maintenance.md](maintenance.md) M22). Test
-  `test_jsonstore`.
+  dashboard kept; [maintenance.md](maintenance.md) M22). Home Assistant
+  Core's source for `core-compare` and fork rebases lives under
+  `/data/core-source/` (listings by tag, files by blob SHA;
+  [capabilities.md](capabilities.md) K14), and each fork rebase proposal's
+  rebased files and the snapshot of the files it replaced under
+  `/data/fork-rebase/<id>/` (`new/`, `old/`; [proposals.md](proposals.md)
+  C14); both root-only, directories 0700 and files 0600. Proposals
+  themselves are key-value records (`fork:proposal:<id>`); the store
+  schema is unchanged. Test `test_jsonstore`.
 - S8. `/data/run.lock` is an exclusive non-blocking `flock` (0600, holds
   the pid), released by the kernel on a crash. Test `test_run_lock`.
 - S9. Logs are one JSON object per line on stderr (`ts`, `level`, `logger`,

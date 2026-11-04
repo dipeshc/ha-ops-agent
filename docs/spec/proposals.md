@@ -186,3 +186,52 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   and within the readable set; diff and show output limited to readable
   paths, others counted as withheld; log at most 50 entries; 30-second
   timeout. Tests `test_githistory.py:51-150`.
+
+## Fork rebases
+
+- C11. **Proposing.** `fork.propose` (verb `propose-rebase <domain> --keep
+  <ids> --reason <text>`, 1 per run, 3 a day, refund on refusal; chat,
+  investigate and maintenance-plan runs only, never triage) records a
+  proposal to rebase a custom integration that forks a Core one onto the
+  installed Core version. The AI names only the domain, the reason and
+  which of the fork's own changes to keep: hunk ids `<file>#<n>` from
+  `opsctl core-compare <domain> --fork` ([capabilities.md](capabilities.md)
+  K14), or `none`. No argument carries file content. The domain must be a
+  custom integration on this install, never the agent (`self_path`), and
+  Core must have an integration of that name at the installed version.
+  Implementation `opsd/forkrebase.py`; tests `tests/test_forkrebase.py`.
+- C12. **The build** (daemon only). Base: Core's files for the installed
+  version, each checked against GitHub's blob SHA for that tag (K14). The
+  fork's origin: the newest tag among the installed one and the `.0`
+  releases of the last 18 months whose files differ least from the fork's
+  (changed lines; a fork file the tag lacks counts whole; a tie goes to the
+  newer tag). The fork's own changes: the unified-diff hunks (3 lines of
+  context) from the origin to the fork, numbered per file. Each kept hunk
+  is applied to the base by its exact origin lines and context, which must
+  occur exactly once, with no two hunks touching the same lines; anything
+  else refuses with the hunk id and the reason, never a guess. The result
+  covers the files the fork, the base and the origin all have; every other
+  fork file stays as it is and no file is added.
+- C13. **Content checks.** Every `.py` file parses (`ast.parse`);
+  `manifest.json` is a JSON object that keeps the fork's domain and gets
+  `version` set to the Core version (a custom integration needs one); no
+  import (`import x`, `from x import y`, as level, module and name) that
+  neither the base nor the fork has; a relative import names a module the
+  fork has and never leaves the integration; at most 1 MiB in all and
+  256 KiB per file. A result identical to the fork is refused ("already
+  matches").
+- C14. **The record.** A proposal is a store key-value record
+  (`fork:proposal:<16 hex>`, no schema change) plus its result's bytes
+  under `/data/fork-rebase/<id>/new/` (directories 0700, files 0600):
+  domain, Core version, origin tag, kept hunk ids, the reason (shown only
+  as the agent's text), each file's SHA-256 before and after, the result
+  and fork hashes, the hunks with their counts, the kept hunks' text
+  (fenced) and the diff from the fork as it is to the result (32 KiB at
+  most). States: `open`, `applying`, `applied`, `rolled_back`, `failed`,
+  `rejected`, `stale`. A new proposal for the same fork makes an open one
+  `stale`; the newest 20 are kept, and a finished one beyond them is
+  deleted with its files. It never writes the fork; applying is the update
+  pipeline's ([updates.md](updates.md) U26–U31), after the admin's
+  approval ([approvals.md](approvals.md) A18). Reject moves an open one to
+  `rejected` and voids its approval.
+

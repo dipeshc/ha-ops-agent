@@ -40,6 +40,12 @@ versions, state and finish time). The daemon uses it in the next update
 window only, and only while the job still waits for that reboot; the
 executor still requires the job's own update approval for the reboot call.
 
+A fork rebase (`kind: fork_rebase`, subject `fork_rebase:<proposal>`, `opsd.forkrebase`) uses the same request,
+single use and expiry, and runs in the next update window or, if the admin chose "now", at once, only through the
+update pipeline. Its `plan_hash` binds the proposal, the domain, the Core version, the fork's origin, the kept
+hunks, and the SHA-256 of the rebased files and of the fork's files as they are; it is recomputed from disk and the
+live Core version when the tap arrives, when the job consumes it and right before the files are written.
+
 A dashboard migration plan (`kind: dashboard`, subject `dashboard:<finding>`, `opsd.dashboards`) uses
 the same request, single use and expiry. Its `plan_hash` binds the finding, the dashboard's url_path,
 the SHA-256 of its JSON before and after the edit, and the edit itself; it is recomputed from the
@@ -112,9 +118,23 @@ def is_dashboard(found: Mapping[str, Any]) -> bool:
     return (found.get("plan") or {}).get("kind") == "dashboard"
 
 
+def is_fork(found: Mapping[str, Any]) -> bool:
+    return (found.get("plan") or {}).get("kind") == "fork_rebase"
+
+
 def is_update(found: Mapping[str, Any]) -> bool:
     """An update approval: none of the other kinds that share the records."""
-    return not (is_change(found) or is_reboot(found) or is_dashboard(found))
+    return not (is_change(found) or is_reboot(found) or is_dashboard(found) or is_fork(found))
+
+
+def fork_subject(proposal: str) -> str:
+    return f"fork_rebase:{proposal}"
+
+
+def fork_hash(binding: Mapping[str, Any], created_at: str) -> str:
+    canonical = json.dumps({"fork_rebase": dict(binding), "created_at": created_at}, sort_keys=True,
+                           separators=(",", ":"), default=str)  # fmt: skip
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def dashboard_subject(finding: str) -> str:
@@ -604,6 +624,94 @@ class Approvals:
                                         detail="the dashboard changed since the plan was approved")  # fmt: skip
             return False
         return self._store.decide_approval(approval_id, expect=("approved",), to="used", now=now)
+
+    # ------------------------------------------------------ fork rebases
+
+    def request_fork(self, binding: Mapping[str, Any], *, title: str, user: str, when: str) -> dict[str, Any]:
+        """A pending approval for one fork rebase proposal (`confirm_fork` approves it); `when`: window or now."""
+        if when not in WHEN:
+            raise ApprovalError("when must be window or now")
+        if len(self._store.approvals(states=("pending",), limit=MAX_PENDING + 1)) >= MAX_PENDING:
+            raise ApprovalError("too many approvals waiting for confirmation")
+        now = self._clock()
+        target = fork_subject(str(binding["proposal"]))
+        for old in self._store.approvals(states=LIVE, limit=200):
+            if old["subject"] == target:
+                self._store.decide_approval(old["id"], expect=LIVE, to="void", now=now, detail="superseded")
+        approval_id = secrets.token_hex(16)
+        created = now.astimezone(UTC).isoformat(timespec="seconds")
+        plan = {"kind": "fork_rebase", "binding": dict(binding), "title": title[:120]}
+        self._store.create_approval(approval_id=approval_id, plan=plan, plan_hash=fork_hash(binding, created),
+                                    subject=target, requested_by=user, run_when=when, now=now,
+                                    expires_at=now + APPROVAL_TTL)  # fmt: skip
+        found = self._store.approval(approval_id)
+        if found is None:
+            raise ApprovalError("the approval could not be saved")
+        self._audit("requested", f"panel:{user[:64]}", found)
+        return found
+
+    @staticmethod
+    def fork_bound(found: Mapping[str, Any], binding_now: Mapping[str, Any] | None) -> bool:
+        """The approval's hash still matches the binding recomputed from the files on disk and the live Core."""
+        if not is_fork(found) or binding_now is None:
+            return False
+        recomputed = fork_hash(binding_now, str(found["created_at"]))
+        return hmac.compare_digest(recomputed, str(found["plan_hash"]))
+
+    def confirm_fork(self, approval_id: str, *, user: str, binding_now: Mapping[str, Any] | None) -> str:
+        """The admin's approval of a fork rebase: `approved`, `refused`, `expired`, `void` or `unknown`."""
+        now = self._clock()
+        found = self._store.approval(approval_id)
+        if found is None or not is_fork(found):
+            return "unknown"
+        by = f"user:{user[:64]}"
+        if found["state"] != "pending":
+            self._audit("refused", by, found, f"already {found['state']}")
+            return "refused"
+        if not user or not hmac.compare_digest(user.encode(), str(found["requested_by"]).encode()):
+            self._audit("refused", by, found, "not the admin who asked")
+            return "refused"
+        if now >= datetime.fromisoformat(found["expires_at"]):
+            self._store.decide_approval(approval_id, expect=("pending",), to="expired", now=now)
+            return "expired"
+        if not self.fork_bound(found, binding_now):
+            self._store.decide_approval(approval_id, expect=("pending",), to="void", now=now,
+                                        detail="the fork, Core or the proposal moved before confirmation")  # fmt: skip
+            self._audit("void", by, found, "changed before confirmation")
+            return "void"
+        if not self._store.decide_approval(approval_id, expect=("pending",), to="approved", now=now, by=user):
+            return "refused"
+        self._audit("approved", by, found)
+        return "approved"
+
+    def consume_fork(self, approval_id: str, job_id: int, binding_now: Mapping[str, Any] | None) -> bool:
+        """Single use, when its update job is created: approved, unexpired, still bound."""
+        found = self._store.approval(approval_id)
+        now = self._clock()
+        if found is None or not is_fork(found) or found["state"] != "approved" or not found["decided_by"]:
+            return False
+        if now >= datetime.fromisoformat(found["expires_at"]):
+            self._store.decide_approval(approval_id, expect=("approved",), to="expired", now=now)
+            return False
+        if not self.fork_bound(found, binding_now):
+            self._store.decide_approval(approval_id, expect=("approved",), to="void", now=now,
+                                        detail="the fork, Core or the proposal changed since approval")  # fmt: skip
+            return False
+        return self._store.decide_approval(approval_id, expect=("approved",), to="used", now=now, job=job_id)
+
+    def proves_fork(self, approval_id: str | None, job: UpdateJob, binding_now: Mapping[str, Any] | None) -> bool:
+        """The executor's check: this job consumed this fork approval, and it still binds the files on disk."""
+        if not approval_id:
+            return False
+        found = self._store.approval(approval_id)
+        if found is None or not is_fork(found) or found["state"] != "used" or found["used_by_job"] != job.id:
+            return False
+        binding = (found.get("plan") or {}).get("binding") or {}
+        return (
+            bool(found["decided_by"])
+            and job.target.get("proposal") == binding.get("proposal")
+            and self.fork_bound(found, binding_now)
+        )
 
     def void_subject(self, subject: str, *, detail: str) -> None:
         for found in self._store.approvals(states=LIVE, limit=200):

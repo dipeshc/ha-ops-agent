@@ -317,3 +317,27 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   those 30 days, a dashboard restore that failed); every other maintenance
   item is silent. A config change proposed for a finding follows its
   finding's deadline (maintenance.md M12a).
+
+## Fork rebase items
+
+- I20. Each fork rebase proposal ([proposals.md](proposals.md) C14) is an
+  item with key `fork:<proposal>`, kind `proposal`, kicker "Rebase onto
+  Core", title "Rebase <domain> onto Home Assistant Core <version>" (daemon
+  words: the domain is an identifier) and push title "Rebase onto Core".
+  Its `change` is the diff from the fork as it is to the rebased files,
+  the files and, as `shown`, the result's hash; its facts are the Core
+  version, the fork's origin, the changes kept and dropped (ids with their
+  line counts), the files rebased, the files left as they are and the kept
+  changes' text; the proposer's reason is only the `agent` text. Open in
+  act mode it waits with an `approval` need: primary `approve_rebase`
+  ("Rebase tonight"), secondary `approve_rebase_now` ("Rebase now") and
+  `reject`; in observe mode it is Proposed with `reject` only. Approved it
+  is Scheduled (gist "approved; runs …", plus why it waits when the update
+  gate is shut) with `withdraw`; while its job runs it is Running with the
+  phases Backup, Write, Restart, Verify; applied is Done; rolled back or
+  failed is Failed with an `ack` need (urgent for `rollback_failed`),
+  pushed by the item book; rejected is Cancelled; stale is Expired. A fork
+  rebase job never makes an update item, and its run's item is titled
+  "Approved fork rebase <day>". Tests `test_the_pipeline_happy_path`,
+  `test_a_restart_failure_restores_the_fork_and_pushes`.
+

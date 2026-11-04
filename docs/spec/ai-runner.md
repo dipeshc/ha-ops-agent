@@ -4,7 +4,7 @@ The AI is a bounded advisor: it reads a secret-free copy of the
 configuration, asks the daemon for named actions through `opsctl`, and
 returns a schema-checked result. The daemon decides whether to act on any
 of it. This document has two parts: the provider-independent run model, and
-the one provider the 0.20.0 code implements.
+the one provider the 0.21.0 code implements.
 
 Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 `opsd/runctx.py`, `opsd/guard.py` and `bin/guard-hook` (the tool guard),
@@ -17,12 +17,12 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 | Profile | Prompt | Schema | Capabilities | Class | Turns | Cost cap (USD) | Drafts |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `triage` | `profiles/triage.md` | `triage-result` | reads + `task.create`, `task.list`, `baseline.ack`, `notify.admin`, `suppress.propose`, `integration.reload` | AGENT | `limits.run_max_turns` (30) | `limits.run_max_usd` (1.5) | no |
-| `chat` | `profiles/chat.md` | `reply-result` | reads + `ha.core_compare`, `task.create/list/cancel`, `task.investigate`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 15 | min(0.5, run_max_usd) | yes |
+| `chat` | `profiles/chat.md` | `reply-result` | reads + `ha.core_compare`, `fork.propose`, `task.create/list/cancel`, `task.investigate`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 15 | min(0.5, run_max_usd) | yes |
 | `followup` | `profiles/followup.md` | `reply-result` | reads + `task.create/list/cancel`, `approval.request` | AGENT | 15 | min(0.5, run_max_usd) | no |
-| `investigate` | `profiles/investigate.md` | `investigate-result` | reads + `ha.core_compare`, `task.list`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 25 | min(1.0, run_max_usd) | yes |
+| `investigate` | `profiles/investigate.md` | `investigate-result` | reads + `ha.core_compare`, `fork.propose`, `task.list`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 25 | min(1.0, run_max_usd) | yes |
 | `summary` | `profiles/summary.md` | `reply-result` | none | USER | 5 | min(0.2, run_max_usd) | no |
 | `update_review` | `profiles/update_review.md` | `update-review` | none | AGENT | 6 | min(0.5, run_max_usd) | no |
-| `maintenance_plan` | `profiles/maintenance_plan.md` | `maintenance-plan` | `ha.core_compare` | AGENT | 8 | min(0.5, run_max_usd) | no |
+| `maintenance_plan` | `profiles/maintenance_plan.md` | `maintenance-plan` | `ha.core_compare`, `fork.propose` | AGENT | 8 | min(0.5, run_max_usd) | no |
 
 - R1. "Reads" are the capabilities whose only effect is READ
   ([capabilities.md](capabilities.md)), except `ha.core_compare`, the one
@@ -31,7 +31,10 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
   `chat`, `investigate` and `maintenance_plan` name it, never `triage`.
   The prompts tell the model to use it whenever a custom integration
   shadows or forks a Core one, and to report what it shows as facts,
-  citing the diff (the Core version, the file and the lines). A profile's capability list is the
+  citing the diff (the Core version, the file and the lines). The same
+  three runs may propose a fork rebase (`fork.propose`,
+  [proposals.md](proposals.md) C11): the model names the fork's changes to
+  keep, never file content. A profile's capability list is the
   run's grant; the daemon refuses any other verb. `summary` uses
   `claude.model_fast` when set, every other profile `claude.model_standard`.
   Test `test_profiles_reference_enabled_capabilities`.
@@ -139,7 +142,7 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 
 ## The AI provider
 
-The 0.20.0 code has one provider, selected by `llm.provider: claude`;
+The 0.21.0 code has one provider, selected by `llm.provider: claude`;
 `none` turns the AI off (deterministic checks, pushes and updates continue;
 AUTO updates are then held unless `updates.hold_if_unreviewed` is off). The
 runner calls `claude_runner.run_claude` directly; adding a provider means

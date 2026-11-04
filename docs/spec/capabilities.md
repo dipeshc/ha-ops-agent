@@ -30,11 +30,15 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   (`task.investigate`, admin origins, 1/4), `request-approval <update.x|backup>`
   (`approval.request`, admin origins, 2/6), `propose-change` (3/10, git),
   `propose-fact` (2/5, git), `propose-suppression` (1/3, git and overlay),
+  `propose-rebase <domain>` (`fork.propose`, 1/3, refund on refusal),
   `integration-reload <domain>` (2/6, refund on refusal).
 - K3. Internal capabilities never reachable from the socket, the CLI, the
   guard or the prompt: `change.apply`, `change.revert` (tier APPROVE),
-  `dashboard.save` (tier APPROVE), `backup.create`, `update.install` (tier
-  from the update rule), `update.rollback` (AUTO_NOTIFY). Test
+  `dashboard.save` (tier APPROVE), `fork.apply` (tier APPROVE, effect
+  `{MUTATE_HA}`: writes an approved fork rebase and restarts Core, only as
+  an update job, [updates.md](updates.md) U26–U31), `backup.create`,
+  `update.install` (tier from the update rule), `update.rollback`
+  (AUTO_NOTIFY; also restores a fork rebase's snapshot). Test
   `test_only_the_export_and_the_drafts_are_allowed` and the registry tests.
 
 - K4. "Read" capabilities (effects exactly `{READ}`): `health.snapshot`,
@@ -166,6 +170,12 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
     `custom_components/<domain>/`, read as root, never through a symbolic
     link, at most 40 and 256 KiB each, UTF-8 only; subdirectories,
     `.pyc`, hidden and backup files are listed as not compared.
+  - **`--fork`.** Also the fork's origin (the newest Core tag among the
+    installed one and the `.0` releases of the last 18 months whose files
+    differ least from the fork's) and the fork's own changes against it as
+    numbered hunks (`<file>#<n>`, with their added and removed lines),
+    fenced in `<fork-hunks>`: the ids `propose-rebase --keep` takes
+    ([proposals.md](proposals.md) C11–C12).
   - **Answer.** A header with the Core version and the GitHub tree URL; a
     summary (files compared, changed and identical; files only in the
     custom integration; files only in Core; changed lines per file as
@@ -177,3 +187,12 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
     40 000-character cap). When Core has no such integration the answer
     says it is a pure custom integration. The answer is redacted.
   Tests `tests/test_coresource.py`.
+- K15. **`fork.propose`** (verb `propose-rebase <domain> --keep <ids|none>
+  --reason <text>`, executor `opsd.forkrebase:exec_propose`, validator
+  `opsd.forkrebase:validate_propose`): effects `{PROPOSE}`, origins admin,
+  admin-chat and agent-self, quota 1 per run and 3 per day, a validator or
+  build refusal gives the daily unit back. Granted to `chat`,
+  `investigate` and `maintenance_plan`, never `triage` or `followup`. It
+  records a proposal and writes nothing else; see
+  [proposals.md](proposals.md) C11–C14. Tests `tests/test_forkrebase.py`.
+

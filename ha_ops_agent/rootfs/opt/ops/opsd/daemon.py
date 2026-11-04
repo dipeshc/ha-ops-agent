@@ -25,11 +25,11 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from opsd import __version__, dashboards, inventory, maintenance, privsep, proposals, quiet, updatefix
+from opsd import __version__, dashboards, forkrebase, inventory, maintenance, privsep, proposals, quiet, updatefix
 from opsd.activity import ActivityLog
 from opsd.aicontrol import AiControl
 from opsd.api import CORE_WS_URL, LiveAPI, core_release_age_days, github_release_age_days
-from opsd.approvals import ApprovalError, Approvals
+from opsd.approvals import ApprovalError, Approvals, fork_subject
 from opsd.assistant import Assistant
 from opsd.backups import Backups
 from opsd.baseline import (
@@ -54,7 +54,7 @@ from opsd.config import Options, Paths, claude_token, credential_kind
 from opsd.conversation import clean_text, context_block
 from opsd.events import Dispatcher, Event, EventQueue, Priority, Schedule, TaskScheduler
 from opsd.evidence import EvidenceCache, EvidenceSource
-from opsd.gitops import Repo
+from opsd.gitops import GitBusyError, GitError, Repo
 from opsd.health import Snapshot, collect, custom_domains
 from opsd.inbound import EVENT_TYPE, AdminIdentity, InboundGate, admin_identity, is_active_admin
 from opsd.items import Context, ItemBook
@@ -387,6 +387,8 @@ class Daemon:
                 propose_fix=self._propose_fix,
                 removals=lambda: self.maintenance.removals() if self.maintenance is not None else [],
                 before_plan=self._maintenance_before_plan,
+                forks=forkrebase.ForkFiles(paths.data, paths.custom_components),
+                commit_fork=self._commit_fork,
             )
         # "Back up now" and the act-mode self-heal (same ops and audited executor as the updates).
         self.backups: Backups | None = None
@@ -1583,6 +1585,74 @@ class Daemon:
         title = f"Dashboard {bound.get('url_path')}: maintenance plan"
         return writer.approvals.request_dashboard(bound, title=title, user=user)
 
+    async def request_fork(self, proposal: str, user: str, shown: list[str], when: str) -> dict[str, Any]:
+        """A pending approval for a fork rebase proposal, exactly as the admin saw it (its result's hash)."""
+        store, updates = self.store, self.updates
+        if store is None or updates is None:
+            raise ApprovalError("fork rebases are unavailable")
+        record = forkrebase.load(store, proposal)
+        if record is None or record["state"] != "open" or [str(record.get("result"))] != shown:
+            raise ApprovalError("The proposal changed; open it again.")
+        if not self.options.acting:
+            raise ApprovalError("The agent is in observe mode: nothing is applied.")
+        bound = await updates.fork_binding(proposal)
+        if bound is None or bound != forkrebase.binding(record):
+            raise ApprovalError("The fork or Home Assistant Core changed since it was proposed; ask for a new one.")
+        title = f"Rebase {record['domain']} onto Core {record['core']}"
+        return updates.approvals.request_fork(bound, title=title, user=user, when=when)
+
+    async def _confirm_fork(self, approval: str, user: str) -> bool:
+        store, updates = self.store, self.updates
+        if store is None or updates is None:
+            return False
+        found = store.approval(approval) or {}
+        proposal = str(((found.get("plan") or {}).get("binding") or {}).get("proposal") or "")
+        state = updates.approvals.confirm_fork(approval, user=user, binding_now=await updates.fork_binding(proposal))
+        if state != "approved":
+            return False
+        if self.activity is not None:
+            self.activity.record("updates", "Fork rebase approved", f"It runs {'now' if found.get('run_when') == 'now'
+                                 else 'in the update window'}.", item=f"fork:{proposal}")  # fmt: skip
+        if found.get("run_when") == "now":
+            self.queue.put(Event("updates.approved", "panel", Priority.APPROVAL, {}, dedupe_key="updates.approved"))
+        return True
+
+    def reject_fork(self, proposal: str, user: str) -> bool:
+        if self.store is None:
+            return False
+        done = forkrebase.move(self.store, proposal, expect=("open",), to="rejected", now=datetime.now(UTC),
+                               detail=f"rejected by {user[:40]}")  # fmt: skip
+        if done and self.updates is not None:
+            self.updates.approvals.void_subject(fork_subject(proposal), detail="rejected")
+        return done
+
+    async def _commit_fork(self, record: Mapping[str, Any], files: Mapping[str, bytes]) -> str:
+        """Commit a good fork rebase with the git plumbing (only the files git already tracks), then push."""
+        repo = self.repo
+        if repo is None:
+            return "not committed (git is off on this install)"
+        domain = str(record["domain"])
+        targets: dict[str, bytes | None] = {}
+        async with self.git_lock:
+            head = await asyncio.to_thread(repo.main_head)
+            for name, content in files.items():
+                path = f"custom_components/{domain}/{name}"
+                if await asyncio.to_thread(repo.entry, head, path) is not None:
+                    targets[path] = content
+            if not targets:
+                return f"not committed (git does not track custom_components/{domain})"
+            subject = f"chore(custom-components): rebase {domain} onto core {record['core']}"[:80]
+            sha = await asyncio.to_thread(repo.commit_files, targets, subject)
+            pushed = ", pushed"
+            if not self.options.limits.git_push:
+                pushed = ", not pushed (limits.git_push is off)"
+            else:
+                try:
+                    await asyncio.to_thread(repo.push)
+                except GitBusyError, GitError:
+                    pushed = ", not pushed yet (origin moved or unreachable)"
+        return f"committed {sha[:10]}{pushed}"
+
     async def _confirm_dashboard(self, approval: str, user: str) -> bool:
         writer, store = self.dashboards, self.store
         if writer is None or store is None:
@@ -1711,6 +1781,9 @@ class Daemon:
         if kind == "approve_dashboard":
             approval = args.get("approval")
             return isinstance(approval, str) and await self._confirm_dashboard(approval, user)
+        if kind == "approve_fork":
+            approval = args.get("approval")
+            return isinstance(approval, str) and await self._confirm_fork(approval, user)
         if kind == "backup_now":
             return self.start_backup(by=f"panel:{user[:64]}", admin=True)
         if kind == "ack":

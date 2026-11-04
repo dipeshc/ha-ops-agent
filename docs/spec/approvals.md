@@ -112,3 +112,25 @@ Tests: `tests/test_approvals.py`, `tests/test_dashboards.py`, `tests/test_items.
   expiry and the recomputed binding right before the save and marks it
   `used` (compare-and-set). Update, change and reboot paths never accept
   it. Test `test_confirmation_needs_the_admin_who_asked_and_an_unchanged_dashboard`.
+
+## Fork rebase approvals
+
+- A18. A fork rebase proposal ([proposals.md](proposals.md) C11–C14) uses
+  subject `fork_rebase:<proposal>`, `plan.kind: fork_rebase`, `run_when`
+  `window` ("Rebase tonight") or `now` ("Rebase now"), the same pending cap,
+  superseding and 72-hour expiry. `plan_hash` is `fork_hash(binding,
+  created_at)`: the SHA-256 of the canonical JSON of the proposal id, the
+  domain, the Core version, the origin tag, the kept hunk ids, the hash of
+  the stored result's bytes and the hash of the fork's files as they are.
+  The admin's one panel request requests it (only when the shown `change`
+  hash is the proposal's result, the agent acts, and the binding recomputed
+  from disk and the live Core version equals the proposal's) and confirms
+  it in the same step; confirm requires state `pending`, the confirming
+  user equal to `requested_by`, marks `expired` past expiry and `void` when
+  the recomputed binding differs (a fork file edited, the stored result
+  changed, another Core version). `consume_fork` re-checks it when the
+  update job is created and marks it `used` by that job; `proves_fork` is
+  the executor's check that the job consumed it and it still binds.
+  Update, change, reboot and dashboard paths never accept it, and the
+  reverse. Test `test_the_approval_is_bound_to_the_fork_core_and_result`.
+

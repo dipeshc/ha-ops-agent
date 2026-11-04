@@ -213,7 +213,7 @@ async def test_only_a_custom_integration_on_this_install(world: World, gh: FakeG
 
 def test_the_version_is_never_model_input() -> None:
     cap = CAPABILITIES["ha.core_compare"]
-    assert set(cap.args) == {"domain"} and cap.read_only
+    assert set(cap.args) == {"domain", "fork"} and cap.read_only
     parsed = build_parser().parse_args(["core-compare", "acme_fan"])
     assert parsed.domain == "acme_fan"
 

@@ -508,7 +508,7 @@ def validate_compare(ctx: ExecContext, args: Args) -> Args:
     if ctx.run is None:
         raise CapabilityError("core-compare is only available inside an agent run")
     try:
-        custom_dir(ctx.paths.custom_components, args.text("domain"))
+        custom_dir(ctx.paths.custom_components, args.opt_text("domain") or "")
     except CoreSourceError as err:
         raise CapabilityError(str(err)) from err
     return args
@@ -530,8 +530,17 @@ def cmd_core_compare(ctx: ExecContext, args: Args) -> str:
                 problems[name] = str(err)[:120]
                 if "slow" in str(err):
                     raise
+        report = compare_report(custom, listing, core, problems=problems)
+        if args.flag("fork") and not listing.missing:
+            # Imported here: opsd.forkrebase builds on this module.
+            from opsd import forkrebase  # noqa: PLC0415
+
+            try:
+                report += "\n" + forkrebase.fork_report(source, custom, domain, tag)
+            except forkrebase.RebaseRefused as err:
+                report += f"\nFork origin: not found ({err})."
     except CoreSourceError as err:
         raise CapabilityError(str(err)) from err
     finally:
         source.prune(tag)
-    return ctx.env.redactor().redact(compare_report(custom, listing, core, problems=problems))
+    return ctx.env.redactor().redact(report)

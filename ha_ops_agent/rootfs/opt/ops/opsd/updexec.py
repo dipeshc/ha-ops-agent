@@ -95,6 +95,10 @@ OS_ENTITY = "update.home_assistant_operating_system_update"
 SLUG_RE = re.compile(r"[a-z0-9_]{1,64}")
 BACKUP_SLUG_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ENTITY_RE = re.compile(r"update\.[a-z0-9_]{1,128}")
+# A fork rebase job (`opsd.forkrebase`): never an `update.` entity, never installed by the update calls.
+FORK_KIND = "fork_rebase"
+FORK_ENTITY_RE = re.compile(r"fork\.([a-z0-9_]{1,64})")
+PROPOSAL_RE = re.compile(r"[0-9a-f]{16}")
 VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 OS_LOG_LOGGERS = ("[supervisor.os.", "[supervisor.host.", "[supervisor.resolution.module]")
@@ -590,7 +594,83 @@ class Executors:
         except ApiError as err:
             self.finish(audit_id, "refused", f"config check failed: {str(err)[:200]}")
             raise ExecutorRefused(f"config check failed: {str(err)[:200]}") from err
-        return await self._call(audit_id, self.ops.core_restart())
+        with selfguard.approved_core_restart(job.id):
+            return await self._call(audit_id, self.ops.core_restart())
+
+    # -------------------------------------------------------- fork rebases
+
+    @staticmethod
+    def _check_fork(job: UpdateJob) -> str:
+        """A fork rebase job: its own kind, a `fork.<domain>` entity naming a custom integration that is not the
+        agent, and a proposal id. Returns the domain."""
+        match = FORK_ENTITY_RE.fullmatch(job.entity_id)
+        proposal = job.target.get("proposal")
+        if job.kind != FORK_KIND or match is None or job.target.get("domain") != match.group(1):
+            raise ExecutorRefused("not a fork rebase job")
+        if not isinstance(proposal, str) or not PROPOSAL_RE.fullmatch(proposal):
+            raise ExecutorRefused("a fork rebase job names its proposal")
+        if selfguard.self_path(f"custom_components/{match.group(1)}/") or selfguard.is_self_slug(match.group(1)):
+            raise ExecutorRefused("the agent never changes itself")
+        for version in (job.from_version, job.to_version):
+            if not VERSION_RE.fullmatch(version):
+                raise ExecutorRefused("bad version string")
+        return match.group(1)
+
+    async def fork_apply(self, job: UpdateJob, *, proven: bool, write: Callable[[], None]) -> None:
+        """Write an approved fork rebase's files (`write` snapshots the old ones first). `proven`: the job consumed
+        the admin's approval and it still binds the files on disk and the live Core version."""
+        domain = self._check_fork(job)
+        if not proven:
+            raise ExecutorRefused("a fork rebase needs the admin's approval, consumed by this job")
+        args = {"domain": domain, "job": job.id, "core": job.to_version, "step": "write",
+                "proposal": str(job.target.get("proposal"))}  # fmt: skip
+        audit_id = self._authorize("fork.apply", args, approved=True)
+        try:
+            await asyncio.to_thread(write)
+        except (OSError, ValueError) as err:
+            self.finish(audit_id, "error", str(err)[:300])
+            raise ExecutorRefused(f"the files were not written: {str(err)[:200]}") from err
+        self.finish(audit_id, "ok")
+
+    async def fork_check(self, job: UpdateJob) -> None:
+        """Core's config check with the rebased files in place (they are loaded only by the restart)."""
+        domain = self._check_fork(job)
+        args = {"domain": domain, "job": job.id, "step": "check"}
+        audit_id = self._authorize("fork.apply", args, approved=True)
+        try:
+            await self.ops.core_check()
+        except ApiError as err:
+            self.finish(audit_id, "refused", f"config check failed: {str(err)[:200]}")
+            raise ExecutorRefused(f"Core's config check failed: {str(err)[:200]}") from err
+        self.finish(audit_id, "ok")
+
+    async def fork_restore(self, job: UpdateJob, restore: Callable[[], None]) -> None:
+        """Put the fork's snapshot back (a return to what was running, like a rollback)."""
+        domain = self._check_fork(job)
+        audit_id = self._authorize("update.rollback", {"domain": domain, "job": job.id, "step": "restore"})
+        try:
+            await asyncio.to_thread(restore)
+        except (OSError, ValueError) as err:
+            self.finish(audit_id, "error", str(err)[:300])
+            raise ExecutorRefused(f"the fork's files were not restored: {str(err)[:200]}") from err
+        self.finish(audit_id, "ok")
+
+    async def fork_restart(self, job: UpdateJob, *, proven: bool, purpose: str) -> str:
+        """Restart Core for a fork rebase job, inside its one-restart scope: to load the approved files (`apply`:
+        `proven` must say the job consumed its approval and the files on disk are the approved result) or the
+        restored ones (`restore`). `done` or `unknown`."""
+        domain = self._check_fork(job)
+        args = {"domain": domain, "job": job.id, "step": "restart", "purpose": purpose}
+        if purpose == "apply":
+            if not proven:
+                raise ExecutorRefused("the restart needs the approved files in place and the job's approval")
+            audit_id = self._authorize("fork.apply", args, approved=True)
+        elif purpose == "restore":
+            audit_id = self._authorize("update.rollback", args)
+        else:
+            raise ExecutorRefused("unknown restart purpose")
+        with selfguard.approved_core_restart(job.id):
+            return await self._call(audit_id, self.ops.core_restart())
 
     async def reboot_for_os(self, job: UpdateJob, decision: Decision) -> str:
         """Activate an approved, installed HAOS update: one host reboot. `done` or `unknown` (the host went down).

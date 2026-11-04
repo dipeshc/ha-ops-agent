@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
 
-from opsd import proposals
+from opsd import forkrebase, proposals
 from opsd.activity import ActivityLog
 from opsd.capabilities import CAPABILITIES
 from opsd.channels import REPLY_ACTION, Action, ActionKind, BudgetClass, Message, agent_message, task_from_tag, task_tag
@@ -751,6 +751,7 @@ class Assistant:
         try:
             meta: dict[str, Any] = dict(sources_of(self.store.audit_rows(run_id=run_id, limit=300), VERBS))
             meta["proposals"] = proposals.for_run(self.store, run_id)
+            meta["forks"] = forkrebase.for_run(self.store, run_id)
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.warning("no sources for run", extra={"error": str(err)[:200]})
             return {}
@@ -786,7 +787,14 @@ class Assistant:
             self._turn_changed(self.store.append_turn(thread, role="system", status="proposal", text=text, now=now,
                                                       meta={"entity_id": found["entity_id"],
                                                             "actions": ["updates"]}))  # fmt: skip
-        if run_meta.get("proposals"):
+        for fork in run_meta.get("forks") or []:
+            text = (f"Rebase {fork['domain']} onto Home Assistant Core {fork['core']}, keeping {fork['kept']} of the"
+                    " fork's own changes. Nothing is written until you approve it on its item (Rebase onto Core) on"
+                    " Home; it then runs in the update window (or now) with a backup, a health check and automatic"
+                    " rollback. You can also reject it there.")  # fmt: skip
+            self._turn_changed(self.store.append_turn(thread, role="system", status="proposal", text=text, now=now,
+                                                      meta={"fork": fork["id"], "actions": ["updates"]}))  # fmt: skip
+        if run_meta.get("proposals") or run_meta.get("forks"):
             self.publish("updates", None, {})
 
     async def _refused(self, turn: Turn, status: str, error: str) -> None:

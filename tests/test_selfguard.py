@@ -113,6 +113,9 @@ SELF_HTTP = [
     ("POST", "/core/update", {"version": "2026.10.4"}),
     ("POST", "/core/update", {"version": "2026.10.4", "backup": False, "extra": 1}),
     ("POST", "/core/restart", {"safe_mode": True}),
+    # A Core restart passes only inside an update job's own scope (`approved_core_restart`).
+    ("POST", "/core/restart", {}),
+    ("POST", "/core/restart", None),
     ("POST", "/core/check?x=1", {}),
     ("POST", "/store/addons/core_example_broker/update", {"backup": True}),
     ("POST", "/core/api/services/update/install", {"target": {"entity_id": ["update.hue_bridge_firmware"]}}),
@@ -128,7 +131,6 @@ ALLOWED_HTTP = [
     ("GET", "/host/logs", None),
     ("POST", "/core/update", {"version": "2026.10.4", "backup": False}),
     ("POST", "/core/check", {}),
-    ("POST", "/core/restart", {}),
     ("POST", "/store/addons/core_example_broker/update", {"backup": False}),
     ("POST", "/core/api/services/update/install", {"entity_id": "update.hue_bridge_firmware", "version": "1.2"}),
     ("POST", "/core/api/services/update/install", {"entity_id": "update.hue_bridge_firmware"}),
@@ -514,7 +516,12 @@ def test_update_executor_calls_still_reach_the_supervisor(net: Recorder) -> None
     ops = LiveUpdateOps(SupervisorClient("token"))
     asyncio.run(ops.update_core("2026.10.5"))
     asyncio.run(ops.core_check())
-    asyncio.run(ops.core_restart())
+
+    async def restart_in_scope() -> None:
+        with selfguard.approved_core_restart(7):
+            await ops.core_restart()
+
+    asyncio.run(restart_in_scope())
     asyncio.run(ops.update_addon("core_example_broker"))
 
     async def in_flow(path: str, call: Any) -> None:
@@ -530,11 +537,46 @@ def test_update_executor_calls_still_reach_the_supervisor(net: Recorder) -> None
                      "/core/api/services/update/install"]  # fmt: skip
     with pytest.raises(ApiError, match="refused"):
         asyncio.run(ops.update_addon(selfguard.SELF_SLUG))
-    # Outside the approved flow neither OS call leaves the process.
-    for call in (ops.update_os("17.4"), ops.reboot_host()):
+    # Outside the approved flow neither OS call leaves the process, nor a Core restart outside a job's scope.
+    for call in (ops.update_os("17.4"), ops.reboot_host(), ops.core_restart()):
         with pytest.raises(ApiError, match="refused"):
             asyncio.run(call)
     assert len(net.calls) == 7
+
+
+def test_a_core_restart_passes_only_once_inside_its_job_scope() -> None:
+    """`core.restart` is never available outside an update job's scope (a HACS install or an approved fork rebase):
+    one restart per scope, closed when the block ends, never inherited by anything outside it."""
+    with pytest.raises(selfguard.SelfTargetError):
+        selfguard.check_http("POST", "/core/restart", {})
+    with selfguard.approved_core_restart(3):
+        for method, path, body in (("POST", "/core/restart", {"safe_mode": True}), ("POST", "/core/stop", {}),
+                                   ("POST", "/host/reboot", {}), ("POST", "/core/restart?x=1", {}),
+                                   ("POST", "/core/api/services/homeassistant/restart", {})):  # fmt: skip
+            with pytest.raises(selfguard.SelfTargetError):
+                selfguard.check_http(method, path, body)
+        selfguard.check_http("POST", "/core/restart", {})
+        with pytest.raises(selfguard.SelfTargetError):
+            selfguard.check_http("POST", "/core/restart", {})
+    with pytest.raises(selfguard.SelfTargetError):
+        selfguard.check_http("POST", "/core/restart", {})
+    for bad in (0, -1, True, "3"):
+        with pytest.raises(ValueError, match="update job"), selfguard.approved_core_restart(bad):  # type: ignore[arg-type]
+            pass
+
+    async def outside() -> None:
+        selfguard.check_http("POST", "/core/restart", {})
+
+    async def scenario() -> None:
+        task = None
+        with selfguard.approved_core_restart(4):
+            pass
+        # A task created after the block sees no scope.
+        task = asyncio.ensure_future(outside())
+        with pytest.raises(selfguard.SelfTargetError):
+            await task
+
+    asyncio.run(scenario())
 
 
 def test_reload_and_check_config_still_reach_core(net: Recorder) -> None:
@@ -572,11 +614,14 @@ def test_no_capability_argument_can_carry_a_self_slug_into_a_url(tmp_path: Path)
         "approval.request",  # validate_request + Executors._check_job
         "task.create", "task.cancel", "task.investigate",  # schedule only
         "baseline.ack", "notify.admin",  # agent state, pushes
+        "fork.propose",  # a custom integration's domain (self_path refused); writes only through fork.apply
     }  # fmt: skip
     reachable = {c.name for c in CAPABILITIES.values() if c.enabled and not c.internal and not c.read_only}
     assert reachable <= reviewed, f"new mutating capability needs a self-target review: {reachable - reviewed}"
     internal = {c.name for c in CAPABILITIES.values() if c.enabled and c.internal}
     # change.autofix: paths through changepaths.allowed_path (self_path) or configuration.yaml only.
     # dashboard.save: one lovelace/config/save inside selfguard.approved_dashboard_write (a dashboard, never the agent).
+    # fork.apply: files under custom_components/<domain>/ (self_path refused) and one Core restart inside
+    # selfguard.approved_core_restart for its job.
     assert internal <= {"change.apply", "change.revert", "change.autofix", "backup.create",
-                        "update.install", "update.rollback", "dashboard.save"}  # fmt: skip
+                        "update.install", "update.rollback", "dashboard.save", "fork.apply"}  # fmt: skip

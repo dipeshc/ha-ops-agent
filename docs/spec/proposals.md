@@ -198,7 +198,7 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   `opsctl core-compare <domain> --fork` ([capabilities.md](capabilities.md)
   K14), or `none`. No argument carries file content. The domain must be a
   custom integration on this install, never the agent (`self_path`), never
-  on the never-reload list or `reload.deny` and never one that provides
+  on the never-reload list or `rebase.deny` and never one that provides
   access hardware ([updates.md](updates.md) U32), and
   Core must have an integration of that name at the installed version.
   Implementation `opsd/forkrebase.py`; tests `tests/test_forkrebase.py`.

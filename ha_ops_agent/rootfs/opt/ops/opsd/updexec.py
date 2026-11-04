@@ -611,8 +611,8 @@ class Executors:
             raise ExecutorRefused("a fork rebase job names its proposal")
         if selfguard.self_path(f"custom_components/{match.group(1)}/") or selfguard.is_self_slug(match.group(1)):
             raise ExecutorRefused("the agent never changes itself")
-        if match.group(1) in NEVER_RELOAD_DOMAINS | self._options.profile.reload.deny:
-            raise ExecutorRefused(f"{match.group(1)} is on the never-reload list (access hardware or core plumbing)")
+        if match.group(1) in NEVER_RELOAD_DOMAINS | self._options.profile.rebase.deny:
+            raise ExecutorRefused(f"{match.group(1)} is on the never-reload list or the profile's rebase.deny")
         for version in (job.from_version, job.to_version):
             if not VERSION_RE.fullmatch(version):
                 raise ExecutorRefused("bad version string")

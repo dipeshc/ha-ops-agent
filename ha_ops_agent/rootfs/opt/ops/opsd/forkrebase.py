@@ -708,7 +708,7 @@ def validate_propose(ctx: ExecContext, args: Args) -> Args:
     domain = args.opt_text("domain") or ""
     if selfguard.self_path(f"custom_components/{domain}/") or selfguard.is_self_slug(domain):
         raise CapabilityError("the agent never changes itself")
-    refusal = reload.never_touched(domain, ctx.options.profile.reload.deny)
+    refusal = reload.never_touched(domain, ctx.options.profile.rebase.deny)
     if refusal is not None:
         raise CapabilityError(f"no rebase: {refusal}")
     try:
@@ -750,7 +750,7 @@ def exec_propose(ctx: ExecContext, args: Args) -> str:
     if store is None:
         raise CapabilityError("the store is unavailable")
     domain = args.text("domain")
-    refusal = live_access_refusal(ctx.client, domain, ctx.options.profile.reload.deny)
+    refusal = live_access_refusal(ctx.client, domain, ctx.options.profile.rebase.deny)
     if refusal is not None:
         raise CapabilityError(f"no rebase: {refusal}")
     installed = installed_core_version(ctx)

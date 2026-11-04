@@ -435,3 +435,12 @@ def test_the_published_example_profile_is_valid() -> None:
     assert example.notify_service == "mobile_app_my_phone" and not example.git.enabled and not example.overlays
     assert {f.name for f in example.updates.fragile} == {"my_custom_hvac", "sprinkler_hub"}
     assert example.reload.domains == ("cast", "hue", "plex") and example.docs.facts == "docs/facts.md"
+
+
+def test_rebase_deny_is_its_own_strict_key() -> None:
+    found = parse_text("rebase:\n  deny: [acme_fan]\nreload:\n  deny: [acme_other]\n")
+    assert found.rebase.deny == frozenset({"acme_fan"}) and found.reload.deny == frozenset({"acme_other"})
+    assert parse_text("").rebase.deny == frozenset()
+    for bad in ("rebase:\n  allow: [acme_fan]\n", "rebase:\n  deny: [Acme-Fan]\n", "rebase: [acme_fan]\n"):
+        with pytest.raises(ProfileError):
+            parse_text(bad)

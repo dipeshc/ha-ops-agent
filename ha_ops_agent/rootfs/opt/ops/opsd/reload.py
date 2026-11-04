@@ -175,10 +175,12 @@ def _protected(entities: Iterable[Mapping[str, Any]], states: Mapping[str, Mappi
 
 
 def never_touched(domain: str, deny: Iterable[str] = ()) -> str | None:
-    """Why the agent may never change this integration at all (a fork rebase, `opsd.forkrebase`): the never-reload
-    list or the profile's `reload.deny`. None when it is not on them."""
-    if domain in DENY_DOMAINS or domain in set(deny):
+    """Why the agent may never rebase this integration (`opsd.forkrebase`): the never-reload list in code, or
+    `deny` (the profile's `rebase.deny`; `reload.deny` is about autonomous reloads only). None otherwise."""
+    if domain in NEVER_RELOAD_DOMAINS:
         return f"{domain} is on the agent's never-reload list (locks, alarm, access, radios or core plumbing)"
+    if domain in set(deny):
+        return f"{domain} is in the house profile's rebase.deny"
     return None
 
 

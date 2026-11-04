@@ -53,6 +53,7 @@ list holds at most 50 entries and MUST NOT repeat an entry.
 | `updates.fragile[]` | mappings with required `name` (`[a-z0-9][a-z0-9_.-]{0,63}`, unique), `tier` (`approve`, `pinned` or `never`; `auto` is refused), `reason` (one line, at most 300 characters); at least one of `entities` (update entity ids), `repos` (`owner/name`), `domains`; optional `bumps` as a subset of `patch`, `minor`, `major`, `unknown`. |
 | `updates.version_gates[]` | mappings with required `integration`, `core_from` (a version string with at least two components) and `reason`; optional `patch` needs the `localpatches` overlay. |
 | `reload.domains`, `reload.deny` | lists of `[a-z0-9_]{1,64}`. A `domains` entry that is on the built-in never-reload list, or also in `deny`, refuses the file. |
+| `rebase.deny` | list of `[a-z0-9_]{1,64}`, default empty. Custom-integration forks the agent never proposes or applies a Core rebase for, on top of the never-reload list in code ([updates.md](updates.md) U32). `reload.deny` does not apply to rebases. |
 | `git.enabled` | bool, default false. When true, `author_name` and `author_email` are required. |
 | `git.author_name` | `[^\x00-\x1f\x7f<>]{1,64}`; default `Ops Agent`. |
 | `git.author_email` | a bounded email; default `ops-agent@localhost.localdomain`. |
@@ -65,7 +66,7 @@ list holds at most 50 entries and MUST NOT repeat an entry.
 Tests: `test_the_schema_is_strict`, `test_a_fragile_piece_can_only_hold_back`,
 `test_self_slug_must_name_the_agent`, `test_git_author_cannot_inject_options`,
 `test_proposal_kinds_are_the_three_the_config_check_knows`,
-`test_profile_key_dashboards_generated_is_strict`.
+`test_profile_key_dashboards_generated_is_strict`, `test_rebase_deny_is_its_own_strict_key`.
 
 ## Readable entries
 
@@ -92,6 +93,11 @@ Tests: `test_the_schema_is_strict`, `test_a_fragile_piece_can_only_hold_back`,
   never-reload domain. Tests `test_reload_deny_only_adds`,
   `test_a_profile_listing_a_never_reload_domain_is_refused`,
   `test_lock_alarm_and_garage_vendors_are_never_reloaded`.
+- P17. `rebase.deny` only adds to what is never rebased (the never-reload
+  list in code and live access hardware); nothing in the profile can make
+  one of those rebasable. `reload.deny` is about autonomous reloads and
+  does not block an approved rebase. Test
+  `test_reload_deny_never_blocks_a_rebase_but_rebase_deny_does`.
 - P16. `dashboards.generated` only narrows: it adds dashboards the
   self-guard never opens a save scope for, and no profile key makes a
   YAML-mode or the default dashboard writable. Test

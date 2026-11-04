@@ -115,6 +115,13 @@ class ReloadProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class RebaseProfile:
+    # Custom-integration forks the agent never proposes or applies a Core rebase for (`opsd.forkrebase`), on top
+    # of the never-reload list in code. `reload.deny` is about autonomous reloads and does not apply here.
+    deny: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
 class GitProfile:
     """Git proposals: off unless enabled here (no deploy key is generated while off)."""
 
@@ -157,6 +164,7 @@ class HouseProfile:
     health: HealthProfile = field(default_factory=HealthProfile)
     updates: UpdatesProfile = field(default_factory=UpdatesProfile)
     reload: ReloadProfile = field(default_factory=ReloadProfile)
+    rebase: RebaseProfile = field(default_factory=RebaseProfile)
     git: GitProfile = field(default_factory=GitProfile)
     docs: DocsProfile = field(default_factory=DocsProfile)
     dashboards: DashboardsProfile = field(default_factory=DashboardsProfile)
@@ -289,7 +297,7 @@ def overlay_installed(name: str) -> bool:
 def parse(data: Any) -> HouseProfile:
     """The profile from parsed YAML. Raises ProfileError on anything outside the schema."""
     top = _mapping(data, "the profile", ("notify_service", "self_slug", "overlays", "house_notes", "health",
-                                         "updates", "reload", "git", "docs", "dashboards"))  # fmt: skip
+                                         "updates", "reload", "rebase", "git", "docs", "dashboards"))  # fmt: skip
     overlays = _texts(top.get("overlays"), "overlays", re.compile("|".join(OVERLAYS)), "one of " + ", ".join(OVERLAYS))
     missing = [name for name in overlays if not overlay_installed(name)]
     if missing:
@@ -327,6 +335,9 @@ def parse(data: Any) -> HouseProfile:
         if domain in NEVER_RELOAD_DOMAINS or domain in deny:
             raise ProfileError(f"reload.domains: {domain} is never reloaded (locks, alarm, access, radios or core"
                                " plumbing, or reload.deny)")  # fmt: skip
+
+    rebase_raw = _mapping(top.get("rebase"), "rebase", ("deny",))
+    rebase_deny = frozenset(_texts(rebase_raw.get("deny"), "rebase.deny", _DOMAIN, "integration domains"))
 
     git_raw = _mapping(top.get("git"), "git", ("enabled", "author_name", "author_email", "proposals"))
     enabled = _bool(git_raw.get("enabled", False), "git.enabled")
@@ -371,6 +382,7 @@ def parse(data: Any) -> HouseProfile:
         health=health,
         updates=updates,
         reload=ReloadProfile(domains=domains, deny=deny),
+        rebase=RebaseProfile(deny=rebase_deny),
         git=git,
         docs=docs,
         dashboards=DashboardsProfile(generated=frozenset(generated)),

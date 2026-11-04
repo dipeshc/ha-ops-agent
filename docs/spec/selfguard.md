@@ -92,7 +92,7 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   ([reload.md](reload.md)); approval requests for the agent or the
   Supervisor are refused. A fork rebase is never proposed, approved or
   executed for a domain on the never-reload list or the profile's
-  `reload.deny`, nor for one that provides access hardware (locks, the
+  `rebase.deny`, nor for one that provides access hardware (locks, the
   alarm, garage doors, gates; [updates.md](updates.md) U32). Tests `test_reload_can_never_target_the_platform`,
   `test_update_approval_requests_for_the_agent_are_refused`.
 

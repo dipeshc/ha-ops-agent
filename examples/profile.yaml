@@ -54,6 +54,12 @@ reload:
   # Never reloaded, on top of the built-in list.
   deny: [my_custom_hvac]
 
+# Custom-integration forks the agent never proposes a Core rebase for (each rebase needs your
+# approval anyway). Locks, alarms and garage doors are refused whatever you list. reload.deny does
+# not apply here.
+rebase:
+  deny: []
+
 # Config changes as git proposals. Needs the configuration directory to be a git repository.
 git:
   enabled: false

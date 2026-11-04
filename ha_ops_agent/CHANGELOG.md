@@ -34,8 +34,10 @@ Custom integrations that fork a Core one:
   ("Rebase onto Core") with the full diff, the changes kept and the Core
   version, and a card in the chat when "Plan a fix" made it.
 - A fork of anything that opens the house (locks, the alarm, garage doors,
-  gates), or of a domain on the never-reload list or your profile's
-  `reload.deny`, is never rebased.
+  gates), or of a domain on the built-in never-reload list, is never
+  rebased. New optional profile key `rebase.deny: [domains]` (default
+  empty) adds forks never to rebase; `reload.deny` only stops the agent
+  reloading on its own and does not block a rebase you approve.
 - Approving it ("Rebase tonight" or "Rebase now") runs it as an update job:
   an encrypted backup, the old files kept, the new files written in place
   (mode and owner kept; the integration's directory is opened level by

@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import json
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -674,7 +675,7 @@ async def test_access_hardware_and_never_reload_domains_are_never_rebased(world:
     response = await world.call("propose-rebase", domain="yalexs_ble", keep="none", reason="r")
     assert not response["ok"] and "never-reload list" in response["error"]
     assert forkrebase.proposals(world.store) == []
-    # The profile's reload.deny counts too, and Core unreadable refuses (fail closed).
+    # Core unreadable refuses (fail closed).
     from opsd import reload
 
     assert reload.never_touched("acme_fan", frozenset({"acme_fan"})) is not None
@@ -815,3 +816,53 @@ async def test_a_rebase_left_applying_outside_a_run_is_settled(pipe: tuple[Rig, 
     rig.manager.reconcile_forks()
     assert state(changed) == "failed" and "stopped mid-way" in forkrebase.load(rig.store, changed["id"])["detail"]
     assert item(rig, changed)["need"]["kind"] == "ack"
+
+
+def _with_profile(world: World, **profile: Any) -> None:
+    from tests.conftest import SAMPLE_PROFILE, make_options
+
+    options = make_options(agent__mode="act", profile=dataclasses.replace(SAMPLE_PROFILE, **profile))
+    world.env = world.server._env = dataclasses.replace(world.env, options=options)
+
+
+async def test_reload_deny_never_blocks_a_rebase_but_rebase_deny_does(world: World) -> None:
+    from opsd.profile import RebaseProfile, ReloadProfile
+
+    # reload.deny is about reloading on its own, without approval; an approved rebase is not that.
+    _with_profile(world, reload=ReloadProfile(deny=frozenset({DOMAIN})))
+    response = await world.call("propose-rebase", domain=DOMAIN, keep="fan.py#1", reason="r")
+    assert response["ok"], response
+    _with_profile(world, rebase=RebaseProfile(deny=frozenset({DOMAIN})))
+    world.server.end_run()
+    world.run(allowed=CHAT.capabilities, principal=ADMIN)
+    response = await world.call("propose-rebase", domain=DOMAIN, keep="fan.py#1", reason="r")
+    assert not response["ok"] and "rebase.deny" in response["error"]
+
+
+async def test_the_executor_refuses_a_rebase_deny_domain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from opsd.profile import RebaseProfile, ReloadProfile
+    from opsd.updexec import Executors
+    from tests.conftest import SAMPLE_PROFILE, make_options
+
+    monkeypatch.setattr(evidence, "fetch_text", github())
+    rig = Rig(tmp_path)
+    try:
+        run = rig.store.start_update_run(window_day="d", trigger="fork_rebase", mode="act", plan=[], now=rig.now) or 0
+        spec = {"entity_id": "fork.acme_fan", "kind": "fork_rebase", "title": "t", "from_version": ORIGIN_TAG,
+                "to_version": INSTALLED, "target": {"proposal": "0123456789abcdef", "domain": DOMAIN}}  # fmt: skip
+        [job] = rig.store.add_update_jobs(run, [spec], now=rig.now)
+        for profile, refused in ((dataclasses.replace(SAMPLE_PROFILE, reload=ReloadProfile(deny=frozenset({DOMAIN}))),
+                                  False),
+                                 (dataclasses.replace(SAMPLE_PROFILE, rebase=RebaseProfile(deny=frozenset({DOMAIN}))),
+                                  True)):  # fmt: skip
+            options = make_options(strict=False, profile=profile, agent__mode="act", updates__auto_install="on")
+            executors = Executors(ops=rig.ops, store=rig.store, options=options, clock=lambda: rig.now)
+            written: list[bool] = []
+            if refused:
+                with pytest.raises(ExecutorRefused, match=r"rebase\.deny"):
+                    await executors.fork_apply(job, proven=True, write=partial(written.append, True))
+            else:
+                await executors.fork_apply(job, proven=True, write=partial(written.append, True))
+            assert written == ([] if refused else [True])
+    finally:
+        rig.store.close()

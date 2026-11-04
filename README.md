@@ -192,6 +192,7 @@ pieces, no watched entities, no reloadable integrations, git off.
 | `updates.fragile[]` | Integrations that have broken before: `name`, `tier` (`approve`, `pinned` or `never`), `reason`, and `entities`, `repos` or `domains` to match. Optional `bumps` limits it to `patch`, `minor`, `major` or `unknown` versions. |
 | `updates.version_gates[]` | Hold Core from `core_from` on for an `integration`, with a `reason`, until you change the profile. |
 | `reload.domains`, `reload.deny` | Integrations it may reload, and extra ones it never reloads. |
+| `rebase.deny` | Custom-integration forks it never proposes a Core rebase for. |
 | `git.enabled`, `author_name`, `author_email`, `proposals` | Config changes as git proposals (`automations`, `alerts`, `templates`). Needs the configuration directory to be a git repository. |
 | `dashboards.generated` | Storage dashboards something else writes; the agent never edits them. |
 | `docs.runbook`, `docs.facts`, `docs.readable` | Markdown files and folders the agent reads first. `facts` must be `docs/<name>.md`; nothing under `ops/`. |

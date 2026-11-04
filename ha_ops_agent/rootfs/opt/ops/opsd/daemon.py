@@ -1595,6 +1595,10 @@ class Daemon:
             raise ApprovalError("The proposal changed; open it again.")
         if not self.options.acting:
             raise ApprovalError("The agent is in observe mode: nothing is applied.")
+        refusal = await asyncio.to_thread(forkrebase.live_access_refusal, self.client, str(record["domain"]),
+                                          self.options.profile.reload.deny)  # fmt: skip
+        if refusal is not None:
+            raise ApprovalError(f"Not approvable: {refusal}.")
         bound = await updates.fork_binding(proposal)
         if bound is None or bound != forkrebase.binding(record):
             raise ApprovalError("The fork or Home Assistant Core changed since it was proposed; ask for a new one.")

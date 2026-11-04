@@ -28,6 +28,7 @@ diff, and a restore with a second restart on any failure or regression.
 """
 
 import ast
+import asyncio
 import contextlib
 import difflib
 import hashlib
@@ -45,7 +46,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from opsd import selfguard
+from opsd import reload, selfguard
+from opsd.api import LiveAPI
 from opsd.capabilities import FORK_KEEP_RE, Args, CapabilityError
 from opsd.conversation import clean_text, fence
 from opsd.coresource import (
@@ -66,6 +68,7 @@ from opsd.coresource import (
 from opsd.jsonstore import write_json_atomic
 from opsd.runctx import ExecContext
 from opsd.store import Store, StoreError
+from opsd.supervisor import ApiError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -703,6 +706,9 @@ def validate_propose(ctx: ExecContext, args: Args) -> Args:
     domain = args.opt_text("domain") or ""
     if selfguard.self_path(f"custom_components/{domain}/") or selfguard.is_self_slug(domain):
         raise CapabilityError("the agent never changes itself")
+    refusal = reload.never_touched(domain, ctx.options.profile.reload.deny)
+    if refusal is not None:
+        raise CapabilityError(f"no rebase: {refusal}")
     try:
         custom_dir(ctx.paths.custom_components, domain)
         parse_keep(args.opt_text("keep") or "")
@@ -713,12 +719,28 @@ def validate_propose(ctx: ExecContext, args: Args) -> Args:
     return args
 
 
+def live_access_refusal(client: Any, domain: str, deny: Iterable[str]) -> str | None:
+    """`reload.access_refusal` against Core now (fail closed: an unreadable answer refuses)."""
+
+    async def check() -> str | None:
+        async with LiveAPI(client) as api:
+            return await reload.access_refusal(api, domain, deny)
+
+    try:
+        return asyncio.run(check())
+    except (CapabilityError, ApiError, OSError, ValueError, RuntimeError) as err:
+        return f"could not check {domain} against the access-hardware rules ({str(err)[:80]})"
+
+
 def exec_propose(ctx: ExecContext, args: Args) -> str:
     """Build the rebase and record it as a proposal for the admin's approval (nothing is written to the fork)."""
     store = ctx.env.store
     if store is None:
         raise CapabilityError("the store is unavailable")
     domain = args.text("domain")
+    refusal = live_access_refusal(ctx.client, domain, ctx.options.profile.reload.deny)
+    if refusal is not None:
+        raise CapabilityError(f"no rebase: {refusal}")
     installed = installed_core_version(ctx)
     source = CoreSource(ctx.paths.data, store=store)
     try:

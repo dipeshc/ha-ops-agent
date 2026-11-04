@@ -1,10 +1,11 @@
 """Fork rebases: built by the daemon from Core's source and the fork, approval-bound, applied by the update pipeline."""
 
+import asyncio
 import dataclasses
 import json
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -182,8 +183,42 @@ def test_unknown_hunks_and_checks_refuse(paths: Paths, gh: FakeGitHub, fork: Pat
 # ------------------------------------------------------------------ the capability
 
 
+class FakeCore:
+    """Core's registry and states for the access-hardware check (`reload.access_refusal`)."""
+
+    entries: ClassVar[list[dict[str, Any]]] = [
+        {"entry_id": "fan1", "domain": DOMAIN},
+        {"entry_id": "gar1", "domain": "acme_garage"},
+    ]
+    registry: ClassVar[list[dict[str, Any]]] = [
+        {"entity_id": "fan.bedroom", "platform": DOMAIN, "config_entry_id": "fan1"},
+        {"entity_id": "cover.big_door", "platform": "acme_garage", "config_entry_id": "gar1"},
+    ]
+    states: ClassVar[list[dict[str, Any]]] = [
+        {"entity_id": "fan.bedroom", "state": "off"},
+        {"entity_id": "cover.big_door", "state": "closed", "attributes": {"device_class": "garage"}},
+    ]
+
+    def __init__(self, _client: Any) -> None:
+        pass
+
+    async def __aenter__(self) -> FakeCore:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def ws(self, msg_type: str, **_: Any) -> Any:
+        return {"config_entries/get": self.entries, "config/entity_registry/list": self.registry}[msg_type]
+
+    async def core_rest(self, path: str) -> Any:
+        assert path == "/states"
+        return self.states
+
+
 @pytest.fixture
-def world(paths: Paths, gh: FakeGitHub, fork: Path) -> Iterator[World]:
+def world(paths: Paths, gh: FakeGitHub, fork: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
+    monkeypatch.setattr(forkrebase, "LiveAPI", FakeCore)
     w = World(paths)
     w.env = w.server._env = dataclasses.replace(w.env, client=FakeSupervisor(INSTALLED))  # type: ignore[arg-type]
     w.run(allowed=CHAT.capabilities, principal=ADMIN)
@@ -626,3 +661,42 @@ async def test_a_crash_before_anything_was_written_is_a_plain_failure(
     job = fork_job(rig)
     assert job.state == "failed" and "nothing was written" in job.detail and ops.restarts == []
     assert forkrebase.load(rig.store, record["id"])["state"] == "failed"
+
+
+async def test_access_hardware_and_never_reload_domains_are_never_rebased(world: World, paths: Paths) -> None:
+    # An integration that provides a garage door, even under a harmless name.
+    garage = {**FORK_FILES, "manifest.json": FORK_MANIFEST.replace(DOMAIN, "acme_garage")}
+    write_custom(paths, garage, "acme_garage")
+    response = await world.call("propose-rebase", domain="acme_garage", keep="none", reason="r")
+    assert not response["ok"] and "controls access hardware: it provides cover.big_door" in response["error"]
+    # A domain on the never-reload list is refused before anything is read.
+    write_custom(paths, {**FORK_FILES, "manifest.json": MANIFEST.replace(DOMAIN, "yalexs_ble")}, "yalexs_ble")
+    response = await world.call("propose-rebase", domain="yalexs_ble", keep="none", reason="r")
+    assert not response["ok"] and "never-reload list" in response["error"]
+    assert forkrebase.proposals(world.store) == []
+    # The profile's reload.deny counts too, and Core unreadable refuses (fail closed).
+    from opsd import reload
+
+    assert reload.never_touched("acme_fan", frozenset({"acme_fan"})) is not None
+    assert reload.never_touched("acme_fan") is None
+
+    class Down(FakeCore):
+        async def ws(self, msg_type: str, **_: Any) -> Any:
+            raise ApiError("GET", "/ws", 502, "down")
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(forkrebase, "LiveAPI", Down)
+        refusal = await asyncio.to_thread(forkrebase.live_access_refusal, None, DOMAIN, ())
+        assert refusal is not None and "could not check acme_fan" in refusal
+    assert await asyncio.to_thread(forkrebase.live_access_refusal, None, DOMAIN, ()) is None
+
+
+async def test_the_executor_refuses_a_never_reload_domain(pipe: tuple[Rig, ForkOps, Paths]) -> None:
+    rig, ops, _paths = pipe
+    run = rig.store.start_update_run(window_day="d", trigger="fork_rebase", mode="act", plan=[], now=rig.now) or 0
+    spec = {"entity_id": "fork.zwave_js", "kind": "fork_rebase", "title": "t", "from_version": ORIGIN_TAG,
+            "to_version": INSTALLED, "target": {"proposal": "0123456789abcdef", "domain": "zwave_js"}}  # fmt: skip
+    [job] = rig.store.add_update_jobs(run, [spec], now=rig.now)
+    with pytest.raises(ExecutorRefused, match="never-reload list"):
+        await rig.manager.executors.fork_apply(job, proven=True, write=lambda: None)
+    assert ops.restarts == []

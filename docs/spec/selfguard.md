@@ -90,7 +90,10 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   `test_a_profile_cannot_make_secrets_or_the_agent_readable`.
 - G7. Reloads can never target a platform or vendor on the never-list
   ([reload.md](reload.md)); approval requests for the agent or the
-  Supervisor are refused. Tests `test_reload_can_never_target_the_platform`,
+  Supervisor are refused. A fork rebase is never proposed, approved or
+  executed for a domain on the never-reload list or the profile's
+  `reload.deny`, nor for one that provides access hardware (locks, the
+  alarm, garage doors, gates; [updates.md](updates.md) U32). Tests `test_reload_can_never_target_the_platform`,
   `test_update_approval_requests_for_the_agent_are_refused`.
 
 ## Dashboards

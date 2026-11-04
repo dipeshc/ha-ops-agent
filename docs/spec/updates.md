@@ -341,7 +341,21 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   rolled back by the update executors (`_check_job` refuses its kind and
   entity), and the fork executors refuse any other job, an entity other
   than `fork.<domain>` for the job's own domain, a missing proposal id, or
-  a domain that names the agent (`self_path`). `fork.apply` is
+  a domain that names the agent (`self_path`) or is on the never-reload
+  list or the profile's `reload.deny`. `fork.apply` is
   daemon-internal ([capabilities.md](capabilities.md) K3), tier APPROVE,
   and `capabilities.never` can refuse it.
+- U32. **Never access hardware.** A fork rebase is refused for a domain on
+  the never-reload list (`policy.NEVER_RELOAD_DOMAINS`: locks, the alarm,
+  access, radios, core plumbing) or the profile's `reload.deny`, and for
+  any domain that provides access hardware: an entity of its platform or
+  its config entries (enabled or not) that `reload` counts as opening the
+  house (a lock, an alarm panel, a cover not positively a blind, shade,
+  curtain, awning or shutter, or a switch, button, valve or cover named
+  like access). The lists are checked when it is proposed, when the admin
+  approves it and by the executor; the live access check (Core's config
+  entries, registry and states) when it is proposed and approved, and an
+  unreadable answer refuses. Tests
+  `test_access_hardware_and_never_reload_domains_are_never_rebased`,
+  `test_the_executor_refuses_a_never_reload_domain`.
 

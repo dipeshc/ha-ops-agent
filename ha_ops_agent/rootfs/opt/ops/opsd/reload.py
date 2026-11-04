@@ -174,6 +174,29 @@ def _protected(entities: Iterable[Mapping[str, Any]], states: Mapping[str, Mappi
     return None
 
 
+def never_touched(domain: str, deny: Iterable[str] = ()) -> str | None:
+    """Why the agent may never change this integration at all (a fork rebase, `opsd.forkrebase`): the never-reload
+    list or the profile's `reload.deny`. None when it is not on them."""
+    if domain in DENY_DOMAINS or domain in set(deny):
+        return f"{domain} is on the agent's never-reload list (locks, alarm, access, radios or core plumbing)"
+    return None
+
+
+async def access_refusal(api: ReloadAPI, domain: str, deny: Iterable[str] = ()) -> str | None:
+    """`never_touched`, or (live, fail closed) the domain provides access hardware: any entity of its platform or
+    its config entries (enabled or not) that `_protected` counts (a lock, an alarm panel, a cover not positively a
+    blind, or a switch, button, valve or cover named like access). None when it may be changed."""
+    refusal = never_touched(domain, deny)
+    if refusal is not None:
+        return refusal
+    entries = [str(e["entry_id"]) for e in _require_list(await api.ws("config_entries/get"), "config entries")
+               if e.get("domain") == domain and isinstance(e.get("entry_id"), str)]  # fmt: skip
+    registry = _require_list(await api.ws("config/entity_registry/list"), "entity registry")
+    states = _states_map(await api.core_rest("/states"))
+    reason = _protected(_domain_entities(registry, domain, entries), states)
+    return f"{domain} controls access hardware: {reason}" if reason else None
+
+
 def _states_map(raw: Any) -> dict[str, dict[str, Any]]:
     return {str(s["entity_id"]): s for s in _require_list(raw, "states") if isinstance(s.get("entity_id"), str)}
 

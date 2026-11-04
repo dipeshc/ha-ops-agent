@@ -60,6 +60,7 @@ from opsd.api import CORE_WS_URL, LiveAPI
 from opsd.capabilities import CAPABILITIES, Capability
 from opsd.config import Options
 from opsd.policy import (
+    NEVER_RELOAD_DOMAINS,
     SELF_UPDATE_ENTITY,
     Decision,
     Origin,
@@ -599,8 +600,7 @@ class Executors:
 
     # -------------------------------------------------------- fork rebases
 
-    @staticmethod
-    def _check_fork(job: UpdateJob) -> str:
+    def _check_fork(self, job: UpdateJob) -> str:
         """A fork rebase job: its own kind, a `fork.<domain>` entity naming a custom integration that is not the
         agent, and a proposal id. Returns the domain."""
         match = FORK_ENTITY_RE.fullmatch(job.entity_id)
@@ -611,6 +611,8 @@ class Executors:
             raise ExecutorRefused("a fork rebase job names its proposal")
         if selfguard.self_path(f"custom_components/{match.group(1)}/") or selfguard.is_self_slug(match.group(1)):
             raise ExecutorRefused("the agent never changes itself")
+        if match.group(1) in NEVER_RELOAD_DOMAINS | self._options.profile.reload.deny:
+            raise ExecutorRefused(f"{match.group(1)} is on the never-reload list (access hardware or core plumbing)")
         for version in (job.from_version, job.to_version):
             if not VERSION_RE.fullmatch(version):
                 raise ExecutorRefused("bad version string")

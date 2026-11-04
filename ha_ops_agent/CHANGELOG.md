@@ -31,6 +31,9 @@ Custom integrations that fork a Core one:
   and sets the manifest's `version`. The proposal is an item on Home
   ("Rebase onto Core") with the full diff, the changes kept and the Core
   version, and a card in the chat when "Plan a fix" made it.
+- A fork of anything that opens the house (locks, the alarm, garage doors,
+  gates), or of a domain on the never-reload list or your profile's
+  `reload.deny`, is never rebased.
 - Approving it ("Rebase tonight" or "Rebase now") runs it as an update job:
   an encrypted backup, the old files kept, the new files written in place
   (mode and owner kept; the integration's directory is opened level by

@@ -204,7 +204,9 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   `opsd.forkrebase:validate_propose`): effects `{PROPOSE}`, origins admin,
   admin-chat and agent-self, quota 1 per run and 3 per day, a validator or
   build refusal gives the daily unit back. Granted to `chat`,
-  `investigate` and `maintenance_plan`, never `triage` or `followup`. It
+  `investigate` and `maintenance_plan`, never `triage` or `followup`; in a
+  `maintenance_plan` run only for a domain with a repair or release-notes
+  finding ([maintenance.md](maintenance.md) M16). It
   records a proposal and writes nothing else; see
   [proposals.md](proposals.md) C11–C14. Tests `tests/test_forkrebase.py`.
 

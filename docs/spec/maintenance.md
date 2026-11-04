@@ -65,9 +65,10 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
     `Core log`), fenced as `<evidence>` in the plan prompt, and in the
     finding's evidence hash; never in a fact, the title, the gist, `about`,
     a need or a push.
-  What is removed is something the integration uses, not the integration:
-  the title is "<domain> uses `<thing>`, which Home Assistant removes in
-  <YYYY.M>", or "<domain> uses something Home Assistant removes in
+  The title says the claim is the log's and that what is removed is
+  something the integration uses, not the integration: "The Core log says
+  <domain> uses `<thing>`, which Home Assistant removes in <YYYY.M>", or
+  "The Core log says <domain> uses something Home Assistant removes in
   <YYYY.M>" without a code-like thing ("… has deprecated" without a
   removal). The gist starts "the Core log says" ("the Core log says
   removed in <YYYY.M>, <n> releases left", or "the Core log names no
@@ -227,7 +228,11 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   <domain> [--fork]`, [capabilities.md](capabilities.md) K14), which it
   uses for a finding about a custom integration that shadows or forks a
   Core one and cites as fact, and `fork.propose`
-  ([proposals.md](proposals.md) C11): a fork rebase the admin approves.
+  ([proposals.md](proposals.md) C11): a fork rebase the admin approves,
+  only for a domain with a finding from a repair or the release notes
+  (`AUTHORITATIVE`); the daemon refuses it for one known only from a log
+  line, which any integration can write. Chat and investigations (the
+  admin asked) may propose one whatever the signal.
   "Plan a fix" on such a finding is an investigation with the same two;
   when its run proposes a rebase, the chat gets a "Rebase onto Core" card
   ([chat.md](chat.md) T7) pointing at the proposal's item. An answer is kept only for a finding that was asked about, once

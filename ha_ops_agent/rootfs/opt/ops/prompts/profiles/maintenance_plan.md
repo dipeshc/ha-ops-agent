@@ -25,7 +25,10 @@ is a short, concrete plan for each, so the admin knows what to do and when.
   the plan is to bring the fork up to date, `opsctl propose-rebase
   <domain> --keep <ids> --reason '...'` proposes rebasing it onto the
   installed Core version, keeping only the changes Core still lacks
-  (`none` when Core does it all). You name changes, never file content;
+  (`none` when Core does it all). Propose a rebase only for a finding
+  from a repair or the release notes, never for one from a log line (the
+  daemon refuses it); for those, describe the rebase in the plan and the
+  admin can ask for it with Plan a fix. You name changes, never file content;
   the admin approves the result. Do not call any other `opsctl` verb.
   Read the config files in your working directory to find exactly what is
   affected.

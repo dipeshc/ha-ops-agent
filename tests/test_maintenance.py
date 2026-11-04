@@ -338,8 +338,8 @@ async def test_only_deprecations_within_30_days_of_their_deadline_need_the_admin
     items = rig.items()
     near = items["acme_sprinkler: deprecated, removed in 2030.4"]
     assert near["state"] == "waiting" and near["need"]["kind"] == "ack" and "recheck_at" not in near["source"]
-    # The far one comes from the Core log: what is removed is something the integration that logged it uses.
-    far = items["acme_weather uses something Home Assistant removes in 2030.9"]
+    # The far one comes from the Core log: labelled as its claim, about something the integration uses.
+    far = items["The Core log says acme_weather uses something Home Assistant removes in 2030.9"]
     assert far["state"] == "proposed" and not far["needs"]
     assert far["gist"] == "the Core log says removed in 2030.9, 7 releases left"
     undated = items["acme_weather: its repository is archived"]
@@ -630,7 +630,7 @@ async def test_a_log_line_never_holds_an_update_back_escalates_or_pushes(tmp_pat
     assert log.removal == "2030.4"
     assert log not in rig.manager.removals()
     assert removal_block({"kind": "core", "latest": "2030.4.1"}, [log]) is None
-    item = rig.items()["acme_noise uses something Home Assistant removes in 2030.4"]
+    item = rig.items()["The Core log says acme_noise uses something Home Assistant removes in 2030.4"]
     assert item["gist"] == "the Core log says removed in 2030.4, 2 releases left"
     assert {"label": "Source", "value": "Core log"}.items() <= next(
         f for f in item["facts"] if f["label"] == "Source"
@@ -793,17 +793,22 @@ def test_a_log_removal_names_the_integration_that_uses_it_never_core() -> None:
     found = {f.domain: f for f in maintenance.from_logs(REAL_SHAPED_LOGS, NOW)}
     assert set(found) == {"acme_fan", "acme_blower", "example_light"}
     assert found["acme_fan"].title() == (
-        "acme_fan uses `async_forward_entry_setup`, which Home Assistant removes in 2030.6"
+        "The Core log says acme_fan uses `async_forward_entry_setup`, which Home Assistant removes in 2030.6"
     )
     # The constant's logger is the Core integration that defines it; Core's report names the one that uses it.
     assert (
-        found["acme_blower"].title() == "acme_blower uses `SUPPORT_SET_SPEED`, which Home Assistant removes in 2030.7"
+        found["acme_blower"].title()
+        == "The Core log says acme_blower uses `SUPPORT_SET_SPEED`, which Home Assistant removes in 2030.7"
     )
     assert found["acme_blower"].affected == ["custom integration acme_blower"]
     # Nothing code-like to quote: "something".
-    assert found["example_light"].title() == "example_light uses something Home Assistant removes in 2030.8"
+    assert (
+        found["example_light"].title()
+        == "The Core log says example_light uses something Home Assistant removes in 2030.8"
+    )
     assert found["example_light"].affected == ["integration example_light"]
-    assert not any(f.title().startswith(("Core", "The Core log")) for f in found.values())
+    # Framed as the log's claim, and never with "Core" as the integration.
+    assert all(f.title().startswith(f"The Core log says {d} uses ") for d, f in found.items())
 
 
 @pytest.mark.parametrize(

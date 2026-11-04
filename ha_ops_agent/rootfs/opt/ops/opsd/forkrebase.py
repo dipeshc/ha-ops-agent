@@ -46,7 +46,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from opsd import reload, selfguard
+from opsd import maintenance, reload, selfguard
 from opsd.api import LiveAPI
 from opsd.capabilities import FORK_KEEP_RE, Args, CapabilityError
 from opsd.conversation import clean_text, fence
@@ -718,7 +718,17 @@ def validate_propose(ctx: ExecContext, args: Args) -> Args:
         raise CapabilityError(str(err)) from err
     if not (args.opt_text("reason") or "").strip():
         raise CapabilityError("--reason is required: why the fork needs the rebase")
+    store = ctx.env.store
+    if ctx.run.profile == "maintenance_plan" and not (store is not None and authoritative_finding(store, domain)):
+        # The agent's own plan proposes a rebase only for what Home Assistant vouches for (a repair or the release
+        # notes), never because of a log line, which any integration can write. The admin can still ask in the chat.
+        raise CapabilityError("the maintenance plan proposes a rebase only for a repair or a release-notes finding")
     return args
+
+
+def authoritative_finding(store: Store, domain: str) -> bool:
+    """A maintenance finding about `domain` from a signal Home Assistant vouches for (a repair, the release notes)."""
+    return any(f.domain == domain and f.signal in maintenance.AUTHORITATIVE for f in maintenance.load(store))
 
 
 def live_access_refusal(client: Any, domain: str, deny: Iterable[str]) -> str | None:

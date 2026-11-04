@@ -746,3 +746,26 @@ async def test_the_core_source_backoff_is_its_own(world: World, gh: FakeGitHub) 
     fresh = CoreSource(world.paths.data / "fresh", store=world.store)
     with pytest.raises(CoreSourceError, match="slow down"):
         fresh.listing("2026.7.0", DOMAIN)
+
+
+async def test_the_maintenance_plan_never_proposes_a_rebase_from_a_log_line(world: World) -> None:
+    from datetime import UTC, datetime
+
+    from opsd import maintenance
+    from opsd.runctx import AGENT_SELF
+
+    world.server.end_run()
+    world.run(allowed=MAINTENANCE_PLAN.capabilities, principal=AGENT_SELF).profile = "maintenance_plan"
+
+    def findings(signal: str) -> None:
+        found = maintenance.Finding(key="0123456789abcdef", variant="deprecation", signal=signal, what="x",
+                                    domain=DOMAIN, removal="2030.9")  # fmt: skip
+        world.store.kv_set(maintenance.FINDINGS_KEY, json.dumps([found.to_json()]), now=datetime.now(UTC))
+
+    findings("log")
+    response = await world.call("propose-rebase", domain=DOMAIN, keep="fan.py#1", reason="r")
+    assert not response["ok"] and "only for a repair or a release-notes finding" in response["error"]
+    findings("repair")
+    response = await world.call("propose-rebase", domain=DOMAIN, keep="fan.py#1", reason="r")
+    assert response["ok"], response
+    # The admin's chat may still ask for one whatever the signal (test_the_ai_names_hunks_and_never_supplies_content).

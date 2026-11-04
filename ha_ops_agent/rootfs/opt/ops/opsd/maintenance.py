@@ -17,7 +17,8 @@ never followed.
   left out. The log empties on a restart, so a log finding stays for `LOG_STICKY` after it was last seen.
   Any integration can write a log line, so a log finding is a quiet item: it never escalates, pushes or
   holds an update back (only `AUTHORITATIVE` signals do). What is removed is something the integration
-  uses, not the integration: the title reads "<x> uses `<thing>`, which Home Assistant removes in X"
+  uses, not the integration: the title reads "The Core log says <x> uses `<thing>`, which Home Assistant
+  removes in X"
   (the thing only when it is safely code-like, `deprecated_thing`; else "something"). Only the domain,
   that code-like name and the removal reach the title; the message text is shown only under `agent`
   and fenced in the plan prompt.
@@ -253,7 +254,8 @@ class Finding:
             thing = str(self.detail.get("thing") or "")
             used = f"`{thing}`, which" if thing and deprecated_thing(f"`{thing}`") == thing else "something"
             said = f"removes in {self.removal}" if self.removal else "has deprecated"
-            return f"{name} uses {used} Home Assistant {said}"[:120]
+            # Labelled as the log's claim: any integration can write a log line.
+            return f"The Core log says {name} uses {used} Home Assistant {said}"[:120]
         return f"{name}: {self.what}"[:120]
 
     def to_json(self) -> dict[str, Any]:

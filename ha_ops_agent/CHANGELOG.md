@@ -58,9 +58,13 @@ Maintenance:
 
 - A Core log deprecation is tied to the integration that logged it (or the
   one Core's own report names), never to words like "Core" or "helpers",
-  and is worded as what it is: "acme_fan uses `old_api`, which Home
-  Assistant removes in 2027.8". A line with no reliable integration is
-  dropped, and so is a log finding an earlier version titled "Core".
+  and is worded as what it is, still as the log's claim: "The Core log
+  says acme_fan uses `old_api`, which Home Assistant removes in 2027.8". A
+  line with no reliable integration is dropped, and so is a log finding an
+  earlier version titled "Core".
+- The nightly maintenance plan proposes a fork rebase only for a finding
+  from a repair or the release notes, never from a log line; you can
+  still ask for one with Plan a fix or in the chat.
 
 Panel:
 

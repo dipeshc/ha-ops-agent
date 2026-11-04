@@ -77,8 +77,10 @@ def test_utilisation_parsing() -> None:
                 {"rateLimitType": "five_hour", "utilization": float("inf")}):  # fmt: skip
         assert utilisation(bad, "five_hour") is None
     # The run's log line carries the readings exactly as reported, so their unit can be checked later.
-    assert raw_utilisation(info) == {"five_hour": 42, "seven_day": 12.5}
-    assert raw_utilisation({"rateLimitType": "seven_day", "utilization": 0.09}) == {"seven_day": 0.09}
+    assert raw_utilisation(info) == {"five_hour": {"value": 42, "type": "int"},
+                                     "seven_day": {"value": 12.5, "type": "float"}}  # fmt: skip
+    assert raw_utilisation({"rateLimitType": "seven_day", "utilization": 0.09}) == {
+        "seven_day": {"value": 0.09, "type": "float"}}  # fmt: skip
     assert (
         raw_utilisation(None) == {} and raw_utilisation({"unifiedWindows": {"five_hour": {"utilization": "x"}}}) == {}
     )
@@ -530,17 +532,23 @@ async def test_kill_switch_stops_a_running_triage_but_not_the_safety_push(
             daemon.close()
 
 
-def test_utilisation_is_always_read_as_percent() -> None:
-    def info(value: float) -> dict[str, Any]:
+def test_utilisation_is_read_by_its_json_type() -> None:
+    def info(value: object) -> dict[str, Any]:
         return {"rateLimitType": "five_hour", "utilization": value}
 
-    # The provider reports whole percents: 1 is 1 % of the window, never the whole of it.
-    assert utilisation(info(1), "five_hour") == pytest.approx(0.01)
-    assert (utilisation(info(1), "five_hour") or 0) < Caps.from_options(Options()).account_busy  # not "busy"
-    assert utilisation(info(0), "five_hour") == 0.0 and utilisation(info(100), "five_hour") == 1.0
-    # Over 100 is a saturated window, capped (never dropped as "no reading").
+    busy = Caps.from_options(Options()).account_busy
+    # An int is a percent: 1 is 1 % of the window, never the whole of it.
+    assert utilisation(info(1), "five_hour") == pytest.approx(0.01) and (utilisation(info(1), "five_hour") or 0) < busy
+    assert utilisation(info(95), "five_hour") == pytest.approx(0.95) and utilisation(info(0), "five_hour") == 0.0
+    # A float up to 1.0 is a fraction (as seen live: 0.09 is 9 %); a larger float is a percent.
+    assert utilisation(info(0.09), "five_hour") == pytest.approx(0.09)
+    assert (utilisation(info(0.95), "five_hour") or 0) >= busy  # the account is busy: the agent yields
+    assert utilisation(info(1.0), "five_hour") == 1.0 and utilisation(info(28.0), "five_hour") == pytest.approx(0.28)
+    assert utilisation(info(0.0), "five_hour") == 0.0
+    # Over 100 % is a saturated window, capped (never dropped as "no reading").
     assert utilisation(info(100.5), "five_hour") == 1.0 and utilisation(info(250), "five_hour") == 1.0
-    assert utilisation(info(0.7), "five_hour") == pytest.approx(0.007) and utilisation(info(70), "five_hour") == 0.7
+    for bad in (True, False, "9", float("nan"), float("inf"), -1, -0.5, None):
+        assert utilisation(info(bad), "five_hour") is None
 
 
 def test_prune_keeps_the_rolling_week(db: Store) -> None:

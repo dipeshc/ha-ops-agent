@@ -62,11 +62,14 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
 - B6. A run is charged its run time: its `duration_s` when it finished,
   its reservation while it runs. The account utilisation that B3's
   `account_busy` compares is the last reading of the provider's rate-limit
-  events, read as a percent (a value over 100 counts as 100, and a
-  negative or non-finite value is no reading). The "claude run finished"
-  log line carries each window's reading exactly as reported, so the unit
-  can be checked against the account's own figures. Tests
-  `test_utilisation_parsing`, `test_utilisation_is_always_read_as_percent`,
+  events, read by its JSON type (`budget.percent_reading`): an integer is
+  a percent (0..100); a float of at most 1.0 is a fraction of the window
+  (x 100); a larger float is a percent; a boolean, a string, NaN,
+  infinity or a negative value is no reading; anything over 100 % counts
+  as 100 %. The "claude run finished" log line carries each window's
+  reading exactly as reported with its JSON type (`{"value", "type"}`), so
+  the unit can be confirmed against the account's own figures. Tests
+  `test_utilisation_parsing`, `test_utilisation_is_read_by_its_json_type`,
   `test_a_run_is_charged_its_run_time_whatever_the_utilisation_says`.
 - B7. **Reservation.** One transaction inserts the `runs` row with reserved
   turns and seconds before the provider starts; `finish_run` replaces them

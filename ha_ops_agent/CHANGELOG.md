@@ -36,8 +36,14 @@ AI budget:
   5 hours: …", "Account, 7 days: X %" when measured, and "Cost today" when
   a daily cap is set.
 - `GET api/usage` is removed (nothing used it).
+- Account utilisation is read by its JSON type: a whole number is a
+  percent, a decimal up to 1.0 is a fraction of the window (0.09 is 9 %),
+  a larger decimal is a percent, and anything over 100 % counts as 100 %.
+  0.19.1 read every reading as a percent, so a fractional reading such as
+  0.95 (95 %) was taken for 0.95 % and the agent could miss that your
+  account was near its limit and fail to yield. This fixes it.
 - The "claude run finished" log line carries each window's utilisation
-  exactly as reported, so its unit can be checked.
+  exactly as reported, with its JSON type, so its unit can be confirmed.
 
 Needs you only when needed:
 

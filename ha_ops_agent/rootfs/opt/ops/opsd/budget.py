@@ -141,30 +141,33 @@ class Reservation:
     seconds: float = 1200.0
 
 
-def _raw_utilisation(info: Mapping[str, object] | None, window: str) -> float | None:
-    if not isinstance(info, Mapping):
+def percent_reading(value: object) -> float | None:
+    """One reported utilisation as a percent (0..100), by its JSON type: an `int` is a percent, a `float` up to
+    1.0 is a fraction of the window, a larger `float` is a percent. A bool, a string, NaN, infinity or a negative
+    value is no reading; over 100 % counts as 100 (a saturated window, never dropped as "no reading")."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    value: object = None
-    windows = info.get("unifiedWindows")
-    if isinstance(windows, Mapping) and isinstance(windows.get(window), Mapping):
-        value = windows[window].get("utilization")
-    elif info.get("rateLimitType") == window:
-        value = info.get("utilization")
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    # A percent (the provider reports whole percents, 0..100). Over 100 is a full window (capped, never
-    # dropped: dropping it would read a saturated account as no reading); negative or not finite is no reading.
-    if not math.isfinite(value) or value < 0:
+    if isinstance(value, float):
+        if not math.isfinite(value) or value < 0:
+            return None
+        value = value * 100 if value <= 1.0 else value
+    elif value < 0:
         return None
     return min(float(value), 100.0)
 
 
-def utilisation(info: Mapping[str, object] | None, window: str) -> float | None:
-    """Account utilisation (0..1) of `five_hour` or `seven_day` from a `rate_limit_info`.
+def _raw_value(info: Mapping[str, object] | None, window: str) -> object:
+    if not isinstance(info, Mapping):
+        return None
+    windows = info.get("unifiedWindows")
+    if isinstance(windows, Mapping) and isinstance(windows.get(window), Mapping):
+        return windows[window].get("utilization")
+    if info.get("rateLimitType") == window:
+        return info.get("utilization")
+    return None
 
-    The provider reports the utilisation in percent (whole percents in practice), so 1 is 1 %, never the
-    whole window. The payload carries no unit to say otherwise, so every value is read as a percent; a value
-    over 100 counts as 100, and a negative or non-finite one is no reading.
-    """
-    value = _raw_utilisation(info, window)
+
+def utilisation(info: Mapping[str, object] | None, window: str) -> float | None:
+    """Account utilisation (0..1) of `five_hour` or `seven_day` from a `rate_limit_info` (`percent_reading`)."""
+    value = percent_reading(_raw_value(info, window))
     return None if value is None else value / 100

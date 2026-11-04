@@ -83,20 +83,21 @@ class RunResult:
 
 
 def raw_utilisation(info: dict[str, Any] | None) -> dict[str, Any]:
-    """Each window's `utilization` exactly as Claude Code reported it, for the run's log line (so the unit the
-    budget assumes can be checked against the account's own figures later). Numbers only; nothing else."""
+    """Each window's `utilization` exactly as Claude Code reported it, with its JSON type, for the run's log line
+    (so the unit the budget reads it in, `budget.percent_reading`, can be confirmed live). Numbers only."""
     if not isinstance(info, dict):
         return {}
     found: dict[str, Any] = {}
+
+    def keep(name: object, value: object) -> None:
+        if isinstance(name, str) and isinstance(value, (int, float)) and not isinstance(value, bool):
+            found.setdefault(name[:40], {"value": value, "type": type(value).__name__})
+
     windows = info.get("unifiedWindows")
     if isinstance(windows, dict):
         for name, window in list(windows.items())[:6]:
-            value = window.get("utilization") if isinstance(window, dict) else None
-            if isinstance(name, str) and isinstance(value, (int, float)) and not isinstance(value, bool):
-                found[name[:40]] = value
-    value = info.get("utilization")
-    if isinstance(info.get("rateLimitType"), str) and isinstance(value, (int, float)) and not isinstance(value, bool):
-        found.setdefault(str(info["rateLimitType"])[:40], value)
+            keep(name, window.get("utilization") if isinstance(window, dict) else None)
+    keep(info.get("rateLimitType"), info.get("utilization"))
     return found
 
 

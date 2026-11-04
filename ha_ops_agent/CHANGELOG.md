@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.22.0
+
+Conversations live on the item. The panel no longer has a Chat tab: its
+destinations are Home, Ask and History, and every item carries its own
+conversation with the agent. No store schema change (the store stays at
+schema 19); upgrading from 0.21.0 needs nothing, and existing options and
+house profiles stay valid.
+
+What changes for you:
+
+- **Ask about this item.** Every item's page ends with its conversation and
+  a box to ask about it. The answer stays on the item, and the agent reads
+  that item's record with your question, as "Ask the agent" did; the "Ask
+  the agent" button (and its pre-filled message with an item id) is gone.
+- **Ask** replaces Chat, for anything without an item. Each question is an
+  item of its own (Running, then Done with its answer, or Failed when it
+  went unanswered), opens as soon as you send it, keeps its follow-ups,
+  and is listed on Ask and under History's new **Questions** filter. Ask
+  never shows anything the agent did by itself, and questions never show
+  on Home.
+- **Plan a fix runs on the finding itself.** The finding moves to In
+  progress with the phases "Read the evidence" and "Write the plan" and a
+  **Stop** button; there is no second "Plan a fix: …" item. The plan is
+  the finding's "The agent says", shown once: the conversation's card
+  says where it is instead of repeating it. When the plan proposes a fork rebase or
+  a config change, the approval is on the finding ("Rebase tonight",
+  "Apply and commit", "Reject"): one row in Needs you, and the proposal's
+  own item stays in History. A plan that could not finish says why and
+  offers **Retry the plan**.
+- **Push replies land on the item the push was about.** A Needs-you push
+  now has a Reply button: your reply is a message in that item's
+  conversation, and the answer is pushed with the same tag, so it replaces
+  the earlier push (for an urgent item, the answer comes as a separate
+  push and never replaces the daemon's). A reply to a push about nothing
+  current starts a question.
+- **The agent's own notes never post into a conversation.** No more
+  "(activity #N)" messages or proposal cards: notes are items and History
+  entries, and what a conversation starts or proposes (an investigation,
+  an approval request, a change, a rebase) appears as a link card to its
+  own item, which is where it is decided. An investigation started from a
+  question links back to it.
+- **Your old chat is kept.** At the first start of 0.22.0 the one chat
+  becomes one read-only History item, "Earlier conversation" (History
+  only, also under its Questions filter; never on Ask), never pruned. An item's conversation is otherwise kept as
+  long as the item (resolved items go after 90 days).
+- The panel shows loading rows in the list's shape, an "item is gone"
+  page with the way back to Home, and keeps what you are typing through
+  live updates; phone and desktop layouts, light and dark themes.
+
+API and integration notes:
+
+- New panel routes `GET api/items/<id>/thread`, `POST
+  api/items/<id>/messages|retry|autoretry|read|cancel|remember` and `POST
+  api/ask`; `api/history?filter=questions`. Removed: `GET api/chat` and
+  every `api/threads/*` route. Live events and presence take `item=<id>`
+  instead of `thread=<id>`; `api/state` `chat` no longer has `thread`. The
+  item record gains `conversation` (`open` or `read_only`) and the kind
+  `question`, and no longer ends `actions` with `ask`. A conversation's
+  thread is derived from the stored item, never taken from a request.
+- Item actions: `stop` on a finding whose plan runs; a finding with a
+  folded proposal offers that proposal's actions (`approve_rebase`,
+  `approve_rebase_now`, `apply`, `revert`, `reject`), checked as on the
+  proposal's own item.
+- House overlays: their API is unchanged. `ActivityLog`'s `post` hook is
+  still accepted but the daemon no longer sets one (no entry posts into a
+  conversation).
+- Screenshots in the README show the new layout with sample data.
+
 ## 0.21.0
 
 The agent can now answer "is this fork still needed?" itself, and bring a

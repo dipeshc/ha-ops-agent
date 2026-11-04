@@ -20,7 +20,7 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   set and the RPC schema are generated from it. Tests
   `test_every_reference_resolves`, `test_guard_parser_and_schema_are_generated`,
   `test_registry_rejects_bad_rows`, `test_disabled_capability_is_not_offered_anywhere`.
-- K2. Verbs on the socket (0.21.0): `status`, `baseline`, `health
+- K2. Verbs on the socket (0.22.0): `status`, `baseline`, `health
   [--diff]`, `repairs`, `entities`, `integrations`, `entries`, `updates`,
   `backups`, `logs <core|supervisor|host|addon>`, `history <entity>`,
   `system`, `core-compare <domain>` (3/12, refund on refusal), `update-plan`, `git-status`, `git-log`, `git-diff`, `git-show`

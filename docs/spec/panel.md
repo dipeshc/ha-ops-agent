@@ -107,7 +107,7 @@ The record behind Home, History and the item page
   "created_at": "2026-01-11T04:00:00Z", "updated_at": "2026-01-15T04:12:00Z",
 
   "need": {                           // non-null only while the item is in Needs you
-    "kind": "approval",               // approval | confirm | physical | answer | ack (0.21.0 produces approval and ack)
+    "kind": "approval",               // approval | confirm | physical | answer | ack (0.22.0 produces approval and ack)
     "text": "17.1 is installed and waiting for one reboot. …",  // what happens, when, cost, what cannot be undone
     "primary": { "id": "reboot_window", "label": "Reboot tonight at 04:00" },
     "secondary": [ { "id": "reject", "label": "Reject", "style": "text" } ],
@@ -267,7 +267,7 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
   `item.act` with the item id, action, revision and the admin's user id;
   the high-impact kinds (approve_update, approve_reboot, approve_change,
   approve_dashboard, approve_fork, updates_on, ai_on) also audit
-  `panel.<kind>` with their outcome. Actions in 0.21.0: `ack`,
+  `panel.<kind>` with their outcome. Actions in 0.22.0: `ack`,
   `resume_updates`, `withdraw`,
   update `approve`, `approve_now`, `reject`, `reboot_window`, change
   `apply`, `reject`, `revert`, health `accept`, `snooze`,

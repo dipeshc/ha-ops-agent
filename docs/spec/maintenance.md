@@ -39,10 +39,23 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   quiet, low-priority item: only repairs and release notes
   (`AUTHORITATIVE`) escalate (M12), push (M13) or hold a Core update back
   (M26). Exactly this log data reaches the item and the plan run:
-  - the **domain**, only as `[a-z0-9_]{1,64}` from `custom integration
-    '<domain>'` in the message or the `homeassistant.components.<d>` /
-    `custom_components.<d>` logger name: in the title, the Affected fact
-    and the daemon's plan steps (`about`);
+  - the **domain**, only as `[a-z0-9_]{1,64}`, of the integration the line
+    is about: the integration Core's own usage report names (`Detected
+    that [custom ]integration '<d>'`, `<CONSTANT> was used from <d>`),
+    honoured only when Core code logged it (a `homeassistant.` logger),
+    else the one whose `homeassistant.components.<d>` /
+    `custom_components.<d>` logger logged it. Never a word naming Home
+    Assistant or its parts (`core`, `homeassistant`, `home_assistant`,
+    `integration`, `component`, `helpers` and the like, `NOT_A_DOMAIN`). A
+    line with no reliable domain is dropped (a debug log line records it),
+    and a log finding an earlier version stored without one is dropped at
+    the next scan. The domain is used in the title, the Affected fact and
+    the daemon's plan steps (`about`);
+  - the **deprecated thing**, only when the message names it in a safely
+    code-like form (an identifier, a dotted name or a call of at most 80
+    characters with an underscore, a dot, a capital or `()`: in backticks,
+    before `was used from`, after `calls`/`uses`/`accesses`/… or before
+    `is deprecated`): in the title, in backticks;
   - the **removal**, only as the digits `YYYY.M` next to the removal words:
     in the title, the gist and the releases left;
   - whether the logger or message names a **custom integration**: only the
@@ -52,13 +65,20 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
     `Core log`), fenced as `<evidence>` in the plan prompt, and in the
     finding's evidence hash; never in a fact, the title, the gist, `about`,
     a need or a push.
-  The title says the claim is the log's, "The Core log says <domain> is
-  removed in <YYYY.M>" (or "is deprecated"); the gist starts "the Core log
-  says" ("the Core log says removed in <YYYY.M>, <n> releases left", or
-  "the Core log names no removal date"), and the Source fact is `Core log`.
+  What is removed is something the integration uses, not the integration:
+  the title is "<domain> uses `<thing>`, which Home Assistant removes in
+  <YYYY.M>", or "<domain> uses something Home Assistant removes in
+  <YYYY.M>" without a code-like thing ("… has deprecated" without a
+  removal). The gist starts "the Core log says" ("the Core log says
+  removed in <YYYY.M>, <n> releases left", or "the Core log names no
+  removal date"), and the Source fact is `Core log`.
   Tests `test_a_log_warning_lasts_a_week_after_it_was_last_seen`,
   `test_a_log_line_never_holds_an_update_back_escalates_or_pushes`,
-  `test_only_deprecations_within_two_releases_need_the_admin_and_push`.
+  `test_only_deprecations_within_two_releases_need_the_admin_and_push`,
+  `test_a_log_removal_names_the_integration_that_uses_it_never_core`,
+  `test_log_domain_comes_only_from_a_reliable_source`,
+  `test_the_deprecated_thing_is_quoted_only_when_it_is_safely_code_like`,
+  `test_an_earlier_core_titled_log_finding_is_dropped`.
 - M4. **Release posts** of the installed Core minor, the two before it and
   every newer published one, newest first and at most `MAX_STEPS` (6) posts
   per scan (far behind, the newest win): backward-incompatible items, the developer-blog

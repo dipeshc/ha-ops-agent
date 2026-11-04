@@ -10,13 +10,17 @@ never followed.
 - **Repairs** (`repairs/list_issues`), the primary signal: a repair with `breaks_in_ha_version`, or
   one whose id or translation key says deprecated or removed. Home Assistant raises these for this
   install only, so they need no matching.
-- **Core log** deprecation warnings (`system_log/list`): "deprecated", "will be removed", with the
-  integration from the logger name. The log empties on a restart, so a log finding stays for
-  `LOG_STICKY` after it was last seen. Any integration can write a log line, so a log finding is a
-  quiet item: it never escalates, pushes or holds an update back (only `AUTHORITATIVE` signals do).
-  Its title and gist say the claim is the log's ("The Core log says ... removed in X"); only the domain
-  (an identifier) and the removal (digits) reach them, and the message text is shown only under
-  `agent` and fenced in the plan prompt.
+- **Core log** deprecation warnings (`system_log/list`): "deprecated", "will be removed", tied to the
+  integration that logged the line (`log_domain`: its `homeassistant.components.<x>` or
+  `custom_components.<x>` logger, or the integration Core's own usage report names), never to a word
+  like "core", "homeassistant" or "helpers" (`NOT_A_DOMAIN`); a line without a reliable integration is
+  left out. The log empties on a restart, so a log finding stays for `LOG_STICKY` after it was last seen.
+  Any integration can write a log line, so a log finding is a quiet item: it never escalates, pushes or
+  holds an update back (only `AUTHORITATIVE` signals do). What is removed is something the integration
+  uses, not the integration: the title reads "<x> uses `<thing>`, which Home Assistant removes in X"
+  (the thing only when it is safely code-like, `deprecated_thing`; else "something"). Only the domain,
+  that code-like name and the removal reach the title; the message text is shown only under `agent`
+  and fenced in the plan prompt.
 - **Release posts** of the installed Core minor, the two before it and every newer one
   (`evidence.EvidenceSource.posts`): backward-incompatible items, the developer-blog list and the
   farewell list, matched against the integrations, YAML features and dashboard cards in use. The
@@ -121,8 +125,29 @@ _REMOVAL_RE = re.compile(
     r"[^.]{0,80}?\b(20\d{2})\.(\d{1,2})\b",
     re.IGNORECASE,
 )
-_LOGGER_RE = re.compile(r"(?:homeassistant\.components|custom_components)\.([a-z0-9_]{1,64})")
-_CUSTOM_IN_MESSAGE_RE = re.compile(r"custom integration '([a-z0-9_]{1,64})'")
+# The integration that logged a line: its logger is `homeassistant.components.<x>` or `custom_components.<x>`.
+_LOGGER_RE = re.compile(r"(?:homeassistant\.components|custom_components)\.([a-z0-9_]{1,64})(?:\.|$)")
+# Core's own usage reports (logged by Core code, so by a `homeassistant.` logger) name the integration that uses
+# the deprecated thing: "Detected that custom integration 'x' ...", "<CONSTANT> was used from x, ...".
+_REPORTED_RE = re.compile(
+    r"Detected that (?:custom )?integration '([a-z0-9_]{1,64})'|\bwas used from ([a-z0-9_]{1,64})\b"
+)
+# Never an integration, whatever the logger or message says: they name Home Assistant itself or its parts.
+NOT_A_DOMAIN = frozenset({
+    "core", "homeassistant", "home_assistant", "hass", "ha", "integration", "integrations", "component", "components",
+    "custom_components", "helper", "helpers", "const", "config", "config_entries", "loader", "setup", "bootstrap",
+    "util", "frame", "deprecation", "system_log", "logger",
+})  # fmt: skip
+# The deprecated thing a log line names, when it looks like code (an identifier, a dotted name, a call).
+_TICKED_RE = re.compile(r"`([^`\n]{2,80})`")
+_THING_PATTERNS = (
+    re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_.]{1,79}) was used from\b"),
+    re.compile(
+        r"\b(?:calls|uses|accesses|imports|sets|passes|subclasses|overrides)\s+([A-Za-z_][A-Za-z0-9_.]{1,79}(?:\(\))?)"
+    ),
+    re.compile(r"\b([A-Za-z_][A-Za-z0-9_.]{1,79}(?:\(\))?) (?:is|are) deprecated\b"),
+)
+_CODE_LIKE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{1,79}(?:\(\))?")
 _MARKETPLACE_RE = re.compile(r"\bmarketplace\b", re.IGNORECASE)
 _TERM_OK_RE = re.compile(r"(?:custom:)?[a-z][a-z0-9]*(?:[_.:-][a-z0-9]+)+")
 _WORD_RE = re.compile(r"[^a-z0-9]+")
@@ -224,9 +249,11 @@ class Finding:
     def title(self) -> str:
         name = self.domain or "Core"
         if self.signal == "log":
-            # Labelled as the log's claim: any integration can write a log line.
-            said = f"is removed in {self.removal}" if self.removal else "is deprecated"
-            return f"The Core log says {name} {said}"[:120]
+            # What is removed is something the integration that logged the line uses, not the integration.
+            thing = str(self.detail.get("thing") or "")
+            used = f"`{thing}`, which" if thing and deprecated_thing(f"`{thing}`") == thing else "something"
+            said = f"removes in {self.removal}" if self.removal else "has deprecated"
+            return f"{name} uses {used} Home Assistant {said}"[:120]
         return f"{name}: {self.what}"[:120]
 
     def to_json(self) -> dict[str, Any]:
@@ -282,8 +309,41 @@ def from_repairs(issues: Any, installed: str) -> list[Finding]:
     return found
 
 
+def log_domain(logger: str, message: str) -> str | None:
+    """The integration a deprecation log line is about: the one Core's own usage report names (only when Core code
+    logged it), else the one whose logger logged it. None when neither is a reliable integration domain."""
+    domain = None
+    if logger.startswith("homeassistant."):
+        reported = _REPORTED_RE.search(message)
+        if reported is not None:
+            domain = reported.group(1) or reported.group(2)
+    if domain is None:
+        match = _LOGGER_RE.match(logger)
+        domain = match.group(1) if match else None
+    if domain is None or domain in NOT_A_DOMAIN or not _DOMAIN_RE.fullmatch(domain):
+        return None
+    return domain
+
+
+def deprecated_thing(message: str) -> str | None:
+    """The deprecated thing a log line names, only when it is safely code-like (an identifier, a dotted name or a
+    call, at most 80 characters); None otherwise."""
+    candidates: list[str] = [m.group(1).strip() for m in _TICKED_RE.finditer(message)][:1]
+    for pattern in _THING_PATTERNS:
+        match = pattern.search(message)
+        if match is not None:
+            candidates.append(match.group(1))
+    for thing in candidates:
+        bare = thing.removesuffix("()")
+        code_like = "_" in bare or "." in bare or thing.endswith("()") or any(c.isupper() for c in bare[1:])
+        if _CODE_LIKE_RE.fullmatch(thing) and code_like and bare.lower() not in NOT_A_DOMAIN:
+            return thing
+    return None
+
+
 def from_logs(entries: Any, now: datetime) -> list[Finding]:
-    """Deprecation warnings in the Core log."""
+    """Deprecation warnings in the Core log, each tied to the integration that logged it (`log_domain`); a line
+    with no reliable integration is left out."""
     found: dict[str, Finding] = {}
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, Mapping):
@@ -293,21 +353,27 @@ def from_logs(entries: Any, now: datetime) -> list[Finding]:
         if not _DEPRECATED_RE.search(message):
             continue
         logger = str(entry.get("name") or "")
-        match = _CUSTOM_IN_MESSAGE_RE.search(message) or _LOGGER_RE.search(logger)
-        domain = match.group(1) if match else None
+        domain = log_domain(logger, message)
+        if domain is None:
+            _LOGGER.debug("deprecation log line without a reliable integration left out",
+                          extra={"logger": logger[:80]})  # fmt: skip
+            continue
         removal = removal_in(message)
+        thing = deprecated_thing(message)
         key = _key("log", domain, normalize(message)[:200])
-        what = f"the Core log says removed in {_version_text(removal)}" if removal else "the Core log says deprecated"
+        what = (f"uses {'`' + thing + '`' if thing else 'something'} Home Assistant "
+                + (f"removes in {_version_text(removal)}" if removal else "has deprecated"))  # fmt: skip
         custom = logger.startswith("custom_components.") or "custom integration" in message
         steps = ([f"Update the custom integration {domain} (HACS): its maintainer has to change it. If no update "
                   "fixes it, tell the maintainer, or look for a replacement."] if custom else
-                 [f"Read the warning under Settings > System > Logs and change what it names in the {domain or 'Core'}"
+                 [f"Read the warning under Settings > System > Logs and change what it names in the {domain}"
                   " configuration."])  # fmt: skip
         found[key] = Finding(
             key=key, variant="deprecation", signal="log", what=what, domain=domain,
             removal=_version_text(removal) if removal else None,
-            affected=[f"{'custom integration' if custom else 'integration'} {domain}"] if domain else ["Core"],
+            affected=[f"{'custom integration' if custom else 'integration'} {domain}"],
             sources=["Core log"], quote=clean_text(message, QUOTE_CHARS), steps=steps,
+            detail={"thing": thing} if thing else {},
             seen_at=now.astimezone(UTC).isoformat(timespec="seconds"),
         )  # fmt: skip
     return list(found.values())
@@ -699,6 +765,9 @@ class MaintenanceManager:
             if old.key in keys:
                 continue
             seen = datetime.fromisoformat(old.seen_at) if old.seen_at else None
+            if old.signal == "log" and (old.domain is None or old.domain in NOT_A_DOMAIN):
+                # An earlier version took a domain from words like "Core": such a finding is dropped.
+                continue
             if old.signal in failed or (old.signal == "log" and seen is not None and now - seen < LOG_STICKY):
                 found.append(old)
                 keys.add(old.key)

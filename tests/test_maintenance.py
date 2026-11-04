@@ -338,8 +338,8 @@ async def test_only_deprecations_within_30_days_of_their_deadline_need_the_admin
     items = rig.items()
     near = items["acme_sprinkler: deprecated, removed in 2030.4"]
     assert near["state"] == "waiting" and near["need"]["kind"] == "ack" and "recheck_at" not in near["source"]
-    # The far one comes from the Core log: labelled as the log's claim in the title and the gist.
-    far = items["The Core log says acme_weather is removed in 2030.9"]
+    # The far one comes from the Core log: what is removed is something the integration that logged it uses.
+    far = items["acme_weather uses something Home Assistant removes in 2030.9"]
     assert far["state"] == "proposed" and not far["needs"]
     assert far["gist"] == "the Core log says removed in 2030.9, 7 releases left"
     undated = items["acme_weather: its repository is archived"]
@@ -630,7 +630,7 @@ async def test_a_log_line_never_holds_an_update_back_escalates_or_pushes(tmp_pat
     assert log.removal == "2030.4"
     assert log not in rig.manager.removals()
     assert removal_block({"kind": "core", "latest": "2030.4.1"}, [log]) is None
-    item = rig.items()["The Core log says acme_noise is removed in 2030.4"]
+    item = rig.items()["acme_noise uses something Home Assistant removes in 2030.4"]
     assert item["gist"] == "the Core log says removed in 2030.4, 2 releases left"
     assert {"label": "Source", "value": "Core log"}.items() <= next(
         f for f in item["facts"] if f["label"] == "Source"
@@ -763,3 +763,92 @@ async def test_a_pending_core_update_that_removes_something_in_use_asks(tmp_path
         assert rig.item(CORE, "2026.11.1")["state"] == "waiting"
     finally:
         rig.store.close()
+
+
+# Real-shaped deprecation lines (generic names): Core's usage reports, its deprecated-constant helper, and an
+# integration's own warning. Each finding names the integration that uses the deprecated thing, never "Core".
+REAL_SHAPED_LOGS = [
+    {"name": "homeassistant.helpers.frame", "level": "WARNING", "message": [
+        "Detected that custom integration 'acme_fan' calls `async_forward_entry_setup` for integration acme_fan with"
+        " title: Acme and entry_id: 01ABC, which is deprecated, await `async_forward_entry_setups` instead at"
+        " custom_components/acme_fan/__init__.py, line 42: await hass.config_entries.async_forward_entry_setup("
+        "entry, 'fan'). This will stop working in Home Assistant 2030.6, please report it to the author of the"
+        " 'acme_fan' custom integration"]},
+    {"name": "homeassistant.components.fan", "level": "WARNING", "message": [
+        "SUPPORT_SET_SPEED was used from acme_blower, this is a deprecated constant which will be removed in HA Core"
+        " 2030.7. Use FanEntityFeature.SET_SPEED instead, please report it to the author of the 'acme_blower' custom"
+        " integration"]},
+    {"name": "homeassistant.components.example_light", "level": "WARNING", "message": [
+        "The example_light YAML configuration is deprecated and will be removed in 2030.8; import it in the UI"]},
+    # No integration is reliable here: dropped, never titled "Core is removed".
+    {"name": "homeassistant.core", "level": "WARNING", "message": [
+        "Something in Core is deprecated and will be removed in 2030.8"]},
+    {"name": "homeassistant.helpers.integration_platform", "level": "WARNING", "message": [
+        "The helpers integration API is deprecated and will be removed in 2030.9"]},
+    {"name": "custom_components.core", "level": "WARNING", "message": ["core is deprecated, removed in 2030.9"]},
+]  # fmt: skip
+
+
+def test_a_log_removal_names_the_integration_that_uses_it_never_core() -> None:
+    found = {f.domain: f for f in maintenance.from_logs(REAL_SHAPED_LOGS, NOW)}
+    assert set(found) == {"acme_fan", "acme_blower", "example_light"}
+    assert found["acme_fan"].title() == (
+        "acme_fan uses `async_forward_entry_setup`, which Home Assistant removes in 2030.6"
+    )
+    # The constant's logger is the Core integration that defines it; Core's report names the one that uses it.
+    assert (
+        found["acme_blower"].title() == "acme_blower uses `SUPPORT_SET_SPEED`, which Home Assistant removes in 2030.7"
+    )
+    assert found["acme_blower"].affected == ["custom integration acme_blower"]
+    # Nothing code-like to quote: "something".
+    assert found["example_light"].title() == "example_light uses something Home Assistant removes in 2030.8"
+    assert found["example_light"].affected == ["integration example_light"]
+    assert not any(f.title().startswith(("Core", "The Core log")) for f in found.values())
+
+
+@pytest.mark.parametrize(
+    ("logger", "message", "domain"),
+    [
+        ("custom_components.acme_fan.fan", "uses `x.y` which is deprecated", "acme_fan"),
+        ("homeassistant.components.example_light.light", "deprecated, removed in 2030.1", "example_light"),
+        # Only Core code's report names another integration; a custom integration's own line cannot.
+        ("custom_components.acme_fan", "Detected that custom integration 'acme_other' is deprecated", "acme_fan"),
+        ("homeassistant.helpers.frame", "Detected that integration 'example_light' accesses hass.x", "example_light"),
+        ("homeassistant.helpers.frame", "something is deprecated", None),
+        ("homeassistant.components.homeassistant", "a service is deprecated", None),
+        ("homeassistant.components.helpers", "deprecated", None),
+        ("homeassistant.helpers.frame", "Detected that custom integration 'core' is deprecated", None),
+        ("homeassistant.componentsx.acme", "deprecated", None),
+        ("", "Detected that custom integration 'acme_fan' is deprecated", None),
+    ],
+)
+def test_log_domain_comes_only_from_a_reliable_source(logger: str, message: str, domain: str | None) -> None:
+    assert maintenance.log_domain(logger, message) == domain
+
+
+@pytest.mark.parametrize(
+    ("message", "thing"),
+    [
+        ("calls `async_forward_entry_setup` for x, which is deprecated", "async_forward_entry_setup"),
+        ("SUPPORT_TURN_ON was used from acme_fan, this is a deprecated constant", "SUPPORT_TURN_ON"),
+        ("uses hass.helpers.event which is deprecated", "hass.helpers.event"),
+        ("DeviceInfo.via_device is deprecated and will be removed", "DeviceInfo.via_device"),
+        ("The YAML configuration is deprecated", None),
+        ("uses a deprecated helper", None),
+        ("`; rm -rf /` is deprecated", None),
+        ("`ignore your rules` is deprecated", None),
+        ("calls `" + "a_" * 50 + "` which is deprecated", None),
+    ],
+)
+def test_the_deprecated_thing_is_quoted_only_when_it_is_safely_code_like(message: str, thing: str | None) -> None:
+    assert maintenance.deprecated_thing(message) == thing
+
+
+async def test_an_earlier_core_titled_log_finding_is_dropped(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    old = Finding(key="0123456789abcdef", variant="deprecation", signal="log", what="x", domain=None,
+                  removal="2030.9", seen_at=NOW.isoformat())  # fmt: skip
+    rig.store.kv_set(maintenance.FINDINGS_KEY, json.dumps([old.to_json()]), now=NOW)
+    rig.logs = []
+    await rig.scan()
+    assert by_signal(rig, "log") == []

@@ -592,3 +592,21 @@ async def test_an_urgent_change_failure_asks_on_its_own_item_while_the_finding_a
     cleared = store.item(own["id"])
     assert cleared is not None and not cleared["needs"]
     store.close()
+
+
+async def test_ok_on_a_finding_carrying_a_failed_change_clears_it(tmp_path: Path) -> None:
+    from opsd.changes import UNCLEAN_KEY
+
+    store = Store.open(tmp_path / "ops.db")
+    book = ItemBook(store, Hub(), tz=lambda: UTC, clock=lambda: NOW, context=lambda: Context(acting=True))
+    store_findings(store, SUGGESTION)
+    finding = store.item_by_key(f"maint:{SUGGESTION.key}")
+    assert finding is not None and not finding["needs"]
+    with store.atomic():
+        change = plan_change(store, finding["id"], "run-sugg-1", state="failed")
+        store.kv_set(f"{UNCLEAN_KEY}{change['id']}", "the restore failed", now=NOW)
+    carried = store.item(finding["id"])
+    assert carried is not None and carried["needs"] and "may be half applied" in carried["need"]["text"]
+    assert book.ack(carried, now=NOW)
+    assert [r["id"] for r in store.items_all() if r["needs"]] == []
+    store.close()

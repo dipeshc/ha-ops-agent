@@ -1534,6 +1534,8 @@ class ItemBook:
                     runs.add(int(key.rsplit(":", 1)[1]))
                 elif key.startswith(f"{ACK_KEY}change:"):
                     changes.add(int(key.rsplit(":", 1)[1]))
+                    # A plan-made change's failure may be carried on its finding: recompose it too.
+                    maintenance = True
                 elif key.startswith((f"{ACK_KEY}maint:", _MAINTENANCE_STATE)):
                     maintenance = True
                 elif key.startswith((f"{ACK_KEY}fork:", forkrebase.PROPOSAL_KEY)):

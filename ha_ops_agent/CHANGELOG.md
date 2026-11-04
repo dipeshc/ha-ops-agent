@@ -15,14 +15,16 @@ Custom integrations that fork a Core one:
   blob SHA, at most 40 files of 256 KiB, cached under `/data`) and
   compares them with `custom_components/<domain>/`: a summary (files only
   in the custom integration, only in Core, changed lines per file) and a
-  unified diff per file, redacted, fenced as data and capped at 32 KiB.
+  unified diff per file, redacted, fenced as data, with one 32 KiB budget
+  for file contents and a clear marker where anything is cut.
   It is read-only and takes no approval. Chat, investigations ("Plan a
   fix") and the maintenance plan can use it; the nightly triage cannot.
   The agent reports what it shows as facts and cites the diff. The AI's
   own sandbox still has no network: the add-on fetches.
 - `core-compare <domain> --fork` also finds the Core release the fork was
-  copied from (the closest of the last 18 monthly releases) and numbers
-  the fork's own changes against it.
+  copied from (the closest of the last six monthly releases, at most six
+  more GitHub API calls) and numbers the fork's own changes against it.
+  GitHub asking it to slow down never holds up the release-note checks.
 - New `opsctl propose-rebase <domain> --keep <ids> --reason …`: the agent
   proposes rebasing the fork onto your Core version, keeping only the
   changes it names. It never writes file content: the add-on builds the

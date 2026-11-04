@@ -162,7 +162,7 @@ async def test_the_diff_is_capped_with_a_clear_marker(world: World, gh: FakeGitH
     write_custom(paths, {"big.py": big_custom})
     response = await compare(world)
     out = response["output"]
-    assert response["ok"] and "[diff truncated at 32 KiB:" in out and "the summary above counts every line" in out
+    assert response["ok"] and "[diff truncated: " in out and "the summary above counts every line" in out
     assert "big.py +6000 -6000" in out
     assert len(out) < 40_000 and out.rstrip().endswith("</core-compare-diff>")
 
@@ -277,7 +277,7 @@ async def test_github_slow_down_stops_every_github_call(world: World, gh: FakeGi
     gh.answers[LISTING_URL.format(domain="acme_fan", tag=VERSION)] = evidence.FetchError("HTTP 403", status=403)
     response = await compare(world)
     assert not response["ok"] and "HTTP 403" in response["error"]
-    assert world.store.kv_get(evidence.BACKOFF_KEY)
+    assert world.store.kv_get(coresource.BACKOFF_KEY)
     asked = len(gh.asked)
     response = await compare(world)
     assert not response["ok"] and "slow down" in response["error"] and len(gh.asked) == asked
@@ -320,15 +320,15 @@ async def test_triage_is_refused(world: World, gh: FakeGitHub) -> None:
     assert row["decision"] == "rejected"
 
 
-def test_the_window_holds_the_installed_tag_and_18_monthly_releases() -> None:
+def test_the_window_holds_the_installed_tag_and_six_monthly_releases() -> None:
     tags = window_tags("2030.4.2")
-    assert tags[:3] == ["2030.4.2", "2030.4.0", "2030.3.0"] and tags[-1] == "2028.11.0" and len(tags) == 19
+    assert tags == ["2030.4.2", "2030.4.0", "2030.3.0", "2030.2.0", "2030.1.0", "2029.12.0", "2029.11.0"]
     assert window_tags("dev") == []
 
 
 def test_the_cache_is_pruned_to_the_window(paths: Paths) -> None:
     source = CoreSource(paths.data)
-    for tag in ("2030.4.2", "2029.1.0", "2020.1.0"):
+    for tag in ("2030.4.2", "2030.1.0", "2029.1.0"):
         (paths.data / "core-source" / "listings" / tag).mkdir(parents=True)
     source.prune("2030.4.2")
-    assert sorted(p.name for p in (paths.data / "core-source" / "listings").iterdir()) == ["2029.1.0", "2030.4.2"]
+    assert sorted(p.name for p in (paths.data / "core-source" / "listings").iterdir()) == ["2030.1.0", "2030.4.2"]

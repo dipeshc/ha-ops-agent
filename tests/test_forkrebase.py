@@ -700,3 +700,49 @@ async def test_the_executor_refuses_a_never_reload_domain(pipe: tuple[Rig, ForkO
     with pytest.raises(ExecutorRefused, match="never-reload list"):
         await rig.manager.executors.fork_apply(job, proven=True, write=lambda: None)
     assert ops.restarts == []
+
+
+async def test_the_fork_view_shares_one_budget_and_keeps_its_fences_whole(
+    world: World, paths: Paths, gh: FakeGitHub
+) -> None:
+    # A large fork: every line of a big file changed against both its origin and Core.
+    big_origin = "".join(f"value_{n} = {n}\n" for n in range(5000))
+    big_fork = "".join(f"value_{n} = {n + 1}\n" for n in range(5000))
+    gh.publish(ORIGIN_TAG, DOMAIN, ORIGIN_FILES | {"big.py": big_origin})
+    for tag in ("2026.9.0", "2026.10.0", INSTALLED):
+        gh.publish(tag, DOMAIN, BASE_FILES | {"big.py": big_origin})
+    write_custom(paths, {"big.py": big_fork})
+    response = await world.call("core-compare", domain=DOMAIN, fork=True)
+    assert response["ok"], response
+    out = response["output"]
+    assert len(out) < 40_000 and "... truncated" not in out
+    for tag in ("core-compare-diff", "fork-hunks"):
+        assert out.count(f"<{tag}>") == 1 and out.count(f"</{tag}>") == 1
+        assert out.index(f"<{tag}>") < out.index(f"</{tag}>")
+    assert "[hunks truncated: " in out and "[diff truncated: " in out
+    assert out.rstrip().endswith("</fork-hunks>")
+
+
+def test_the_origin_search_makes_at_most_six_new_listing_calls(paths: Paths, gh: FakeGitHub, fork: Path) -> None:
+    source = CoreSource(paths.data)
+    source.listing(INSTALLED, DOMAIN)
+    before = sum(1 for u, _, _ in gh.asked if "ref=" in u)
+    forkrebase.find_origin(source, DOMAIN, INSTALLED, FORK_FILES)
+    assert sum(1 for u, _, _ in gh.asked if "ref=" in u) - before <= 6
+
+
+async def test_the_core_source_backoff_is_its_own(world: World, gh: FakeGitHub) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from opsd import coresource
+
+    later = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
+    # The release-note fetches backing off never stops a comparison.
+    world.store.kv_set(evidence.BACKOFF_KEY, later, now=datetime.now(UTC))
+    assert (await world.call("core-compare", domain=DOMAIN))["ok"]
+    # And this one's backoff is its own key.
+    world.store.kv_set(coresource.BACKOFF_KEY, later, now=datetime.now(UTC))
+    assert coresource.BACKOFF_KEY != evidence.BACKOFF_KEY
+    fresh = CoreSource(world.paths.data / "fresh", store=world.store)
+    with pytest.raises(CoreSourceError, match="slow down"):
+        fresh.listing("2026.7.0", DOMAIN)

@@ -157,14 +157,19 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
     and never contains `..`; a listing keeps at most 40 files, a file is
     at most 256 KiB (larger ones are listed as left out), and each fetched
     file must match the git blob SHA the listing gives for it or it is not
-    compared. Only files the custom integration also has are fetched.
-    GitHub's 403/429 stops every GitHub call for 30 minutes (the backoff
-    `opsd.evidence` shares). One call stays within 90 seconds, 10 per
-    request.
+    compared. That check is a consistency check between GitHub's two
+    hosts (the raw file is the one the listing names, and the cache is not
+    stale or damaged), not a supply-chain control: both answers come from
+    GitHub over TLS and are trusted as Home Assistant's published source.
+    Only files the custom integration also has are fetched. GitHub's
+    403/429 stops these calls for 30 minutes under their own backoff key
+    (`coresource:github_backoff_until`), which neither blocks nor is
+    blocked by the release-note fetches of `opsd.evidence`. One call stays
+    within 90 seconds, 10 per request.
   - **Cache** under `/data/core-source/` (directories 0700, files 0600,
     root-only): listings by tag and domain, files by blob SHA (checked
     again when read). Listings of tags outside the installed tag and the
-    18 monthly releases before it, and files unused for 30 days or beyond
+    6 monthly releases before it, and files unused for 30 days or beyond
     800, are pruned.
   - **Local read.** Top-level regular files of
     `custom_components/<domain>/`, read as root through one descriptor of
@@ -173,8 +178,10 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
     domain is refused), never through a symbolic link, at most 40 and 256 KiB each, UTF-8 only; subdirectories,
     `.pyc`, hidden and backup files are listed as not compared.
   - **`--fork`.** Also the fork's origin (the newest Core tag among the
-    installed one and the `.0` releases of the last 18 months whose files
-    differ least from the fork's) and the fork's own changes against it as
+    installed one and the `.0` releases of the last 6 months whose files
+    differ least from the fork's; at most 6 listing calls beyond the
+    installed tag's, which the comparison has already read) and the fork's
+    own changes against it as
     numbered hunks (`<file>#<n>`, with their added and removed lines),
     fenced in `<fork-hunks>`: the ids `propose-rebase --keep` takes
     ([proposals.md](proposals.md) C11–C12).
@@ -184,9 +191,12 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
     `+added -removed`; subdirectories; what was left out and why); then a
     unified diff per changed file (`core/<version>/<file>` against
     `custom/<file>`), fenced in `<core-compare-diff>` as untrusted data
-    (angle brackets replaced) and cut at 32 KiB with a marker saying how
-    much was not shown (so the whole answer stays inside the socket's
-    40 000-character cap). When Core has no such integration the answer
+    (angle brackets replaced). The file contents of one answer share one
+    32 KiB budget: with `--fork` the hunks take at most two thirds of it
+    and the diff the rest. Each part that does not fit is cut with a
+    marker saying how many bytes were not shown, inside its fence, and
+    every fence is closed, so the whole answer stays inside the socket's
+    40 000-character cap and is never cut by it. When Core has no such integration the answer
     says it is a pure custom integration. The answer is redacted.
   Tests `tests/test_coresource.py`.
 - K15. **`fork.propose`** (verb `propose-rebase <domain> --keep <ids|none>

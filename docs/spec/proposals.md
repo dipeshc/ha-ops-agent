@@ -203,9 +203,10 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   Core must have an integration of that name at the installed version.
   Implementation `opsd/forkrebase.py`; tests `tests/test_forkrebase.py`.
 - C12. **The build** (daemon only). Base: Core's files for the installed
-  version, each checked against GitHub's blob SHA for that tag (K14). The
-  fork's origin: the newest tag among the installed one and the `.0`
-  releases of the last 18 months whose files differ least from the fork's
+  version, each checked against GitHub's blob SHA for that tag (K14; a
+  consistency check between GitHub's hosts, not a supply-chain control).
+  The fork's origin: the newest tag among the installed one and the `.0`
+  releases of the last 6 months whose files differ least from the fork's
   (changed lines; a fork file the tag lacks counts whole; a tie goes to the
   newer tag). The fork's own changes: the unified-diff hunks (3 lines of
   context) from the origin to the fork, numbered per file. Each kept hunk
@@ -220,7 +221,11 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   import (`import x`, `from x import y`, as level, module and name) that
   neither the base nor the fork has; a relative import names a module the
   fork has and never leaves the integration; at most 1 MiB in all and
-  256 KiB per file. A result identical to the fork is refused ("already
+  256 KiB per file. These are sanity checks that catch a broken or
+  surprising build, not a security boundary: the code that runs is Core's
+  published source and the fork already on the install, and the admin's
+  approval of the shown diff and the health check with rollback are what
+  protect the house. A result identical to the fork is refused ("already
   matches").
 - C14. **The record.** A proposal is a store key-value record
   (`fork:proposal:<16 hex>`, no schema change) plus its result's bytes

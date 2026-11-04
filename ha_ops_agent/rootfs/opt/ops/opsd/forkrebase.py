@@ -8,7 +8,7 @@ everything else from two sources it trusts:
 1. **Base**: Core's files for the exact installed Core version (`opsd.coresource`: GitHub's contents API and raw
    file host, each file checked against the git blob SHA the listing gives for that tag).
 2. **The fork's delta**: the Core release the fork was copied from is the newest tag among the installed one and
-   the `.0` releases of the last 18 months (`coresource.window_tags`) whose files differ least from the fork's.
+   the `.0` releases of the last six months (`coresource.window_tags`) whose files differ least from the fork's.
    The fork's own changes are the unified-diff hunks from that release to the fork (`fork_hunks`, numbered
    `<file>#<n>`). Only the hunks the AI keeps are applied onto the base, each by its exact old text plus context,
    which must occur exactly once (`apply_hunks`); anything else refuses, never guesses.
@@ -51,11 +51,13 @@ from opsd.api import LiveAPI
 from opsd.capabilities import FORK_KEEP_RE, Args, CapabilityError
 from opsd.conversation import clean_text, fence
 from opsd.coresource import (
+    FORK_MONTHS,
     MAX_FILE_BYTES,
     CoreSource,
     CoreSourceError,
     LocalFiles,
     custom_dir,
+    cut_text,
     domain_fd,
     installed_core_version,
     read_at,
@@ -224,8 +226,8 @@ def _score(origin: Mapping[str, str], fork: Mapping[str, str]) -> int:
 
 
 def find_origin(source: CoreSource, domain: str, installed: str, fork: Mapping[str, str]) -> Origin:
-    """The newest Core tag (the installed one, then the `.0` releases of the last 18 months) whose files differ
-    least from the fork's. RebaseRefused when no tag in the window has the integration."""
+    """The newest Core tag (the installed one, then the `.0` releases of the last `FORK_MONTHS` months) whose files
+    differ least from the fork's. RebaseRefused when no tag in the window has the integration."""
     best: Origin | None = None
     for tag in window_tags(installed):
         listing = source.listing(tag, domain)
@@ -238,7 +240,7 @@ def find_origin(source: CoreSource, domain: str, installed: str, fork: Mapping[s
         if score == 0:
             break
     if best is None:
-        raise RebaseRefused(f"no Core release of the last 18 months has an integration named {domain}")
+        raise RebaseRefused(f"no Core release of the last months searched has an integration named {domain}")
     return best
 
 
@@ -764,19 +766,21 @@ def exec_propose(ctx: ExecContext, args: Args) -> str:
             " applied in the update window with a backup, a health check and automatic rollback.")  # fmt: skip
 
 
-def fork_report(source: CoreSource, custom: LocalFiles, domain: str, installed: str) -> str:
+def fork_report(source: CoreSource, custom: LocalFiles, domain: str, installed: str, *,
+                budget: int = MAX_DIFF_BYTES) -> str:  # fmt: skip
     """`core-compare <domain> --fork`: the fork's origin and its own changes as numbered hunks, fenced."""
     origin = find_origin(source, domain, installed, custom.files)
     hunks = fork_hunks(origin.texts, custom.files)
     lines = [f"Fork origin: Home Assistant Core {origin.tag} (the newest release whose files differ least from the"
              f" fork: {origin.score} changed lines; searched the installed {installed} and the .0 releases of the"
-             " last 18 months).",
+             f" last {FORK_MONTHS} months).",
              f"The fork's own changes against Core {origin.tag}, numbered for `opsctl propose-rebase {domain} --keep"
              " <ids>` (" + (", ".join(f"{h.id} +{h.counts[0]} -{h.counts[1]}" for h in hunks) or "none")
              + "):"]  # fmt: skip
-    body = "\n\n".join(h.text() for h in hunks)
-    lines += ["<fork-hunks>", fence(body, MAX_DIFF_BYTES), "</fork-hunks>"]
-    return "\n".join(lines)
+    head = "\n".join(lines)
+    room = max(512, budget - len(head.encode()) - 40)
+    body = cut_text("\n\n".join(h.text() for h in hunks), room, "hunks", "the list above names every hunk")
+    return "\n".join([head, "<fork-hunks>", fence(body, len(body) + 1), "</fork-hunks>"])
 
 
 def exec_internal(_ctx: ExecContext, _args: Args) -> Any:

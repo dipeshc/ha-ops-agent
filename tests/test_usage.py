@@ -13,7 +13,17 @@ from typing import Any, ClassVar
 import pytest
 
 from opsd.aicontrol import SWITCH_ENTITY, AiControl, Switch
-from opsd.budget import Caps, Period, resolve_plan, share_fraction, utilisation
+from opsd.budget import (
+    FRACTION,
+    PERCENT,
+    UNIT_KEY,
+    Caps,
+    Period,
+    reading_unit,
+    resolve_plan,
+    share_fraction,
+    utilisation,
+)
 from opsd.claude_runner import RunResult, interpret_result, raw_utilisation, run_claude, usage_limit
 from opsd.config import Options, UsageOptions
 from opsd.redact import Redactor
@@ -47,10 +57,10 @@ def reserve(db: Store, caps: Caps, *, profile: str = "chat", at: datetime = NOW,
 
 def test_share_option_scales_run_time_and_is_clamped() -> None:
     base = Caps.from_options(Options())
-    # B = 40 h x 3600 x 5 %; runs stop at 80 % of it, user-class runs at half; the 5-hour budget is B / 5.
+    # B = 40 h x 3600 x 5 %; runs stop at 80 % of it, user-class runs at half of that; the 5-hour budget is B / 5.
     assert base.share_limit == 0.05 and base.week_seconds == 7200
-    assert base.stop("seven_day") == 5760 and base.stop("seven_day", user=True) == 3600
-    assert base.stop("five_hour") == pytest.approx(1152) and base.stop("five_hour", user=True) == pytest.approx(720)
+    assert base.stop("seven_day") == 5760 and base.stop("seven_day", user=True) == 2880
+    assert base.stop("five_hour") == pytest.approx(1152) and base.stop("five_hour", user=True) == pytest.approx(576)
     double = Caps.from_options(make_options(usage__max_share_percent=10))
     assert double.week_seconds == 2 * base.week_seconds
     assert share_fraction(0.1) == 0.005 and share_fraction(80) == 0.25
@@ -68,17 +78,18 @@ def test_plan_resolution() -> None:
 
 def test_utilisation_parsing() -> None:
     info = {"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 42, "resetsAt": 1},
-                                                    "seven_day": {"utilization": 12.5, "resetsAt": 2}}}  # fmt: skip
-    assert utilisation(info, "five_hour") == 0.42 and utilisation(info, "seven_day") == 0.125
+                                                    "seven_day": {"utilization": 12, "resetsAt": 2}}}  # fmt: skip
+    assert reading_unit(info) == PERCENT
+    assert utilisation(info, "five_hour") == 0.42 and utilisation(info, "seven_day") == 0.12
     assert utilisation({"rateLimitType": "five_hour", "utilization": 30}, "five_hour") == 0.3
     for bad in (None, {}, {"unifiedWindows": {"five_hour": {"utilization": "x"}}}, {"rateLimitType": "five_hour",
                 "utilization": -1}, {"rateLimitType": "five_hour", "utilization": True},
                 {"rateLimitType": "five_hour", "utilization": float("nan")},
                 {"rateLimitType": "five_hour", "utilization": float("inf")}):  # fmt: skip
         assert utilisation(bad, "five_hour") is None
-    # The run's log line carries the readings exactly as reported, so their unit can be checked later.
+    # The run's log line carries the readings exactly as reported, with their JSON type, so the unit can be checked.
     assert raw_utilisation(info) == {"five_hour": {"value": 42, "type": "int"},
-                                     "seven_day": {"value": 12.5, "type": "float"}}  # fmt: skip
+                                     "seven_day": {"value": 12, "type": "int"}}  # fmt: skip
     assert raw_utilisation({"rateLimitType": "seven_day", "utilization": 0.09}) == {
         "seven_day": {"value": 0.09, "type": "float"}}  # fmt: skip
     assert (
@@ -169,6 +180,25 @@ def test_a_reservation_is_trimmed_to_the_budget_left_and_user_runs_stop_at_half(
     triage = reserve(db, caps, profile="triage", run_id="triage", budget_class="agent")
     assert not isinstance(triage, str)
     assert triage.seconds == pytest.approx(caps.stop("five_hour") - caps.stop("five_hour", user=True))
+
+
+def test_chat_at_its_cap_leaves_triage_half_the_stop_line_on_the_default_plan(db: Store) -> None:
+    caps = Caps.from_options(Options())
+    assert caps.plan == "pro"
+    at = NOW - timedelta(hours=1)
+    n = 0
+    # Chat runs until chat itself is refused for the 5-hour window.
+    while not isinstance(chat := reserve(db, caps, run_id=f"c{n}", at=at), str):
+        db.finish_run(f"c{n}", status="ok", at=at, turns=1, tokens_in=1, tokens_out=1, tokens_cache_read=0,
+                      model="m", duration_s=chat.seconds)  # fmt: skip
+        n += 1
+    assert chat == "share_reserve:five_hour" and n > 0
+    used = db.usage(P, at=NOW)["window"]["seconds"]
+    assert caps.stop("five_hour", user=True) - 60 < used <= caps.stop("five_hour", user=True)
+    triage = reserve(db, caps, profile="triage", run_id="t", budget_class="agent")
+    assert not isinstance(triage, str)
+    # Monitoring keeps at least half of the stop line: a full triage reservation (600 s) fits.
+    assert caps.stop("five_hour") - used >= caps.stop("five_hour") / 2 and triage.seconds == 600
 
 
 def test_the_daily_cost_cap_trims_each_run_and_refuses_when_spent(db: Store) -> None:
@@ -278,15 +308,16 @@ out({{"type": "rate_limit_event", "rate_limit_info": {{"status": "allowed", "uni
     "five_hour": {{"utilization": 20, "resetsAt": 1}}, "seven_day": {{"utilization": 10, "resetsAt": 2}}}}}}}})
 out({{"type": "rate_limit_event", "rate_limit_info": {{"status": "{status}", "resetsAt": 1793000000,
     "unifiedWindows": {{"five_hour": {{"utilization": 23, "resetsAt": 1}},
-                       "seven_day": {{"utilization": 10.5, "resetsAt": 2}}}}}}}})
+                       "seven_day": {{"utilization": 0.105, "resetsAt": 2}}}}}}}})
 out({{"type": "result", "subtype": "success", "is_error": {is_error}, "result": "x", "num_turns": 2}})
 """
 
 
 @pytest.mark.parametrize(("status", "is_error", "expected"), [("allowed", "False", "ok"),
                                                               ("rejected", "True", "usage_limited")])  # fmt: skip
-async def test_stream_rate_limit_events(tmp_path: Path, meminfo: Path, status: str, is_error: str,
-                                        expected: str) -> None:  # fmt: skip
+async def test_stream_rate_limit_events(tmp_path: Path, meminfo: Path, status: str, is_error: str,  # noqa: PLR0917
+                                        expected: str, caplog: pytest.LogCaptureFixture) -> None:  # fmt: skip
+    caplog.set_level("INFO")
     script = tmp_path / "fake-rate"
     script.write_text(RATE_CLAUDE.format(python=sys.executable, status=status, is_error=is_error))
     script.chmod(0o755)
@@ -294,7 +325,14 @@ async def test_stream_rate_limit_events(tmp_path: Path, meminfo: Path, status: s
     proc_dir.mkdir()
     result = await run_claude(config(tmp_path, str(script)), "p", token="t", transcript_path=tmp_path / "t.gz",
                               redactor=Redactor(), proc_dir=proc_dir, meminfo=meminfo)  # fmt: skip
-    assert result.status == expected and utilisation(result.rate_last, "five_hour") == pytest.approx(0.23)
+    # 23 and 0.105 in one payload: a non-integer value makes the whole payload fractions (23 is over the limit).
+    assert result.status == expected and reading_unit(result.rate_last) == FRACTION
+    assert utilisation(result.rate_last, "seven_day", FRACTION) == pytest.approx(0.105)
+    assert utilisation(result.rate_last, "five_hour", FRACTION) == 1.0
+    [line] = [r for r in caplog.records if r.getMessage() == "claude run finished"]
+    assert line.utilization == {"five_hour": {"value": 23, "type": "int"},  # type: ignore[attr-defined]
+                                "seven_day": {"value": 0.105, "type": "float"}}  # fmt: skip
+    assert line.utilization_unit == FRACTION  # type: ignore[attr-defined]
     if expected == "usage_limited":
         assert result.limit_reset == 1793000000
 
@@ -532,23 +570,50 @@ async def test_kill_switch_stops_a_running_triage_but_not_the_safety_push(
             daemon.close()
 
 
-def test_utilisation_is_read_by_its_json_type() -> None:
-    def info(value: object) -> dict[str, Any]:
-        return {"rateLimitType": "five_hour", "utilization": value}
+def test_the_utilisation_unit_is_judged_over_the_whole_payload() -> None:
+    def info(five: object, seven: object = None) -> dict[str, Any]:
+        windows = {"five_hour": {"utilization": five}} | ({"seven_day": {"utilization": seven}} if seven is not None
+                                                           else {})  # fmt: skip
+        return {"unifiedWindows": windows}
 
     busy = Caps.from_options(Options()).account_busy
-    # An int is a percent: 1 is 1 % of the window, never the whole of it.
-    assert utilisation(info(1), "five_hour") == pytest.approx(0.01) and (utilisation(info(1), "five_hour") or 0) < busy
-    assert utilisation(info(95), "five_hour") == pytest.approx(0.95) and utilisation(info(0), "five_hour") == 0.0
-    # A float up to 1.0 is a fraction (as seen live: 0.09 is 9 %); a larger float is a percent.
-    assert utilisation(info(0.09), "five_hour") == pytest.approx(0.09)
-    assert (utilisation(info(0.95), "five_hour") or 0) >= busy  # the account is busy: the agent yields
-    assert utilisation(info(1.0), "five_hour") == 1.0 and utilisation(info(28.0), "five_hour") == pytest.approx(0.28)
-    assert utilisation(info(0.0), "five_hour") == 0.0
-    # Over 100 % is a saturated window, capped (never dropped as "no reading").
-    assert utilisation(info(100.5), "five_hour") == 1.0 and utilisation(info(250), "five_hour") == 1.0
-    for bad in (True, False, "9", float("nan"), float("inf"), -1, -0.5, None):
-        assert utilisation(info(bad), "five_hour") is None
+    # Any non-integer value: fractions, for every window of the payload (as seen live: 0.09 is 9 %).
+    assert reading_unit(info(0.09)) == FRACTION and utilisation(info(0.09), "five_hour", FRACTION) == 0.09
+    assert reading_unit(info(1, 0.4)) == FRACTION and utilisation(info(1, 0.4), "five_hour", FRACTION) == 1.0
+    assert (utilisation(info(0.95), "five_hour", FRACTION) or 0) >= busy  # the account is busy: the agent yields
+    # Over the limit (a fraction past 1.0) is a full window.
+    assert reading_unit(info(1.2)) == FRACTION and utilisation(info(1.2), "five_hour", FRACTION) == 1.0
+    # Integers over 1: percents.
+    assert reading_unit(info(95, 28)) == PERCENT and utilisation(info(95, 28), "five_hour", PERCENT) == 0.95
+    assert utilisation(info(250), "five_hour", PERCENT) == 1.0
+    # Every value 0 or 1 (Node writes 1.0 as 1): ambiguous, the caller uses the learned unit.
+    for ambiguous in (info(1), info(0, 1), info(1.0), info(0)):
+        assert reading_unit(ambiguous) is None
+    assert utilisation(info(1), "five_hour", PERCENT) == 0.01 and utilisation(info(1), "five_hour", FRACTION) == 1.0
+    for bad in (True, False, "9", float("nan"), float("inf"), -1, -0.5):
+        assert utilisation(info(bad), "five_hour", FRACTION) is None and reading_unit(info(bad)) is None
+
+
+async def test_an_ambiguous_reading_uses_the_unit_learned_last(tmp_path: Path, caplog: pytest.LogCaptureFixture
+                                                               ) -> None:  # fmt: skip
+    from opsd.runner import AgentRunner
+
+    store = Store.open(tmp_path / "ops.db")
+    try:
+        runner = AgentRunner.__new__(AgentRunner)
+        runner.store = store
+
+        def unit(*values: float) -> str:
+            windows = {f"w{i}": {"utilization": v} for i, v in enumerate(values)}
+            return runner._unit(RunResult(status="ok", rate_last={"unifiedWindows": windows}))
+
+        caplog.set_level("WARNING")
+        assert unit(1) == PERCENT and "unit unknown" in caplog.text  # nothing learned yet: percent, warned
+        assert unit(0.3, 0) == FRACTION and store.kv_get(UNIT_KEY) == FRACTION
+        assert unit(1, 0) == FRACTION  # ambiguous: the learned unit
+        assert unit(40, 1) == PERCENT and unit(1) == PERCENT
+    finally:
+        store.close()
 
 
 def test_prune_keeps_the_rolling_week(db: Store) -> None:

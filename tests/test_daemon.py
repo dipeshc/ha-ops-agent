@@ -233,9 +233,13 @@ async def test_non_urgent_claude_push_does_not_suppress_critical(h: Harness) -> 
 async def test_an_agent_push_for_information_goes_to_history_and_the_critical_push_still_goes(h: Harness) -> None:
     await h.daemon().health_cycle("catch_up")
     h.fake.set_unavailable("light.kitchen", hours_ago=8)
-    h.in_run_requests = [{"verb": "notify", "args": {"title": "FYI", "message": "a light is off"}}]
+    h.in_run_requests = [
+        {"verb": "notify", "args": {"title": "FYI", "message": "a light is off"}},
+        {"verb": "notify", "args": {"title": "FYI", "message": "a light is off", "reason": "note"}},
+    ]
     h.claude_reply = {"result": "ok", "summary": "fine"}
     outcome = await h.daemon().health_cycle("daily")
+    assert not h.in_run_responses[-2]["ok"] and "--reason is required" in h.in_run_responses[-2]["error"]
     assert h.in_run_responses[-1]["ok"] and "History note" in h.in_run_responses[-1]["output"]
     titles = [p["title"] for p in h.pushes()]
     assert "Agent: FYI" not in titles and titles[-1] == "Ops Agent: critical"

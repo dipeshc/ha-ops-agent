@@ -56,7 +56,7 @@ from typing import Any
 from opsd import dashboards
 from opsd import maintenance as maint
 from opsd.approvals import LIVE, approvable, dashboard_subject, is_change, is_dashboard
-from opsd.changes import diff_complete
+from opsd.changes import UNCLEAN_KEY, diff_complete
 from opsd.channels import BudgetClass, Message
 from opsd.conversation import clean_text, fence
 from opsd.live import Hub
@@ -467,7 +467,7 @@ class Composer:
                               "usual_s": self._usual(kind, jobs)}  # fmt: skip
                 return base
         if job is not None:
-            settled = self._settled(base, job, live, jobs)
+            settled = self._settled(base, job, live, jobs, item)
             if settled is not None:
                 return settled
         if item is None:
@@ -577,10 +577,10 @@ class Composer:
                       "usual_s": self._usual(job.kind, jobs)}  # fmt: skip
         return base
 
-    def _settled(self, base: Spec, job: UpdateJob, live: Mapping[str, dict[str, Any]],
-                 jobs: list[UpdateJob]) -> Spec | None:  # fmt: skip
-        """A finished job's item, or None when the plan decides (a skipped job, an acknowledged failure, an install
-        that failed once and changed nothing: the next window tries it again)."""
+    def _settled(self, base: Spec, job: UpdateJob, live: Mapping[str, dict[str, Any]], jobs: list[UpdateJob],
+                 item: Mapping[str, Any] | None) -> Spec | None:  # fmt: skip
+        """A finished job's item, or None when the plan decides (a skipped job, an acknowledged failure, a failure
+        the next window retries by itself: `_retried`)."""
         store = self.store
         key = base.key
         reboot = _dict(job.target.get("reboot"))
@@ -620,10 +620,9 @@ class Composer:
             urgent = job.state in ("rolled_back", "rollback_failed") or fell_back
             if acked(store, key, token):
                 return None
-            failures = [j for j in jobs if (j.entity_id, j.to_version) == (job.entity_id, job.to_version)
-                        and j.state == "failed"]  # fmt: skip
-            if job.state == "failed" and not fell_back and len(failures) < REPEATED_FAILURES:
-                # Nothing changed on the house and the next window tries again: History, not Needs you.
+            failures = [j for j in jobs if j.entity_id == job.entity_id and j.state == "failed"]
+            if job.state == "failed" and not fell_back and self._retried(job, item, len(failures)):
+                # Nothing changed on the house and the next window tries again by itself: History, not Needs you.
                 return None
             base.state, base.since = "failed", job.finished_at
             detail = clean_text(job.detail, 300)
@@ -646,15 +645,27 @@ class Composer:
                 text = (f"{detail[:1].upper()}{detail[1:]}. Automatic updates are paused and {job.to_version} is held. "
                         "Check Settings > System > Repairs and the host log before you try it again.")  # fmt: skip
             else:
-                base.gist = f"not installed {len(failures)} times: {clean_text(job.detail, 120)}"
-                text = (f"Not installed {len(failures)} times in a row: {detail}. Nothing changed on the house, but "
-                        "it keeps failing, so it needs a look.")  # fmt: skip
+                times = f" ({len(failures)} failed installs in 14 days)" if len(failures) > 1 else ""
+                base.gist = f"not installed{times}: {clean_text(job.detail, 120)}"
+                text = (f"Not installed{times}: {detail}. Nothing installs it again by itself now, so it needs a "
+                        "look.")  # fmt: skip
             secondary = [act("resume_updates", "Resume automatic updates")] if self.ctx.paused else []
             base.need = need("ack", text, act("ack", "OK"), secondary)
             base.source["ack"] = token
             base.urgent = urgent
             return base
         return None
+
+    def _retried(self, job: UpdateJob, item: Mapping[str, Any] | None, failures: int) -> bool:
+        """A failed install that needs nobody: it failed cleanly before or during the install call (never while
+        verifying, rolling back or anything unknown), nobody approved it, the plan still offers that version as an
+        automatic update, automatic updates run (no gate, not paused), and the entity has failed fewer than
+        `REPEATED_FAILURES` times in the jobs read (14 days, any version)."""
+        return (job.target.get("failed_from") in ("pending", "installing")
+                and not job.target.get("approval")
+                and item is not None and item.get("tier") == Tier.AUTO and not item.get("held")
+                and self.ctx.gate is None and not self.ctx.paused
+                and failures < REPEATED_FAILURES)  # fmt: skip
 
     def window(self, run: Mapping[str, Any]) -> Spec | None:
         """An update night that backed up or installed (report-only plans are no item: the updates carry them)."""
@@ -779,8 +790,23 @@ class Composer:
                 spec.state, spec.gist = "done", "reverted"
                 spec.since = str(row["updated_at"])
             case "failed":
-                # The daemon undid it and nothing changed: the admin who applied it sees the outcome here.
-                spec.state, spec.gist, spec.since = "failed", f"failed, not applied: {detail}", str(row["updated_at"])
+                spec.state, spec.since = "failed", str(row["updated_at"])
+                unclean = self.store.kv_get(f"{UNCLEAN_KEY}{cid}")
+                token = f"change:{cid}:{row['updated_at']}"
+                if not unclean:
+                    # The daemon undid it cleanly and nothing changed: the outcome, never a question.
+                    spec.gist = f"failed, not applied: {detail}"
+                elif not acked(self.store, key, token):
+                    # Possibly half applied (the restore or its reload failed, or an error stopped it): only the
+                    # admin can check and fix the files and the running config.
+                    spec.gist = "failed and may be half applied"
+                    spec.need = need("ack", f"Change #{cid} failed and may be half applied: "
+                                     f"{clean_text(unclean, 300)} Check {paths} and the config before anything else.",
+                                     act("ack", "OK"))  # fmt: skip
+                    spec.source["ack"] = token
+                    spec.urgent = True
+                else:
+                    spec.gist = f"failed (acknowledged): {detail}"
             case "rejected":
                 spec.state, spec.gist, spec.since = "cancelled", "rejected", str(row["updated_at"])
                 spec.actor = "you"
@@ -937,11 +963,14 @@ class Composer:
         specs = []
         for finding in maint.load(store):
             spec = self._maintenance(finding, installed, at, live)
-            if maint.hidden(store, finding):
-                # Hidden by the admin until its evidence changes: resolved, never in Needs you.
+            if maint.hidden(store, finding) and not finding.asks(installed, self.now):
+                # Hidden by the admin until its evidence changes, or until it may ask (30 days before its deadline):
+                # quiet until then. A hidden removal still holds a Core update back (`maintenance.removals`).
                 spec = Spec(key=spec.key, kind=spec.kind, title=spec.title, state="cancelled", kicker=spec.kicker,
                             gist="hidden by you: not relevant here", facts=spec.facts, agent=spec.agent,
-                            source={"finding": finding.key}, actor="you", pushes=False)  # fmt: skip
+                            source={"finding": finding.key} | {k: v for k, v in spec.source.items()
+                                                               if k == "recheck_at"},
+                            actor="you", pushes=False)  # fmt: skip
             specs.append(spec)
         return specs
 
@@ -1050,9 +1079,10 @@ class Composer:
         if proposal is not None and proposal["state"] in ("open", "applying"):
             ready = "waits for you" if asks else "is ready to apply"
             spec.gist = f"{gist}; config change #{proposal['change']} {ready}"
-            spec.actions = finding_actions(finding, self.now, plan=False)
+            spec.actions = finding_actions(finding, self.now, plan=False, dismiss=not asks)
             return spec
-        spec.actions = finding_actions(finding, self.now)
+        # Never hidden while it asks: hiding only quiets an item that does not ask yet.
+        spec.actions = finding_actions(finding, self.now, dismiss=not asks)
         if asks:
             token = f"left:{finding.removal}:{left}"
             if not acked(store, key, token):

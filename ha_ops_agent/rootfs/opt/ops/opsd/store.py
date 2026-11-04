@@ -1880,6 +1880,9 @@ class Store:
         if to in JOB_FINAL:
             sets.append("finished_at = ?")
             values.append(_iso(now))
+        if to == "failed":
+            # The state it failed from (SET reads the old row): whether the next window may simply retry it.
+            sets.append("target = json_set(COALESCE(target, '{}'), '$.failed_from', state)")
         where = f"id = ? AND state IN ({','.join('?' * len(expect))})"
         if count_install:
             where += " AND install_attempts = 0"

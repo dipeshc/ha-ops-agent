@@ -100,12 +100,17 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   and `reject`). A running job is `running` with phases; success is `done`;
   installed-but-reboot-pending is `waiting` with primary `reboot_window`
   (never `failed`); rolled back, rollback-failed, an OS update that did not
-  activate after its reboot, or an install of the same version that failed
-  for the second time (`REPEATED_FAILURES`, within the 14 days of jobs read)
-  is `failed` with an `ack` need, urgent for the two rollback outcomes and
-  the OS fallback, and hidden once acked. An install that failed once and
-  changed nothing is no question: the item follows the plan again, its
-  gist saying "not installed last time", and the next window retries it.
+  activate after its reboot, or a failed install that nothing retries by
+  itself is `failed` with an `ack` need, urgent for the two rollback
+  outcomes and the OS fallback, and hidden once acked. A failed install is
+  retried by itself, and so is no question (the item follows the plan
+  again, its gist saying "not installed last time"), only when all hold
+  (`Composer._retried`): it failed from `pending` or `installing` (recorded
+  in the job's `target.failed_from`; failing from verifying, rolling back
+  or an unknown state asks the first time), nobody approved it, the latest
+  plan still offers that version as an automatic update, automatic updates
+  run (no gate, not paused), and the entity has failed fewer than
+  `REPEATED_FAILURES` (2) times in the 14 days of jobs read, any version.
   An approved job that was skipped while Home Assistant no longer offers
   the version is `cancelled` without a need (still offered, the update
   asks for approval again). Tests
@@ -122,12 +127,19 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   expiry), except a maintenance finding's change before its finding may ask,
   which is `proposed` with the same actions ([maintenance.md](maintenance.md)
   M12a); approved is `running`; applied is `done` with a `revert` action;
-  failed is `failed` without a need (the daemon undid it; nothing changed);
+  failed is `failed` without a need when the daemon undid it cleanly (the
+  files restored and, after a reload, reloaded again); a failure that may
+  have left the house half applied (the restore or its reload failed, an
+  error stopped the pipeline, a restart interrupted it; kv
+  `change.unclean:<id>`) is `failed` with an urgent `ack` need and is
+  pushed;
   an open change whose diff cannot be shown in full is `proposed` with
   `reject` only (it cannot be applied and expires by itself); rejected or
   stale is `cancelled`; expired is `expired`; refused rows produce no item.
   Tests `test_review_4_a_failed_change_is_one_failed_item_that_does_not_ask`,
-  `test_a_change_not_shown_in_full_cannot_be_approved`. The proposer's words go in
+  `test_a_change_not_shown_in_full_cannot_be_approved`,
+  `test_a_change_that_may_be_half_applied_asks_and_a_clean_failure_does_not`,
+  `test_an_error_that_stops_the_pipeline_never_leaves_a_change_applying`. The proposer's words go in
   `agent`, never in the need or the push. Test
   `test_a_change_proposal_keeps_the_proposers_words_out_of_the_need_and_the_push`.
 - I10. A fact noted without a change proposal is `done` ("kept in the
@@ -199,17 +211,17 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   | --- | --- | --- |
   | Update to approve (I6) | `approval` | APPROVE tier, not soaking and not in the soak-unknown hold ([updates.md](updates.md) U5, U5a) |
   | Update installed, reboot pending (I6) | `approval` | always (the host reboot is the admin's) |
-  | Update job failed (I6) | `ack` | rolled back, rollback failed, OS fallback, or the same version failed twice |
+  | Update job failed (I6) | `ack` | rolled back, rollback failed, OS fallback, or a failed install nothing retries by itself (approved, no longer offered, gate off or paused, failed while verifying or in an unknown state, or the entity's second failure in 14 days) |
   | Update night (I8) | `ack` | a failure before the install that repeats until fixed, or a whole-night regression (updates paused) |
-  | Config change (I9) | `approval` | open and complete, except a maintenance fix before its finding may ask ([maintenance.md](maintenance.md) M12a) |
+  | Config change (I9) | `approval` / `ack` | open and complete, except a maintenance fix before its finding may ask ([maintenance.md](maintenance.md) M12a); a failure that may be half applied |
   | Maintenance finding (I19) | `ack` / `approval` | within 30 days of its deadline, or a dashboard restore that failed ([maintenance.md](maintenance.md) M12) |
   | Health item (I10) | `ack` | warning or critical, not handled by the agent in its run, and not waiting quietly |
   | Activity entry (I16) | `ack` | a failed backup (self-heal or Back up now) |
 
   Never in Needs you: soaking updates, updates without a known release
-  age (until U5a asks), an update failure that changed nothing the first
-  time, a skipped approved update no longer offered, a failed or
-  incomplete config change, a maintenance fix before its 30 days, a
+  age (until U5a asks), an update failure the next window retries by
+  itself, a skipped approved update no longer offered, a config change
+  that failed and was cleanly undone or cannot be shown in full, a maintenance fix before its 30 days, a
   finding without a deadline, a refused or restored dashboard change, a
   noted fact, info health items, items the agent acked, and the agent's
   own notes and messages.
@@ -271,8 +283,10 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   own run (`notify.admin`) is one message in the chat and links to it, but
   carries no Reply button: model text never invites an answer. It goes out
   only with a reason class (`needs_action`, `physical_task`, `security`);
-  without one it is a quiet History note, never a push
-  ([capabilities.md](capabilities.md) K11). Test
+  `note` makes it a quiet History note, and no reason is refused
+  ([capabilities.md](capabilities.md) K11). The agent's own reminders and
+  follow-ups follow the same rule ([chat.md](chat.md) T16): no Reply
+  button, no need from model text, and a push only with a push class. Test
   `test_a_triage_push_links_to_the_chat_without_a_reply_button`.
 - N8. **Quiet hours.** Non-bypassing pushes are held in the store and sent on
   the first liveness pass after the window; urgent, quiet-ok and SAFETY

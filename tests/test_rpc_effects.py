@@ -253,20 +253,23 @@ async def test_notify_daily_quota_across_runs(world: World) -> None:
     assert not response["ok"] and "daily quota" in response["error"]
 
 
-async def test_a_push_without_a_reason_class_is_a_history_note(world: World) -> None:
+async def test_a_push_needs_a_reason_class_and_a_note_takes_no_push_quota(world: World) -> None:
+    run = world.run()
     for reason in (None, "fyi", "update"):
-        run = world.run()
-        args = {"title": "Acme Solar", "message": "recovered after the reload"} | ({"reason": reason} if reason else {})
+        args = {"title": "Acme Solar", "message": "recovered"} | ({"reason": reason} if reason else {})
         response = await world.call("notify", **args)
-        assert response["ok"] and "History note" in response["output"]
-        assert run.effects.notify_outcomes == ["noted"]
-        world.server.end_run()
-    assert world.sink.messages == [] and world.sink.notes == [("Acme Solar", "recovered after the reload")] * 3
-    for reason in ("needs_action", "physical_task", "security"):
-        world.run()
-        assert (await world.call("notify", title="t", message="m", reason=reason))["ok"]
-        world.server.end_run()
-    assert len(world.sink.messages) == 3
+        assert not response["ok"] and "needs_action, physical_task, security" in response["error"]
+        assert "note" in response["error"]
+    assert run.counts.get("notify.admin", 0) == 0 and world.sink.messages == []
+    # Notes: no push, no quota unit, at most 3 a run; the one push of the run is still available.
+    for _ in range(3):
+        noted = await world.call("notify", title="Acme Solar", message="recovered after the reload", reason="note")
+        assert noted["ok"] and "History note" in noted["output"]
+    assert not (await world.call("notify", title="t", message="m", reason="note"))["ok"]
+    assert world.sink.notes == [("Acme Solar", "recovered after the reload")] * 3 and world.sink.messages == []
+    assert world.store.count(datetime.now(UTC).date().isoformat(), "cap:notify.admin") == 0
+    assert (await world.call("notify", title="t", message="m", reason="physical_task"))["ok"]
+    assert run.effects.notify_outcomes == ["noted", "noted", "noted", "sent"] and len(world.sink.messages) == 1
 
 
 async def test_notify_empty_message_refused(world: World) -> None:
@@ -388,7 +391,7 @@ async def test_failed_execution_refunds_the_run_quota(paths: Paths) -> None:
         ctx = RunContext(profile="triage", principal=AGENT_SELF, allowed=TRIAGE.capabilities,
                          budget_class=BudgetClass.AGENT, started_at=datetime.now(UTC), handoff=ITEMS)  # fmt: skip
         server.begin_run(ctx)
-        await server.dispatch(b'{"verb": "notify", "args": {"title": "t", "message": "m"}}')
+        await server.dispatch(b'{"verb": "notify", "args": {"title": "t", "message": "m", "reason": "security"}}')
         assert ctx.counts["notify.admin"] == 0
         assert world.store.count(datetime.now(UTC).date().isoformat(), "cap:notify.admin") == 1
     finally:

@@ -128,7 +128,14 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   tasks with `reply`, and quiet-ok only for admin reminders. A due
   follow-up runs the `followup` profile with the creator's origin (3 a day,
   retried after 6 hours, at most 3 attempts) and pushes its reply as
-  "Follow-up: ...". Firing is at-least-once with a `mark_fired` guard. A
+  "Follow-up: ...". The agent's own tasks (owner `agent`) push only when
+  created with a push class (`reason`, [capabilities.md](capabilities.md)
+  K11); with `note` the reminder, or the follow-up's result, is a quiet
+  History note (activity kind `note`, the words under `agent`, never a
+  need). Their pushes never carry a Reply button. Tests
+  `test_reminders_the_admin_set_ring_but_agent_ones_wait`,
+  `test_the_agents_own_follow_up_pushes_only_with_a_reason_and_never_offers_a_reply`.
+  Firing is at-least-once with a `mark_fired` guard. A
   reminder set from an item's Remind me action (maintenance.md M14a) opens
   that item.
 
@@ -153,5 +160,7 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   item id in its payload; each step's prompt holds the item's `<item>`
   block (T6a). It obeys T17's limits (one open investigation per chat, two
   house-wide, the open-task cap) and counts against `task.investigate`'s
-  daily quota of 4; refused, the action answers 409 with the reason. Test
+  daily quota of 4 (the same item, revision and day again is a duplicate:
+  no second run, the quota unit given back); refused, the action answers
+  409 with the reason. Test
   `test_plan_a_fix_starts_an_investigation_with_the_item`.

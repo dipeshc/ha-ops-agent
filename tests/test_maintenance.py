@@ -382,6 +382,15 @@ def test_a_deadline_is_the_month_of_the_removal_and_only_authoritative_removals_
         assert no_deadline.deadline is None and not no_deadline.asks("2030.3.0", ASKS_AT)
 
 
+def test_a_fix_stays_ready_until_its_finding_asks() -> None:
+    repair = Finding(key="0123456789abcdef", variant="deprecation", signal="repair", what="x", removal="2030.4")
+    # Proposed six weeks ahead: it expires a week after the finding starts asking, never before.
+    assert maintenance.fix_expiry(repair, NOW) == ASKS_AT + maintenance.PROPOSAL_TTL
+    assert maintenance.fix_expiry(repair, ASKS_AT + timedelta(days=5)) == ASKS_AT + timedelta(days=12)
+    undated = Finding(key="0123456789abcdef", variant="deprecation", signal="repository", what="x")
+    assert maintenance.fix_expiry(undated, NOW) == NOW + maintenance.FIX_READY
+
+
 async def test_only_a_dashboard_restore_that_failed_asks(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     await rig.scan()
@@ -456,6 +465,25 @@ async def test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home(tmp_path:
     assert rig.manager.hide(candidate.key)
     hidden = rig.items()[f"acme_weather: {candidate.what}"]
     assert hidden["state"] == "cancelled" and hidden["gist"].startswith("hidden by you") and not hidden["needs"]
+
+
+async def test_a_hidden_removal_still_holds_core_back_and_asks_near_its_deadline(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    await rig.scan()
+    near = rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]
+    assert "dismiss" in [a["id"] for a in near["actions"]]
+    finding = next(f for f in rig.manager.findings() if f.key == near["source"]["finding"])
+    assert rig.manager.hide(finding.key)
+    hidden = rig.items()[near["title"]]
+    assert hidden["state"] == "cancelled" and not hidden["needs"] and hidden["source"]["recheck_at"]
+    # Hiding only quiets the item: the update rule still asks for a Core version that removes it.
+    assert finding.key in {f.key for f in rig.manager.removals()}
+    assert removal_block({"kind": "core", "latest": "2030.4.1"}, rig.manager.removals()) is not None
+    # Within 30 days of the deadline it asks anyway, and Hide is not offered while it asks.
+    rig.now = ASKS_AT
+    rig.book.tick()
+    asking = rig.items()[near["title"]]
+    assert asking["state"] == "waiting" and "dismiss" not in [a["id"] for a in asking["actions"]]
 
 
 async def test_missing_evidence_never_resolves_a_finding(tmp_path: Path) -> None:

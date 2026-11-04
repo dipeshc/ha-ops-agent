@@ -23,6 +23,7 @@ import re
 from datetime import UTC, datetime, timedelta, tzinfo
 
 from opsd.capabilities import Args, CapabilityError
+from opsd.effects import NOTE, PUSH_REASONS
 from opsd.policy import Origin
 from opsd.runctx import ExecContext, RunContext
 from opsd.store import Store, Task
@@ -111,7 +112,15 @@ def validate_create(ctx: ExecContext, args: Args) -> Args:
         raise CapabilityError(f"follow-up chain limit reached ({MAX_GENERATION}); tell the admin instead")
     if store.count_open_tasks(owner) >= MAX_OPEN_TASKS[owner]:
         raise CapabilityError(f"too many open {owner} tasks ({MAX_OPEN_TASKS[owner]}); cancel some first")
+    reason = args.opt_text("reason") or ""
+    if owner == "agent" and reason not in PUSH_REASONS and reason != NOTE:
+        # The agent's own reminder or follow-up reaches the phone under the same rule as its push (effects).
+        raise CapabilityError(
+            f"--reason is required for your own tasks: {', '.join(sorted(PUSH_REASONS))} (it is"
+            f" pushed when due: the admin must act or decide), or {NOTE} (a History note only)"
+        )
     return args.replace(
+        reason=reason if owner == "agent" else "",
         title=title[:MAX_TITLE_CHARS],
         note=(args.opt_text("note") or "").strip()[:MAX_NOTE_CHARS],
         at=due.isoformat(timespec="seconds"),
@@ -136,6 +145,7 @@ async def exec_create(ctx: ExecContext, args: Args) -> str:
         payload={
             "note": args.text("note"),
             "reply": args.flag("reply"),
+            "reason": args.opt_text("reason") or "",
             "origin": str(run.principal.origin),
             "user_id": run.principal.user_id,
         },

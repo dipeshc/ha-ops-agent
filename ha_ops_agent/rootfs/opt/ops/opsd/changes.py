@@ -80,6 +80,20 @@ MAX_PER_DAY = 5
 MAX_OPEN = 5
 MAX_REFUSALS_PER_DAY = 20
 PROPOSAL_TTL = timedelta(days=7)
+# `maintenance.PROPOSER` (not imported: maintenance imports this module).
+MAINTENANCE_PROPOSER = "maintenance:"
+# A failed change that may have left the house half-applied (the restore or its reload failed, an error stopped
+# the pipeline, a restart interrupted it): kv `change.unclean:<id>` holds why, and its item asks the admin.
+UNCLEAN_KEY = "change.unclean:"
+RESTORE_FAILED = " Restoring the previous files FAILED"
+RELOAD_FAILED = " Reloading the restored config also failed"
+
+
+def _clean(*notes: str) -> bool:
+    """The restore notes say everything was put back (and reloaded)."""
+    return not any(RESTORE_FAILED in n or RELOAD_FAILED in n for n in notes)
+
+
 # The whole diff the admin reviews, every file in full; a longer proposal is refused, never cut.
 DIFF_CHARS = 200_000
 # Before this release the stored diff was cut at this length: such a row is never approvable.
@@ -442,11 +456,13 @@ def build_proposal(store: Store, repo: Repo, options: Options, *, kind: str, fil
                    why: str, effect: str, requested_by: str, day: str, now: datetime, thread_id: str | None = None,
                    run_id: str | None = None, fact_id: int | None = None,
                    entities: frozenset[str] | None = None,
-                   fix_domains: frozenset[str] | None = None) -> dict[str, Any]:  # fmt: skip
+                   fix_domains: frozenset[str] | None = None,
+                   expires_at: datetime | None = None) -> dict[str, Any]:  # fmt: skip
     """Validate and record one proposal as a commit on refs/ops/proposals/<id> (blocking: call in a thread).
 
     `fix_domains` (opsd.updatefix only): the integrations an update's config change is for; it may then
-    also edit those blocks of `configuration.yaml`.
+    also edit those blocks of `configuration.yaml`. `expires_at` (opsd.maintenance only): a later expiry than
+    `PROPOSAL_TTL`, so a fix stays ready until its finding asks the admin.
     """
     check_subject(subject)
     if not options.git_on:
@@ -457,7 +473,11 @@ def build_proposal(store: Store, repo: Repo, options: Options, *, kind: str, fil
         raise ChangeRefused("each file may appear once")
     if not why.strip():
         raise ChangeRefused("say why the change is needed")
-    if len(store.changes(states=("open",), limit=MAX_OPEN + 1)) >= MAX_OPEN:
+    # Maintenance fixes wait long (until their finding asks), so they have their own cap and never crowd out others.
+    maintenance = requested_by.startswith(MAINTENANCE_PROPOSER)
+    same = [r for r in store.changes(states=("open",), limit=50)
+            if str(r.get("requested_by") or "").startswith(MAINTENANCE_PROPOSER) == maintenance]  # fmt: skip
+    if len(same) >= MAX_OPEN:
         raise ChangeRefused(f"{MAX_OPEN} proposals are already waiting for the admin")
     if store.count(day, "change_proposals") >= MAX_PER_DAY:
         raise ChangeRefused(f"today's limit of {MAX_PER_DAY} proposals is reached")
@@ -494,7 +514,8 @@ def build_proposal(store: Store, repo: Repo, options: Options, *, kind: str, fil
                             " full: propose smaller changes, one file at a time")  # fmt: skip
     row = store.create_change(
         kind=kind, subject=subject, why=clean_text(why, WHY_CHARS), effect=clean_text(effect, EFFECT_CHARS),
-        state="open", requested_by=requested_by, now=now, expires_at=now + PROPOSAL_TTL, files=rows,
+        state="open", requested_by=requested_by, now=now, expires_at=max(now + PROPOSAL_TTL, expires_at or now),
+        files=rows,
         diff=diff, base_sha=head, commit_sha=commit, thread_id=thread_id, run_id=run_id,
         fact_id=fact_id, summary=summary,
     )  # fmt: skip
@@ -948,7 +969,7 @@ class ChangeManager:
             self.live.remove_dirs(created)
         except OSError as err:
             _LOGGER.error("restore failed", extra={"error": str(err)[:300]})
-            return f" Restoring the previous files FAILED: {clean_text(str(err), 120)}."
+            return f"{RESTORE_FAILED}: {clean_text(str(err), 120)}."
         return " The previous files were restored."
 
     async def _reloads(self, paths: list[str]) -> None:
@@ -982,7 +1003,14 @@ class ChangeManager:
                                        detail=f"Not {verb}: {err}"[:300])  # fmt: skip
             except (GitError, OSError, StoreError, sqlite3.Error) as err:
                 _LOGGER.error("change pipeline error", extra={"id": change_id, "error": str(err)[:300]})
-                outcome = Outcome("failed", clean_text(str(err), 200))
+                detail = (f"stopped by an error: {clean_text(str(err), 200)}. Files may be half written; check the"
+                          " config and git status before anything else.")  # fmt: skip
+                outcome = Outcome("failed", detail)
+                try:
+                    # Never left applying: failed, and asked about (whatever was written stays written).
+                    self._mark_failed(change_id, ("applying", "reverting"), detail, clean=False)
+                except (StoreError, sqlite3.Error) as again:
+                    _LOGGER.error("change failure not recorded", extra={"id": change_id, "error": str(again)[:200]})
         self._audit(f"change.{action}", change_id, outcome=outcome.state, detail=outcome.detail)
         if self.activity is not None:
             # The admin applied it and sees the outcome on its item: an event there, never a chat ping.
@@ -1040,7 +1068,9 @@ class ChangeManager:
             await asyncio.to_thread(self._write_all, targets, created)
         except OSError as err:
             note = await asyncio.to_thread(self._restore, before, created)
-            return self._fail(change_id, running, f"writing failed: {clean_text(str(err), 120)}.{note}")
+            return self._fail(
+                change_id, running, f"writing failed: {clean_text(str(err), 120)}.{note}", clean=_clean(note)
+            )
         self._audit(f"change.{action}", change_id, outcome="written", detail=", ".join(paths))
         if not doc_only:
             valid, why = await self._check_config()
@@ -1051,7 +1081,9 @@ class ChangeManager:
                     f"Core's config check failed: {clean_text(why, 300)}.{note}",
                     urgent=False,
                 )
-                return self._fail(change_id, running, f"config check failed: {clean_text(why, 200)}.{note}")
+                return self._fail(
+                    change_id, running, f"config check failed: {clean_text(why, 200)}.{note}", clean=_clean(note)
+                )
             self._audit(f"change.{action}", change_id, outcome="checked", detail="config check passed")
             try:
                 await self._reloads(paths)
@@ -1061,7 +1093,12 @@ class ChangeManager:
                 await self._notify(f"Config change #{change_id} rolled back",
                                    f"The reload failed ({clean_text(str(err), 160)}).{note}{again} Check the"
                                    " automations and templates.", urgent=True)  # fmt: skip
-                return self._fail(change_id, running, f"reload failed: {clean_text(str(err), 160)}.{note}{again}")
+                return self._fail(
+                    change_id,
+                    running,
+                    f"reload failed: {clean_text(str(err), 160)}.{note}{again}",
+                    clean=_clean(note, again),
+                )
         subject = str(row["subject"]) if action == "apply" else f"chore(ops-agent): revert config change {change_id}"
         try:
             # The approved bytes the daemon wrote, never what the work tree holds now.
@@ -1074,7 +1111,12 @@ class ChangeManager:
                 f"The commit failed ({clean_text(str(err), 160)}).{note}{again}",
                 urgent=not doc_only,
             )
-            return self._fail(change_id, running, f"commit failed: {clean_text(str(err), 160)}.{note}{again}")
+            return self._fail(
+                change_id,
+                running,
+                f"commit failed: {clean_text(str(err), 160)}.{note}{again}",
+                clean=_clean(note, again),
+            )
         pushed = await self._push()
         note = " It takes effect at the next Core restart (the agent never restarts Core for a change)." if any(
             needs_restart(p) for p in paths) else ""  # fmt: skip
@@ -1094,7 +1136,7 @@ class ChangeManager:
         try:
             await self._reloads(paths)
         except Exception as err:  # noqa: BLE001 - reported to the admin
-            return f" Reloading the restored config also failed: {clean_text(str(err), 120)}."
+            return f"{RELOAD_FAILED}: {clean_text(str(err), 120)}."
         return " The restored config was reloaded."
 
     async def _push(self) -> str:
@@ -1106,9 +1148,19 @@ class ChangeManager:
             return ", not pushed yet (origin moved or unreachable)"
         return ", pushed"
 
-    def _fail(self, change_id: int, running: str, detail: str) -> Outcome:
-        self.store.move_change(change_id, expect=(running,), to="failed", now=self._clock(), detail=detail[:300])
+    def _fail(self, change_id: int, running: str, detail: str, *, clean: bool) -> Outcome:
+        """The change failed. `clean`: everything it wrote was put back (and reloaded); otherwise the house may
+        run a half-applied config, which the admin is asked about (`UNCLEAN_KEY`)."""
+        self._mark_failed(change_id, (running,), detail, clean=clean)
         return Outcome("failed", detail)
+
+    def _mark_failed(self, change_id: int, expect: tuple[str, ...], detail: str, *, clean: bool) -> bool:
+        with self.store.atomic():
+            if not clean:
+                # Read by the change's item (written before the move, so the item is composed with it).
+                self.store.kv_set(f"{UNCLEAN_KEY}{change_id}", detail[:300], now=self._clock())
+            return self.store.move_change(change_id, expect=expect, to="failed", now=self._clock(),
+                                          detail=detail[:300])  # fmt: skip
 
     async def _notify(self, title: str, body: str, *, urgent: bool) -> None:
         budget = BudgetClass.SAFETY if urgent else BudgetClass.AGENT
@@ -1134,20 +1186,13 @@ class ChangeManager:
                 else:
                     before = {p: self.repo.file_at(head, p) for p in target}
                     note = self._restore(before, [])
-                    self.store.move_change(
-                        row["id"],
-                        expect=(row["state"],),
-                        to="failed",
-                        now=self._clock(),
-                        detail=f"interrupted by a restart.{note} Reload or restart if needed.",
-                    )
+                    # Restored files are not reloaded here: the admin is asked to reload or restart.
+                    self._mark_failed(int(row["id"]), (row["state"],),
+                                      f"interrupted by a restart.{note} Reload or restart if needed.",
+                                      clean=False)  # fmt: skip
             except (GitError, OSError) as err:
-                self.store.move_change(
-                    row["id"],
-                    expect=(row["state"],),
-                    to="failed",
-                    now=self._clock(),
-                    detail=f"interrupted; could not recover: {clean_text(str(err), 160)}",
-                )
+                self._mark_failed(int(row["id"]), (row["state"],),
+                                  f"interrupted; could not recover: {clean_text(str(err), 160)}",
+                                  clean=False)  # fmt: skip
             fixed += 1
         return fixed

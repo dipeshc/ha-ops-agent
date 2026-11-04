@@ -8,7 +8,7 @@ What bounds use deterministically: a daily run cap per profile, each run's `--ma
   agent's own runs, not a measured share of the subscription: the provider reports account utilisation
   in whole percents, too coarse to see one run.
 - Runs stop at 80 % of each window's budget; user-class runs (chat, investigations, summaries) at half
-  of it, so monitoring keeps a reserve. A run's timeout is trimmed to the budget left.
+  of that stop line, so monitoring always keeps at least the other half. A run's timeout is trimmed to the budget left.
 - The account-busy yield: a measured account utilisation of at least 90 % in either window, less than an
   hour old, stops every run (the admin's own work comes first).
 - `limits.daily_max_usd` (optional): the reported cost of today's runs (`RunResult.cost_usd`) stays under it;
@@ -38,8 +38,8 @@ SHARE_LIMIT = 0.05
 SHARE_RANGE = (0.5, 25.0)
 # Every run stops at this fraction of the run-time budget.
 STOP_FRACTION = 0.8
-# User-class runs (chat, investigations, summaries) stop at this fraction of the budget, keeping the rest
-# for monitoring runs (triage, follow-ups, update reviews).
+# User-class runs (chat, investigations, summaries) stop at this fraction of the stop line, so monitoring runs
+# (triage, follow-ups, update reviews) always keep at least the other half of it.
 USER_FRACTION = 0.5
 ACCOUNT_BUSY = 0.90
 # Low end of the published weekly allowances (hours of Sonnet use), per plan.
@@ -103,8 +103,8 @@ class Caps:
         return self.window_seconds if window == "five_hour" else self.week_seconds
 
     def stop(self, window: str, *, user: bool = False) -> float:
-        """Run seconds in `window` at which runs stop (user-class runs stop earlier)."""
-        return self.budget(window) * (USER_FRACTION if user else STOP_FRACTION)
+        """Run seconds in `window` at which runs stop: 80 % of the budget; user-class runs at half of that."""
+        return self.budget(window) * STOP_FRACTION * (USER_FRACTION if user else 1.0)
 
     def seconds_for(self, profile: str) -> float:
         return self.reserve_seconds.get(profile, DEFAULT_RESERVE_SECONDS)
@@ -141,19 +141,50 @@ class Reservation:
     seconds: float = 1200.0
 
 
-def percent_reading(value: object) -> float | None:
-    """One reported utilisation as a percent (0..100), by its JSON type: an `int` is a percent, a `float` up to
-    1.0 is a fraction of the window, a larger `float` is a percent. A bool, a string, NaN, infinity or a negative
-    value is no reading; over 100 % counts as 100 (a saturated window, never dropped as "no reading")."""
+PERCENT = "percent"
+FRACTION = "fraction"
+UNIT_KEY = "usage.unit"
+
+
+def _number(value: object) -> float | None:
+    """A usable reading: a finite, non-negative number (never a bool or a string)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if isinstance(value, float):
-        if not math.isfinite(value) or value < 0:
-            return None
-        value = value * 100 if value <= 1.0 else value
-    elif value < 0:
+    return float(value) if math.isfinite(value) and value >= 0 else None
+
+
+def _readings(info: Mapping[str, object] | None) -> list[float]:
+    if not isinstance(info, Mapping):
+        return []
+    found = []
+    windows = info.get("unifiedWindows")
+    if isinstance(windows, Mapping):
+        found += [_number(w.get("utilization")) for w in windows.values() if isinstance(w, Mapping)]
+    found.append(_number(info.get("utilization")))
+    return [v for v in found if v is not None]
+
+
+def reading_unit(info: Mapping[str, object] | None) -> str | None:
+    """The unit of one `rate_limit_info`, judged over all its windows: any non-integer value means fractions
+    (Claude Code is Node: 1.0 arrives as `1`, so the JSON type cannot tell, and an over-limit fraction can pass
+    1.0); otherwise any value over 1 means percents. All 0 or 1 is ambiguous (None): the caller uses the unit
+    learned from the last unambiguous payload (`UNIT_KEY`)."""
+    values = _readings(info)
+    if any(not v.is_integer() for v in values):
+        return FRACTION
+    if any(v > 1 for v in values):
+        return PERCENT
+    return None
+
+
+def utilisation(info: Mapping[str, object] | None, window: str, unit: str = PERCENT) -> float | None:
+    """Account utilisation (0..1) of `five_hour` or `seven_day` from a `rate_limit_info`, in `unit` (from
+    `reading_unit`, else the learned one). A bool, a string, NaN, infinity or a negative value is no reading;
+    over the limit counts as a full window (capped, never dropped as "no reading")."""
+    value = _number(_raw_value(info, window))
+    if value is None:
         return None
-    return min(float(value), 100.0)
+    return min(value if unit == FRACTION else value / 100, 1.0)
 
 
 def _raw_value(info: Mapping[str, object] | None, window: str) -> object:
@@ -165,9 +196,3 @@ def _raw_value(info: Mapping[str, object] | None, window: str) -> object:
     if info.get("rateLimitType") == window:
         return info.get("utilization")
     return None
-
-
-def utilisation(info: Mapping[str, object] | None, window: str) -> float | None:
-    """Account utilisation (0..1) of `five_hour` or `seven_day` from a `rate_limit_info` (`percent_reading`)."""
-    value = percent_reading(_raw_value(info, window))
-    return None if value is None else value / 100

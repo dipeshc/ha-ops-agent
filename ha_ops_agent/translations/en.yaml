@@ -106,7 +106,7 @@ configuration:
     fields:
       max_share_percent:
         name: Maximum share (%)
-        description: "The agent's run time per 7 days, as a percent of the plan's weekly hours (0.5 to 25); a fifth of it per 5 hours. Runs stop at 80 % of it, chat at half."
+        description: "The agent's run time per 7 days, as a percent of the plan's weekly hours (0.5 to 25); a fifth of it per 5 hours. Runs stop at 80 % of it, chat at half of that."
   limits:
     name: Advanced limits
     description: Optional. Empty fields use the built-in defaults.

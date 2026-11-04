@@ -126,7 +126,7 @@ Anthropic's signed package repository.
 - **Spend.** On a subscription the agent has a run-time budget: its runs
   may take `usage.max_share_percent` (default 5) of the plan's weekly hours
   (`claude.plan`) per 7 days and a fifth of that per 5 hours; they stop at
-  80 % of it, chat at half. It also yields when your account is above 90 %
+  80 % of it, chat at half of that. It also yields when your account is above 90 %
   of a window. `limits.run_max_usd` caps each run's cost and the optional
   `limits.daily_max_usd` a day's.
 

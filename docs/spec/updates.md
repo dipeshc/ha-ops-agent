@@ -70,7 +70,7 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   Core breaking or removed change for a domain the house uses (or with no
   domain), a developer-blog notice while a fragile custom domain is loaded,
   unreadable notes, or an empty house-domain set all ask; so does a Core
-  target that reaches the removal of an unresolved, not hidden deprecation
+  target that reaches the removal of an unresolved deprecation (hidden or not)
   this install still uses, named by a repair or the release notes (never a
   log line) (`maintenance.removal_block`; a maintenance scan
   older than 26 hours runs first, [maintenance.md](maintenance.md)

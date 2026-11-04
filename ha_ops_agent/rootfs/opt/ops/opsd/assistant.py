@@ -72,6 +72,7 @@ from opsd.conversation import (
     validate_investigation,
     validate_reply,
 )
+from opsd.effects import PUSH_REASONS
 from opsd.events import Event
 from opsd.items import ITEM_ID_RE, item_context
 from opsd.items import deep_link as item_link
@@ -393,6 +394,11 @@ class Assistant:
             message = dataclasses.replace(message, quiet_ok=True)
         if task.payload.get("reply") and task.owner == "admin":
             message = self.with_reply(message, now=now, source="reminder")
+        if task.owner != "admin" and task.payload.get("reason") not in PUSH_REASONS:
+            # The agent's own reminder for information: History only (its words under `agent`, never a need).
+            self.note("note", f"{label}: {task.title}", note)
+            self.audit("task.fired", "system", args={"task": task.id, "kind": task.kind}, outcome="noted")
+            return "noted"
         outcome = await self._send(message)
         self.audit("task.fired", "system", args={"task": task.id, "kind": task.kind}, outcome=outcome)
         self.note("reminder", f"{label}: {task.title}", note, ref={"task": task.id})
@@ -421,11 +427,16 @@ class Assistant:
             self.note("followup", f"Follow-up: {task.title}",
                       "nothing to report" if outcome.run.status == "ok" else f"not run: {outcome.run.status}",
                       ref={"task": task.id})  # fmt: skip
-        if reply:
-            budget = BudgetClass.USER if task.payload.get("origin") != str(Origin.AGENT_SELF) else BudgetClass.AGENT
+        if reply and task.owner != "admin" and task.payload.get("reason") not in PUSH_REASONS:
+            # The agent's own follow-up for information: History only, never a push or a need.
+            self.note("note", f"Follow-up: {task.title}", redactor.redact(reply))
+        elif reply:
+            own = task.owner != "admin"
+            budget = BudgetClass.AGENT if own else BudgetClass.USER
             message = agent_message(f"Follow-up: {task.title}", redactor.redact(reply), urgent=False,
                                     budget_class=budget, tag_suffix=task_tag(task.id))  # fmt: skip
-            await self._send(self.with_reply(message, now=now, source="followup"))
+            # The agent's own follow-up never invites a reply (N7): only the admin's own tasks do.
+            await self._send(self.with_reply(message, now=now, source="followup", reply=not own))
 
     async def on_user_action(self, event: Event) -> None:
         """Done or Snooze on a reminder push (admin-chat origin: schedule effects only)."""
@@ -683,16 +694,21 @@ class Assistant:
         if self.store.count_open_tasks("admin") >= MAX_OPEN_TASKS["admin"]:
             return "Too many open reminders and follow-ups; cancel some first."
         quota = CAPABILITIES["task.investigate"].quota.per_day
-        if not self.store.bump(self._day(now), "cap:task.investigate", limit=quota or None):
+        day = self._day(now)
+        if not self.store.bump(day, "cap:task.investigate", limit=quota or None):
             return "Today's investigations are used up; try again tomorrow."
         title = clean_text(f"Plan a fix: {record.get('title') or 'maintenance item'}", MAX_TITLE_CHARS)
-        task, _ = self.store.create_task(
+        task, created = self.store.create_task(
             kind="followup", title=title, owner="admin", created_by=f"panel:{user[:64]}", next_fire_at=now,
             payload={"investigation": True, "note": PLAN_FIX_BRIEF, "max_steps": PLAN_FIX_STEPS, "step": 0,
                      "findings": [], "origin": str(Origin.ADMIN_CHAT), "user_id": user, "item": str(record["id"])},
             idempotency_key=f"plan_fix:{record['id']}:{record.get('revision')}:{now.date().isoformat()}", now=now,
             thread_id=thread,
         )  # fmt: skip
+        if not created:
+            # The same request again (same item, revision and day): the quota unit goes back.
+            self.store.unbump(day, "cap:task.investigate")
+            return "This fix was already planned today; its findings are in the chat."
         self.audit("task.investigate", f"admin-chat:{user[:64]}", args={"task": task.id, "item": record["id"]},
                    outcome="accepted", detail="plan a fix (panel)")  # fmt: skip
         self._investigation_card(task, now)

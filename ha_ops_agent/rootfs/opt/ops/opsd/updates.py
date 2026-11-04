@@ -439,7 +439,9 @@ def os_phase(state: OsState, job: UpdateJob) -> str:
 
 
 def needs_admin(job: UpdateJob) -> bool:
-    """A finished job the admin must act on: failed, waiting for his reboot, or approved but not installed."""
+    """A finished job that touched the admin: failed, waiting for his reboot, or approved but not installed. It
+    does not decide Needs you: the item does (`items.Composer._settled`), so a failure the next window retries
+    by itself, or an approved job whose version is gone, is History."""
     if job.state in ("failed", "reboot_pending"):
         return True
     return job.state == "skipped" and isinstance(job.target.get("approval"), str)
@@ -1883,9 +1885,10 @@ class UpdateManager:
         failed = bool(by_state.get("rollback_failed")) or bool(ctx.window_regressed)
         self.store.set_update_run(ctx.run_id, now=self._clock(), state="failed" if failed else "done", summary=summary)
         self._audit("update.run", outcome="failed" if failed else "done", detail=summary, run=ctx.run_id)
-        # The night's summary never pushes. Every job that needs the admin
-        # (`needs_admin`: a failure, a skipped approved job, a reboot to allow; and every escalation) is an item
-        # in Needs you, and the item book pushes each of them, always, tagged with its item.
+        # The night's summary never pushes. A job that needs the admin is its update's item in Needs you, which the
+        # item book pushes, tagged with the item: a failure nothing retries by itself (`items.Composer._retried`),
+        # a reboot to allow, every escalation. A skipped approved job is History when the version is gone, else the
+        # update asks for approval again.
         self._note("Update night", summary, item=f"window:{ctx.run_id}")
         self._publish()
 

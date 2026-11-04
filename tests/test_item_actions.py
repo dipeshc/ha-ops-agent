@@ -172,6 +172,12 @@ async def test_plan_a_fix_starts_an_investigation_with_the_item(h: Harness, loca
         assert "<item>" in prompt and item["id"] in prompt and "Plan a fix" in prompt
         statuses = [t.status for t in d.store.turns_page(task.thread_id, limit=20)]
         assert "investigation" in statuses
+        # Over, the same request again the same day is a duplicate: no second run, no quota unit.
+        d.store.admin_cancel_task(task.id, now=datetime.now(UTC))
+        assert d.store.open_investigations() == []
+        status, _, dup = await panel.request("POST", f"/api/items/{item['id']}/act", body=act)
+        assert status == 409 and "already planned today" in dup["message"]
+        assert d.store.count(d.day(datetime.now(UTC)), "cap:task.investigate") == 1
     finally:
         await panel.server.stop()
 

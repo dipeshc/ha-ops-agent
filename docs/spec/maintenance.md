@@ -150,7 +150,14 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   proposed for a finding (`requested_by = maintenance:<finding>`) that is
   open is `proposed` (Coming up) with `apply` and `reject` as plain actions
   and its expiry in the footnote, until its finding may ask (M12); then it
-  is `waiting` with its approval need like any proposal. A change whose
+  is `waiting` with its approval need like any proposal. It expires no
+  earlier than a week after its finding may ask (`fix_expiry`: the later
+  of now and `asks_at()`, plus `PROPOSAL_TTL`), or after 90 days
+  (`FIX_READY`) for a finding without a deadline, so it stays ready in
+  Coming up; files that change meanwhile make it stale as always.
+  Maintenance fixes have their own cap of 5 open, apart from other
+  proposals. Tests `test_a_fix_stays_ready_until_its_finding_asks`,
+  `test_a_maintenance_fix_keeps_its_later_expiry_and_its_own_open_cap`. A change whose
   finding has no deadline, or is gone, never asks. A dashboard plan in act
   mode is likewise Coming up with `apply_dashboard` and `reject` until the
   finding may ask. Applying from Coming up is the same approval as from
@@ -164,8 +171,12 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   Coming up; replacement candidates and suggestions are a separate Home
   section, `suggestions`; all are in History.
 - M14. **Resolution.** A finding the scan no longer reports is `done`
-  ("resolved"). The admin may hide any finding ("Hide until it changes"):
-  it is `cancelled` until its evidence changes. Test
+  ("resolved"). The admin may hide a finding that does not ask ("Hide
+  until it changes"; never offered while it asks): its item is `cancelled`
+  until its evidence changes or it may ask (M12), when it comes back.
+  Hiding only quiets the item: a hidden removal still counts for the
+  update rule (`removals`, M26). Test
+  `test_a_hidden_removal_still_holds_core_back_and_asks_near_its_deadline`. Test
   `test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home`.
 - M14a. **Every finding is actionable.** Besides "Ask the agent" (as on
   every item, [panel.md](panel.md) N21), a finding offers **Plan a fix**
@@ -177,7 +188,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   [chat.md](chat.md) T17a), **Remind me** in 30 or 90 days or near the
   deadline (30 days before it, only for a finding with a deadline more
   than 31 days away; an admin reminder task about the item, opening it
-  when it fires), and **Hide until it changes** (M14). A dashboard plan
+  when it fires), and **Hide until it changes** (M14, only while it does
+  not ask). A dashboard plan
   still comes only from the plan run (M18). Tests
   `test_plan_a_fix_starts_an_investigation_with_the_item`,
   `test_remind_me_later_sets_a_reminder_about_the_item`.
@@ -310,8 +322,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   a failure keeps the earlier findings. Test
   `test_the_scan_is_due_before_an_update_only_when_it_is_old`.
 - M26. **A Core update that removes something still in use asks.** An AUTO
-  Core candidate whose target minor reaches the removal of an unresolved,
-  not hidden deprecation from a repair or the release notes (never a log
+  Core candidate whose target minor reaches the removal of an unresolved
+  deprecation (hidden or not) from a repair or the release notes (never a log
   line) is held for approval with the reason naming it
   (`maintenance.removal_block`, beside `repair_block` in the update rule).
   Tests `test_a_core_update_that_reaches_a_removal_asks`,

@@ -13,8 +13,9 @@ AI budget:
   your subscription: the agent's runs may take `usage.max_share_percent`
   (default 5) of your plan's weekly hours (`claude.plan`) per rolling 7
   days, and a fifth of that per 5 hours. Runs stop at 80 % of it, chat and
-  investigations at half, and a run's time limit is trimmed to what is
-  left. It still yields when your account is above 90 % of a window, and
+  investigations at half of that (so health checks and update reviews
+  always keep the other half), and a run's time limit is trimmed to what
+  is left. It still yields when your account is above 90 % of a window, and
   the daily run caps, turn and cost caps per run, the kill switch and the
   usage-limit backoff are unchanged. Refusals keep their codes
   (`share_cap:<window>` now means the run-time cap).
@@ -36,41 +37,56 @@ AI budget:
   5 hours: …", "Account, 7 days: X %" when measured, and "Cost today" when
   a daily cap is set.
 - `GET api/usage` is removed (nothing used it).
-- Account utilisation is read by its JSON type: a whole number is a
-  percent, a decimal up to 1.0 is a fraction of the window (0.09 is 9 %),
-  a larger decimal is a percent, and anything over 100 % counts as 100 %.
-  0.19.1 read every reading as a percent, so a fractional reading such as
-  0.95 (95 %) was taken for 0.95 % and the agent could miss that your
-  account was near its limit and fail to yield. This fixes it.
+- Account utilisation is read in the unit of each reading: any decimal
+  value in it means fractions of the window (0.09 is 9 %), otherwise any
+  value over 1 means percents; a reading of only 0s and 1s uses the unit
+  learned from the last clear one (percent, with a warning, until one is
+  seen). Over the limit counts as 100 %. 0.19.1 read every reading as a
+  percent, so a fractional reading such as 0.95 (95 %) was taken for
+  0.95 % and the agent could miss that your account was near its limit and
+  fail to yield. This fixes it.
 - The "claude run finished" log line carries each window's utilisation
-  exactly as reported, with its JSON type, so its unit can be confirmed.
+  exactly as reported, with its JSON type, and the unit it was read in.
 
 Needs you only when needed:
 
 - Deprecations ask 30 days before their deadline (the month the removal
   release ships), not two releases ahead. Until then the finding and its
   one-tap fix (a config change or a dashboard plan) wait in Coming up,
-  ready to apply. Findings without a deadline never ask.
+  ready to apply: a fix stays open until a week after its finding starts
+  asking (90 days for a finding without a deadline), and maintenance fixes
+  have their own limit of 5 open, so they never block other proposals.
+  Findings without a deadline never ask. Hiding a finding only quiets it:
+  a hidden removal still holds back a Core update that would break it, and
+  the finding comes back 30 days before its deadline (Hide is not offered
+  while a finding asks).
 - An update whose release age is unknown waits (checked again every night)
   instead of asking; it asks after 30 days, or at once when a repair or a
   breaking change touches it.
 - The agent's triage run pushes only when you must act or decide: its push
-  needs a reason (`needs_action`, `physical_task` or `security`), and
-  anything for information becomes a note in History. The daemon's own
+  needs a reason (`needs_action`, `physical_task` or `security`); for
+  information it writes a note in History (`--reason note`), and a push
+  without a valid reason is refused. Its own reminders and follow-ups
+  follow the same rule (pushed only with a push class, never with a Reply
+  button; otherwise a note in History). The daemon's own
   critical pushes (locks, the alarm, access hardware, Core down, backup
   failures and the rest) are unchanged.
-- No longer in Needs you: an update install that failed once and changed
-  nothing (it is retried the next night; a second failure asks), an
-  approved update Home Assistant no longer offers, a failed config change
-  (the daemon undid it), a change that cannot be shown in full (it
-  expires by itself), a fact noted without a proposal, info health items,
+- No longer in Needs you: an update install that failed before or during
+  the install call and that the next night retries by itself (an
+  automatic update still offered, not approved by you, with automatic
+  updates running, and the entity's first failure in 14 days; anything
+  else asks at once), an approved update Home Assistant no longer offers,
+  a config change that failed and was cleanly undone (one that may be
+  half applied asks you at once, urgently), a change that cannot be shown
+  in full (it expires by itself), a fact noted without a proposal, info health items,
   and a dashboard change that was refused or restored. Items an earlier
   version put in Needs you are recomposed at start.
 
 Every item is actionable:
 
 - Every item has "Ask the agent": the chat opens with the item attached
-  and "What should I do about …?" filled in, and the agent reads the item's
+  and a question naming the item by its id, with its title quoted as the
+  device's own text, and the agent reads the item's
   record (fenced as data) with your message.
 - Maintenance findings and suggestions have "Plan a fix" (an
   investigation in the chat that writes a plan and proposes the fix where
@@ -80,7 +96,11 @@ Every item is actionable:
 
 For overlays and integrators: the overlay API is unchanged. Internal
 changes that code outside this repository could notice:
-`opsctl notify` takes `--reason`; `RunResult.plan_hint`,
+`opsctl notify` needs `--reason` (a push class or `note`), and so does
+`opsctl remind` for the agent's own tasks; `Capability` gains `quota_free`;
+`budget.utilisation` takes the payload's unit (`budget.reading_unit`);
+`build_proposal` takes `expires_at`; a failed update job records
+`target.failed_from`; `RunResult.plan_hint`,
 `claude_runner.plan_hint`, `budget.run_share`, `budget.share_inconclusive`,
 `Caps.estimated_share`, `Caps.share_stop` and `Store.run_shares` are
 removed; `Store.finish_run` no longer takes `share_5h`, `share_7d` or

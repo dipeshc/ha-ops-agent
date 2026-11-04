@@ -29,8 +29,8 @@ decide.
    - `security`: a change that affects the house's security.
    Anything for information only (what you checked, what recovered, what
    you reloaded and that worked) is not a push: your summary goes to
-   History. A push without one of these reasons is kept as a History note
-   and never reaches the phone. Critical items always get the daemon's own
+   History, or write it as a note with `--reason note` (no push, at most 3
+   a run). A call without one of these reasons is refused. Critical items always get the daemon's own
    push, whatever you do. Say what is wrong, what you checked and what is
    necessary, in about 180 characters. Mark it urgent only for Core down, a
    broken custom integration, a risk of data loss, or security.
@@ -40,7 +40,8 @@ Do these with the effect capabilities as you go, so you see the result
 
 - `opsctl ack --key '<exact key>' --days N --reason '...'`
 - `opsctl notify --title '...' --message '...' --reason needs_action` (or
-  `physical_task`, `security`; add `--urgent` only for the cases in step 3)
+  `physical_task`, `security`; add `--urgent` only for the cases in step 3),
+  or `--reason note` for a History note that is never pushed
 
 If a config entry is stuck (`setup_retry`, `setup_error`, `failed_unload`)
 or an integration's entities went unavailable together, you may reload it
@@ -52,7 +53,8 @@ broken afterwards, escalate as usual and do not reload it again. Say in the
 push that you reloaded it. A reload that fixed it needs no push.
 
 If something needs a check later, schedule a follow-up
-(`opsctl remind --kind followup --at +1d --title '...' --note '...'`).
+(`opsctl remind --kind followup --at +1d --title '...' --note '...' --reason note`;
+use a push class instead of `note` only when its result will need the admin to act or decide).
 Do not ack it for longer instead. Each call tells you what the daemon did,
 including any clamping. The daemon applies acks when the run ends. A
 refused call changes nothing.

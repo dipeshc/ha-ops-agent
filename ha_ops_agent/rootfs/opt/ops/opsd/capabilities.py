@@ -123,6 +123,8 @@ class Capability:
     refund_refused: bool = False
     # Needs git proposals or a house overlay on this install (see the module docstring).
     requires: frozenset[str] = frozenset()
+    # `(arg, value)`: a call with that argument value takes no quota unit (its executor bounds it itself).
+    quota_free: tuple[str, str] | None = None
 
     @property
     def read_only(self) -> bool:
@@ -306,6 +308,13 @@ REGISTRY: tuple[Capability, ...] = (
             "title": Arg(str, None, pattern=TEXT_RE, help="what to remind about (shown on the push)"),
             "note": Arg(str, None, pattern=MULTILINE_RE, unescape_newlines=True, help="context for a follow-up"),
             "reply": Arg(bool, False, help="let the admin reply to the reminder push"),
+            "reason": Arg(
+                str,
+                "",
+                pattern=REASON_RE,
+                help="the agent's own tasks: needs_action, physical_task or security to push when due,"
+                " note to keep it as a History note",
+            ),
         },
         effects=frozenset({Effect.SCHEDULE}),
         quota=Quota(per_run=5, per_day=30),
@@ -352,13 +361,15 @@ REGISTRY: tuple[Capability, ...] = (
                 str,
                 "",
                 pattern=REASON_RE,
-                help="needs_action, physical_task or security; anything else is a History note, not a push",
+                help="needs_action, physical_task or security for a push; note for a History note only",
             ),
         },
         effects=frozenset({Effect.NOTIFY}),
         origins=frozenset({Origin.AGENT_SELF}),
         quota=Quota(per_run=1, per_day=9),
         validator="opsd.effects:validate_notify",
+        # A History note is no push: it never uses the push quota (the executor allows a few per run).
+        quota_free=("reason", "note"),
     ),
     Capability(
         "update.plan",

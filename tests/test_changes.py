@@ -544,6 +544,67 @@ async def test_a_failed_reload_restores_reloads_again_and_escalates(w: World) ->
     assert w.sent[-1].urgent and "rolled back" in w.sent[-1].title
 
 
+async def test_a_change_that_may_be_half_applied_asks_and_a_clean_failure_does_not(w: World) -> None:
+    from opsd.live import Hub
+    from tests.test_items import book_for
+
+    book, _ = book_for(w.store, Hub(), w.now)
+    # Clean: the config check failed and everything was put back. History only.
+    w.check_result = (False, "Invalid config for automation: extra keys")
+    clean = w.propose({FRIDGE: NEW_FRIDGE})
+    assert (await w.run(clean["id"])).state == "failed"
+    item = w.store.item_by_key(f"change:{clean['id']}")
+    assert item is not None and item["state"] == "failed" and not item["needs"]
+    # The reload fails twice: the restored config was not reloaded either, so the house may run a half-applied one.
+    w.check_result = (True, "")
+    w.reload_fails = 2
+    half = w.propose({FRIDGE: NEW_FRIDGE})
+    outcome = await w.run(half["id"])
+    assert outcome.state == "failed" and ch.RELOAD_FAILED in outcome.detail
+    item = w.store.item_by_key(f"change:{half['id']}")
+    assert item is not None and item["needs"] and item["need"]["kind"] == "ack" and item["source"]["urgent"]
+    assert "half applied" in item["gist"] and book.outbox  # pushed
+    assert book.ack(item, now=w.now)
+    assert not w.store.item_by_key(f"change:{half['id']}")["needs"]  # type: ignore[index]
+
+
+async def test_an_error_that_stops_the_pipeline_never_leaves_a_change_applying(
+    w: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from opsd.live import Hub
+    from tests.test_items import book_for
+
+    book_for(w.store, Hub(), w.now)
+    found = w.propose({FRIDGE: NEW_FRIDGE})
+
+    def broken(*_: object, **__: object) -> str:
+        raise ch.GitError("index.lock exists")
+
+    monkeypatch.setattr(type(w.repo), "commit_files", broken)
+    monkeypatch.setattr(ch.ChangeManager, "_restore", lambda *_: (_ for _ in ()).throw(OSError("disk gone")))
+    outcome = await w.run(found["id"])
+    assert outcome.state == "failed"
+    row = w.store.change(found["id"])
+    assert row is not None and row["state"] == "failed"
+    item = w.store.item_by_key(f"change:{found['id']}")
+    assert item is not None and item["needs"] and "half applied" in item["gist"]
+
+
+def test_a_maintenance_fix_keeps_its_later_expiry_and_its_own_open_cap(w: World) -> None:
+    later = w.now + timedelta(days=60)
+    fix = w.propose({FRIDGE: NEW_FRIDGE}, expires_at=later)
+    assert str(fix["expires_at"]).startswith(later.isoformat()[:16])
+    # Never earlier than the usual week, whatever the caller says.
+    short = w.propose({ALERT: NEW_ALERT}, expires_at=w.now)
+    assert str(short["expires_at"]).startswith((w.now + ch.PROPOSAL_TTL).isoformat()[:16])
+    for n in range(ch.MAX_OPEN):
+        w.store.create_change(kind="change", subject=f"fix(maintenance): migrate {n}", why="w", effect="e",
+                              state="open", requested_by=f"{ch.MAINTENANCE_PROPOSER}{n:016x}", now=w.now,
+                              expires_at=later)  # fmt: skip
+    # Five maintenance fixes waiting never block a proposal from the chat.
+    assert w.propose({TEMPLATE: FILES[TEMPLATE].replace("{{ 1 }}", "{{ 4 }}")})["state"] == "open"
+
+
 async def test_observe_mode_applies_nothing_not_even_the_house_facts(w: World) -> None:
     w.mode = "observe"
     w.build()

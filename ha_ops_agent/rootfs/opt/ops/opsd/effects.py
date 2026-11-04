@@ -6,7 +6,8 @@ These are the first socket verbs that change anything, so each one:
   handed to this run, at most 30 days, critical items snoozed for at most 3
   days and never accepted; `urgent` only when a hand-off item is critical;
   a push only with a reason class from `PUSH_REASONS` (the admin must act
-  or decide), anything else becomes a History note;
+  or decide), a quiet History note with `note` (no push quota), and any
+  other or no reason refused;
 - has per-run and per-day quotas in the registry (one push, one log
   entry per run), on top of the Notifier's daily push buckets;
 - records what it did in the run's `RunEffects`, which the health handler
@@ -22,9 +23,12 @@ from opsd.policy import Origin
 from opsd.runctx import Ack, ExecContext, RunContext
 
 MAX_NOTIFY_CHARS = 900
-# Why the agent's push needs the admin: the only classes that reach the phone. Anything else (an update for
-# information, no reason at all) is kept as a History note instead (`exec_notify`).
+# Why the agent's push needs the admin: the only classes that reach the phone. `note` keeps the text as a quiet
+# History note instead; any other reason, or none, is refused (`validate_notify`).
 PUSH_REASONS = frozenset({"needs_action", "physical_task", "security"})
+NOTE = "note"
+# History notes a run may write (they take no push quota).
+MAX_NOTES_PER_RUN = 3
 MAX_OPSLOG_CHARS = 4000
 
 
@@ -72,10 +76,14 @@ def validate_notify(ctx: ExecContext, args: Args) -> Args:
         ctx.notes.append("urgent downgraded: no critical item in this run")
         urgent = False
     reason = args.opt_text("reason") or ""
-    if reason not in PUSH_REASONS:
-        ctx.notes.append(f"not pushed: the reason must be one of {', '.join(sorted(PUSH_REASONS))}; kept as a "
-                         "History note")  # fmt: skip
-        reason = ""
+    if reason not in PUSH_REASONS and reason != NOTE:
+        # Refused before any quota is taken: the run may try again with a valid class.
+        raise CapabilityError(f"--reason is required: {', '.join(sorted(PUSH_REASONS))} (a push: the admin must act"
+                              f" or decide), or {NOTE} (a History note, no push)")  # fmt: skip
+    if reason == NOTE:
+        if run.counts.get("notify.note", 0) >= MAX_NOTES_PER_RUN:
+            raise CapabilityError(f"at most {MAX_NOTES_PER_RUN} History notes per run")
+        urgent = False
     return args.replace(
         message=message, urgent=urgent, reason=reason,
         title=(args.opt_text("title") or "Ops Agent").strip() or "Ops Agent",
@@ -89,11 +97,12 @@ async def exec_notify(ctx: ExecContext, args: Args) -> str:
         raise CapabilityError("notifications are not available")
     redactor = ctx.env.redactor()
     title, body = redactor.redact(args.text("title")), redactor.redact(args.text("message"))
-    if not args.opt_text("reason"):
+    if args.opt_text("reason") == NOTE:
         # For information only: the admin need not act, so it goes to History, never to the phone.
+        run.counts["notify.note"] = run.counts.get("notify.note", 0) + 1
         await sink.note_message(title, body)
         run.effects.notify_outcomes.append("noted")
-        return "ok: kept as a History note, not pushed (no push reason: needs_action, physical_task or security)"
+        return "ok: kept as a History note, not pushed"
     message = agent_message(title, body, urgent=args.flag("urgent"), budget_class=run.budget_class)
     # A push from the agent's own run (triage) offers no Reply: what it says is the model's, not the admin's
     # conversation, so it cannot invite an answer into the chat.

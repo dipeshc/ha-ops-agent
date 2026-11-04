@@ -461,7 +461,8 @@ addEventListener("popstate", route);
 wide.addEventListener("change", () => { slots.wide = null; els.thread = null; render(); });
 /* "Ask the agent" on an item: the chat opens with the item attached (its record goes to the run, fenced) and a first question. */
 function askAbout(t) {
-  if (S.main) { S.drafts[S.main] = `What should I do about "${t.title}"?`; S.askItem = { id: t.id, title: t.title }; saveDrafts(); }
+  // The title is the device's or integration's own text: quoted as such, the item named by its id.
+  if (S.main) { S.drafts[S.main] = `What should I do about item ${t.id}? Its title (the device's own text): "${t.title}"`; S.askItem = { id: t.id, title: t.title }; saveDrafts(); }
   go("#chat");
 }
 

@@ -52,24 +52,30 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
   a week (low-end estimates); `auto` is `pro` (the provider reports no
   tier in its output). Tests `test_usage.py:56-61`.
 - B5. User-class runs (chat, investigate, summary) stop at half of each
-  window's budget (refusal `share_reserve:<window>`, and their reserved
-  time is trimmed to that line), so agent-class runs (triage, followup,
-  update review, maintenance plan) keep a reserve. Test
-  `test_full_chat.py:489-515`.
+  window's stop line (40 % of the budget; refusal `share_reserve:<window>`,
+  and their reserved time is trimmed to that line), so agent-class runs
+  (triage, followup, update review, maintenance plan) always keep at least
+  the other half of the stop line. Tests `test_full_chat.py:489-515`,
+  `test_chat_at_its_cap_leaves_triage_half_the_stop_line_on_the_default_plan`.
 
 ## Measurement
 
 - B6. A run is charged its run time: its `duration_s` when it finished,
   its reservation while it runs. The account utilisation that B3's
   `account_busy` compares is the last reading of the provider's rate-limit
-  events, read by its JSON type (`budget.percent_reading`): an integer is
-  a percent (0..100); a float of at most 1.0 is a fraction of the window
-  (x 100); a larger float is a percent; a boolean, a string, NaN,
-  infinity or a negative value is no reading; anything over 100 % counts
-  as 100 %. The "claude run finished" log line carries each window's
-  reading exactly as reported with its JSON type (`{"value", "type"}`), so
-  the unit can be confirmed against the account's own figures. Tests
-  `test_utilisation_parsing`, `test_utilisation_is_read_by_its_json_type`,
+  events, in the unit of its payload (`budget.reading_unit`, judged over
+  every window of it, because Claude Code is Node and writes 1.0 as `1`):
+  any non-integer value makes the whole payload fractions of the window;
+  otherwise any value over 1 makes it percents; a payload whose values are
+  all 0 or 1 is ambiguous and is read in the unit learned from the last
+  unambiguous one (kv `usage.unit`), or as percents with a warning when
+  none was learned. A boolean, a string, NaN, infinity or a negative value
+  is no reading; over the limit counts as a full window (100 %). The
+  "claude run finished" log line carries each window's reading exactly as
+  reported with its JSON type (`{"value", "type"}`) and the payload's unit
+  (`fraction`, `percent` or `ambiguous`). Tests
+  `test_utilisation_parsing`, `test_the_utilisation_unit_is_judged_over_the_whole_payload`,
+  `test_an_ambiguous_reading_uses_the_unit_learned_last`, `test_stream_rate_limit_events`,
   `test_a_run_is_charged_its_run_time_whatever_the_utilisation_says`.
 - B7. **Reservation.** One transaction inserts the `runs` row with reserved
   turns and seconds before the provider starts; `finish_run` replaces them

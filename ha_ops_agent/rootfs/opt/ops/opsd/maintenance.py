@@ -69,7 +69,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from opsd import dashboards, selfguard
-from opsd.changes import ChangeRefused, build_proposal
+from opsd.changes import MAINTENANCE_PROPOSER, PROPOSAL_TTL, ChangeRefused, build_proposal
 from opsd.config import Options
 from opsd.conversation import clean_text, fence
 from opsd.evidence import Change, EvidenceSource, FetchError, published_minors
@@ -98,7 +98,9 @@ DASHBOARD_KEY = "maintenance:dashboard:"
 RESULT_KEY = "maintenance:result:"
 MIGRATED_KEY = "maintenance:migrated:"
 HIDDEN_KEY = "maintenance:hidden:"
-PROPOSER = "maintenance:"
+PROPOSER = MAINTENANCE_PROPOSER
+# How long a fix for a finding without a deadline stays ready to apply.
+FIX_READY = timedelta(days=90)
 VARIANTS = {"deprecation": "Deprecation ahead", "replacement": "Replacement candidate", "suggestion": "Suggestion"}
 # Entity platforms (a Core integration's `<platform>.py`), for feature parity.
 PLATFORMS = frozenset({
@@ -563,6 +565,13 @@ def parse_plans(structured: Any, allowed: set[str]) -> dict[str, dict[str, Any]]
     return found
 
 
+def fix_expiry(finding: Finding, now: datetime) -> datetime:
+    """A finding's one-tap fix stays ready until its finding asks the admin, and the usual week after that; a fix
+    for a finding without a deadline (it never asks) is ready for `FIX_READY`."""
+    start = finding.asks_at()
+    return max(now, start) + PROPOSAL_TTL if start is not None else now + FIX_READY
+
+
 def propose_yaml(store: Store, repo: Repo, options: Options, *, finding: Finding, why: str, edits: list[Edit],
                  day: str, now: datetime, entities: frozenset[str] | None) -> dict[str, Any]:  # fmt: skip
     """Record a finding's YAML migration as an ordinary proposal (blocking: call in a thread). ChangeRefused when
@@ -580,6 +589,7 @@ def propose_yaml(store: Store, repo: Repo, options: Options, *, finding: Finding
         effect=f"Migrates {domain} before {finding.removal or 'it is removed'}; nothing else changes.",
         requested_by=f"{PROPOSER}{finding.key}", day=day, now=now, entities=entities,
         fix_domains=frozenset({finding.domain}) if finding.domain else frozenset(),
+        expires_at=fix_expiry(finding, now),
     )  # fmt: skip
 
 
@@ -635,9 +645,9 @@ class MaintenanceManager:
 
     def removals(self) -> list[Finding]:
         """Unresolved deprecations with a removal version from a repair or the release notes (the update rule's
-        input); a log line never holds an update back."""
-        return [f for f in self.findings() if f.variant == "deprecation" and f.removal and f.signal in AUTHORITATIVE
-                and not hidden(self.store, f)]  # fmt: skip
+        input); a log line never holds an update back. Hidden ones count too: hiding only quiets the item."""
+        return [f for f in self.findings() if f.variant == "deprecation" and f.removal
+                and f.signal in AUTHORITATIVE]  # fmt: skip
 
     async def scan(self, trigger: str) -> dict[str, Any]:
         """Read the signals, keep the findings, plan the new ones. Never raises: a failure keeps the old findings."""

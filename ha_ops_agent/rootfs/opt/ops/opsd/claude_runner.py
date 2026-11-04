@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from opsd.budget import reading_unit
 from opsd.config import CredentialKind
 from opsd.redact import Redactor
 
@@ -84,7 +85,7 @@ class RunResult:
 
 def raw_utilisation(info: dict[str, Any] | None) -> dict[str, Any]:
     """Each window's `utilization` exactly as Claude Code reported it, with its JSON type, for the run's log line
-    (so the unit the budget reads it in, `budget.percent_reading`, can be confirmed live). Numbers only."""
+    (so the unit the budget reads it in, `budget.reading_unit`, can be confirmed live). Numbers only."""
     if not isinstance(info, dict):
         return {}
     found: dict[str, Any] = {}
@@ -541,6 +542,8 @@ async def run_claude(
             "turns": result.turns,
             "exit": proc.returncode,
             "utilization": raw_utilisation(result.rate_last),
+            # How the budget reads this payload (`budget.reading_unit`); ambiguous: the unit learned earlier.
+            "utilization_unit": reading_unit(result.rate_last) or "ambiguous",
         },
     )
     return result

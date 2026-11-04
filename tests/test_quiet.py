@@ -126,9 +126,22 @@ async def test_reminders_the_admin_set_ring_but_agent_ones_wait(h: Harness) -> N
     mine, _ = d.store.create_task(kind="reminder", title="take the bins out", owner="admin", created_by="chat:x",
                                   next_fire_at=now, payload={}, idempotency_key="r1", now=now)  # fmt: skip
     agents, _ = d.store.create_task(kind="reminder", title="check batteries", owner="agent", created_by="triage:x",
-                                    next_fire_at=now, payload={}, idempotency_key="r2", now=now)  # fmt: skip
+                                    next_fire_at=now, payload={"reason": "physical_task"}, idempotency_key="r2",
+                                    now=now)  # fmt: skip
     assert await d.assistant.deliver_reminder(mine, now) == "sent"
     assert await d.assistant.deliver_reminder(agents, now) == "held"
+    # The agent's own reminder for information never reaches the phone, quiet hours or not.
+    info, _ = d.store.create_task(
+        kind="reminder",
+        title="battery report",
+        owner="agent",
+        created_by="triage:x",
+        next_fire_at=now,
+        payload={"reason": "note"},
+        idempotency_key="r3",
+        now=now,
+    )
+    assert await d.assistant.deliver_reminder(info, now) == "noted"
 
 
 async def test_held_pushes_survive_a_restart_and_go_out_one_each(h: Harness) -> None:

@@ -769,8 +769,41 @@ async def test_a_failed_install_asks_only_when_it_failed_twice(rig: Rig) -> None
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
     item = rig.item(CORE, core)
-    assert item["state"] == "failed" and item["need"]["kind"] == "ack" and "2 times" in item["gist"]
+    assert item["state"] == "failed" and item["need"]["kind"] == "ack" and "2 failed installs" in item["gist"]
     assert [m for m in await rig.flush() if m.tag == item["id"]]
+
+
+@pytest.mark.parametrize("case", ["paused", "approved", "not_offered", "verifying", "other_version"])
+async def test_a_failed_install_asks_at_once_when_nothing_retries_it(rig: Rig, case: str) -> None:
+    only_auto(rig, CORE)
+    core = rig.ops.entities[CORE]["attributes"]["latest_version"]
+    if case == "other_version":
+        # The entity failed before at another version: two failures of one entity in 14 days ask.
+        run = rig.store.start_update_run(window_day="2026-01-27", trigger="window", mode="act", plan=[], now=rig.now)
+        assert run is not None
+        [old] = rig.store.add_update_jobs(run, [{"entity_id": CORE, "kind": "core", "title": "Core",
+                                                 "from_version": "2026.10.1", "to_version": "2026.10.2",
+                                                 "target": {}}], now=rig.now)  # fmt: skip
+        assert rig.store.transition_job(old.id, expect=("pending",), to="failed", now=rig.now, detail="x")
+        rig.store.set_update_run(run, now=rig.now, state="done", summary="")
+    rig.ops.fail.add(CORE)
+    await rig.manager.run_window()
+    [job] = [j for j in rig.store.recent_update_jobs(since=rig.now - timedelta(days=1)) if j.to_version == core]
+    match case:
+        case "paused":
+            rig.manager.set_paused(True, by="panel:u-admin")
+        case "approved":
+            job.target["approval"] = "a" * 32
+            rig.store.set_job_target(job.id, job.target)
+        case "not_offered":
+            rig.ops._apply(CORE, core)  # installed meanwhile by hand: the plan no longer lists it
+            await rig.manager.run_window("refresh")
+        case "verifying":
+            job.target["failed_from"] = "verifying"
+            rig.store.set_job_target(job.id, job.target)
+    rig.book.recompose()
+    item = rig.item(CORE, core)
+    assert item["state"] == "failed" and item["need"]["kind"] == "ack", case
 
 
 async def test_unreadable_health_fails_closed(rig: Rig) -> None:

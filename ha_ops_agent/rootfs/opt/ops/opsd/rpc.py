@@ -315,6 +315,10 @@ class RpcServer:
             tighten=tighten,
         )
 
+    @staticmethod
+    def _quota_free(cap: Capability, args: Args) -> bool:
+        return cap.quota_free is not None and args.values.get(cap.quota_free[0]) == cap.quota_free[1]
+
     def _reserve_quota(self, cap: Capability, run: RunContext | None, day: str) -> str | None:
         """Take one unit of the per-run and per-day quotas before executing, or refuse.
 
@@ -395,8 +399,9 @@ class RpcServer:
         store = self._env.store
         if store is None and not cap.read_only:
             return {"ok": False, "error": "audit log unavailable; request refused"}
+        free = self._quota_free(cap, args)
         try:
-            quota = self._reserve_quota(cap, run, day)
+            quota = None if free else self._reserve_quota(cap, run, day)
         except (StoreError, sqlite3.Error, OSError) as err:
             self._refund(cap, run)
             _LOGGER.error("quota check failed; refusing request", extra={"error": str(err)[:200]})
@@ -418,11 +423,12 @@ class RpcServer:
                     notify_admin=verdict.notify_admin,
                 )
             except (StoreError, sqlite3.Error, OSError) as err:
-                self._refund(cap, run)
+                if not free:
+                    self._refund(cap, run)
                 _LOGGER.error("audit write failed; refusing request", extra={"error": str(err)[:200]})
                 return {"ok": False, "error": "audit log unavailable; request refused"}
         response, outcome = await self._execute(cap, ctx, args)
-        if not response.get("ok"):
+        if not response.get("ok") and not free:
             self._refund(cap, run)
             if outcome == "refused" and cap.refund_refused and cap.quota.per_day and store is not None:
                 try:

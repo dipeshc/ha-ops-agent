@@ -543,9 +543,9 @@ async def test_review_1_a_silent_night_does_not_swallow_a_later_needs_you_push(o
     await rig.manager.run_window("approved")
     acme_weather = rig.item(WEATHER, "v2.4.1")
     later = (await rig.flush())[before:]
-    # A first failure that changed nothing is not a question of its own: the update asks for approval again.
-    assert acme_weather["state"] == "waiting" and acme_weather["need"]["kind"] == "approval"
-    assert "not installed last time" in acme_weather["gist"] and [x.tag for x in later] == [acme_weather["id"]]
+    # An approved install that failed always asks: nothing retries it by itself.
+    assert acme_weather["state"] == "failed" and acme_weather["need"]["kind"] == "ack"
+    assert [x.tag for x in later] == [acme_weather["id"]]
 
 
 async def test_review_2_an_approved_update_skipped_by_the_precheck_tells_the_admin(os_rig: Rig) -> None:

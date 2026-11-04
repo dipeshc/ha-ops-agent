@@ -469,16 +469,21 @@ async def test_task_ownership_and_agent_reminder_rules(h: Harness) -> None:
         await exec_cancel(ctx, Args({"id": admin_task.id}))
     create = ExecContext(env=env, capability=CAPABILITIES["task.create"], run=run)
     with pytest.raises(CapabilityError, match="14 days"):
-        validate_create(create, Args({"kind": "reminder", "at": "+20d", "title": "x", "note": None, "reply": True}))
+        validate_create(create, Args({"kind": "reminder", "at": "+20d", "title": "x", "note": None, "reply": True,
+                                      "reason": "note"}))  # fmt: skip
+    # The agent's own task needs a reason class, like its push.
+    with pytest.raises(CapabilityError, match="--reason is required"):
+        validate_create(create, Args({"kind": "reminder", "at": "+1d", "title": "x", "note": None, "reply": False}))
     checked = validate_create(create, Args({"kind": "reminder", "at": "+1d", "title": "x", "note": None,
-                                            "reply": True}))  # fmt: skip
-    assert checked.flag("reply") is False
+                                            "reply": True, "reason": "physical_task"}))  # fmt: skip
+    assert checked.flag("reply") is False and checked.text("reason") == "physical_task"
     for i in range(10):
         d.store.create_task(kind="reminder", title=f"a{i}", owner="agent", created_by="t",
                             next_fire_at=datetime.now(UTC) + timedelta(hours=1), payload={},
                             idempotency_key=f"own{i}", now=datetime.now(UTC))  # fmt: skip
     with pytest.raises(CapabilityError, match="too many open agent tasks"):
-        validate_create(create, Args({"kind": "reminder", "at": "+1d", "title": "x", "note": None, "reply": False}))
+        validate_create(create, Args({"kind": "reminder", "at": "+1d", "title": "x", "note": None, "reply": False,
+                                      "reason": "note"}))  # fmt: skip
     # The admin can still add reminders: separate caps.
     h.in_run_responses.clear()
     h.in_run_requests = [{"verb": "remind", "args": {"at": "+2d", "title": "admin two"}}]
@@ -486,7 +491,7 @@ async def test_task_ownership_and_agent_reminder_rules(h: Harness) -> None:
     assert h.in_run_responses[0]["ok"]
     # Delivery: agent-owned reminders are labelled and never invite a reply.
     agent_task = next(t for t in d.store.open_tasks() if t.owner == "agent")
-    agent_task = dataclasses.replace(agent_task, payload={"reply": True})
+    agent_task = dataclasses.replace(agent_task, payload={"reply": True, "reason": "physical_task"})
     await d.assistant.deliver_reminder(agent_task, datetime.now(UTC))
     push = h.pushes()[-1]
     assert push["title"].startswith("Agent: Agent-scheduled:") and "REPLY" not in actions_of(push)
@@ -507,3 +512,26 @@ async def test_done_closes_a_snoozed_reminder(h: Harness) -> None:
     await d._on_user_action(Event("user.action", "companion", Priority.USER, {"action": "DONE", "tag": tag}, CHAT))
     closed = d.store.get_task(task.id)
     assert closed is not None and closed.state == "done" and closed.next_fire_at is None
+
+
+async def test_the_agents_own_follow_up_pushes_only_with_a_reason_and_never_offers_a_reply(h: Harness) -> None:
+    d = daemon(h)
+    assert d.store is not None and d.assistant is not None
+    now = datetime.now(UTC)
+    h.claude_reply = {"reply": "The acme_zha hub is back; nothing to do.", "summary": "fine"}
+    for key, reason in (("fu1", "note"), ("fu2", "needs_action")):
+        task, _ = d.store.create_task(kind="followup", title=f"check the hub ({reason})", owner="agent",
+                                      created_by="triage:r", next_fire_at=now,
+                                      payload={"note": "n", "origin": "agent-self", "reason": reason},
+                                      idempotency_key=key, now=now)  # fmt: skip
+        before = len(h.pushes())
+        await d.assistant.run_followup(task)
+        pushed = h.pushes()[before:]
+        if reason == "note":
+            assert pushed == []
+            [note] = [i for i in d.store.items_all() if i.get("kicker") == "Note from the agent"]
+            assert not note["needs"] and note["agent"]["text"].startswith("Follow-up: check the hub (note)")
+        else:
+            [push] = pushed
+            assert push["title"].startswith("Agent: Follow-up:") and "REPLY" not in actions_of(push)
+    assert d.store.needs_count() == 0

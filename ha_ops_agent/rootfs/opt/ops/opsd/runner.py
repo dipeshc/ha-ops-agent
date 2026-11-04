@@ -26,7 +26,7 @@ from pathlib import Path
 from opsd import claude_runner, privsep
 from opsd.aicontrol import AiControl
 from opsd.baseline import Item
-from opsd.budget import RUNS_PER_DAY, WINDOWS, Caps, Period, Reservation, utilisation
+from opsd.budget import PERCENT, RUNS_PER_DAY, UNIT_KEY, WINDOWS, Caps, Period, Reservation, reading_unit, utilisation
 from opsd.capabilities import CAPABILITIES, capability_table
 from opsd.changepaths import GLOBS, ProposalRules
 from opsd.channels import BudgetClass
@@ -666,19 +666,36 @@ class AgentRunner:
             return
         aborted = result.status != "ok" and result.tokens_in + result.tokens_out == 0
         try:
+            unit = self._unit(result)
             self.store.finish_run(
                 context.run_id, status=result.status, at=datetime.now(UTC), turns=result.turns,
                 tokens_in=result.tokens_in, tokens_out=result.tokens_out, tokens_cache_read=result.tokens_cache_read,
                 duration_s=result.duration_s, model=model,
                 charge_reservation=aborted and result.status not in NOT_STARTED,
-                acct_5h=utilisation(result.rate_last, "five_hour"),
-                acct_7d=utilisation(result.rate_last, "seven_day"),
+                acct_5h=utilisation(result.rate_last, "five_hour", unit),
+                acct_7d=utilisation(result.rate_last, "seven_day", unit),
             )  # fmt: skip
             if result.cost_usd > 0:
                 # The day the run started: its reservation was checked against that day's cost cap.
                 self.store.add_cost(self._period(context.started_at).day, result.cost_usd)
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.error("run accounting failed; the reservation stands", extra={"error": str(err)[:200]})
+
+    def _unit(self, result: RunResult) -> str:
+        """The unit of the run's last utilisation reading: its own when it shows one (and remembered), else the
+        last one learned, else percent with a warning (`budget.reading_unit`)."""
+        if self.store is None or result.rate_last is None:
+            return PERCENT
+        unit = reading_unit(result.rate_last)
+        if unit is not None:
+            if self.store.kv_get(UNIT_KEY) != unit:
+                self.store.kv_set(UNIT_KEY, unit, now=datetime.now(UTC))
+            return unit
+        learned = self.store.kv_get(UNIT_KEY)
+        if learned:
+            return learned
+        _LOGGER.warning("utilisation unit unknown (every reading 0 or 1); read as percent until one shows it")
+        return PERCENT
 
     def _record_guard(self, profile: Profile, result: RunResult, now: datetime) -> None:
         """The latest guard-hook anomaly, for the health check's item."""

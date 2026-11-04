@@ -212,6 +212,12 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   redirects, 3 MiB, 20 seconds; results cached 12 hours in the store; a
   failed or unrecognised answer is never cached and marks the evidence
   unavailable; GitHub 403/429 backs off 30 minutes. Parsers fail closed.
-  Tests `tests/test_evidence.py`, `test_the_hardened_fetch_refuses_any_other_host`.
+  The same fetch, narrowed to one host per request, also reads Home
+  Assistant Core's own source for `opsctl core-compare`
+  (`api.github.com` and `raw.githubusercontent.com` only,
+  [capabilities.md](capabilities.md) K14); a caller can only narrow the
+  hosts, never add one. Tests `tests/test_evidence.py`,
+  `test_the_hardened_fetch_refuses_any_other_host`,
+  `test_the_fetch_allows_only_the_two_hosts_and_never_another_on_redirect`.
 - H20. `opsd/configcheck.py` is the fail-closed allowlist over proposed YAML
   (see [proposals.md](proposals.md)); it is not part of the health check.

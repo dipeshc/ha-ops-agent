@@ -17,15 +17,21 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 | Profile | Prompt | Schema | Capabilities | Class | Turns | Cost cap (USD) | Drafts |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `triage` | `profiles/triage.md` | `triage-result` | reads + `task.create`, `task.list`, `baseline.ack`, `notify.admin`, `suppress.propose`, `integration.reload` | AGENT | `limits.run_max_turns` (30) | `limits.run_max_usd` (1.5) | no |
-| `chat` | `profiles/chat.md` | `reply-result` | reads + `task.create/list/cancel`, `task.investigate`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 15 | min(0.5, run_max_usd) | yes |
+| `chat` | `profiles/chat.md` | `reply-result` | reads + `ha.core_compare`, `task.create/list/cancel`, `task.investigate`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 15 | min(0.5, run_max_usd) | yes |
 | `followup` | `profiles/followup.md` | `reply-result` | reads + `task.create/list/cancel`, `approval.request` | AGENT | 15 | min(0.5, run_max_usd) | no |
-| `investigate` | `profiles/investigate.md` | `investigate-result` | reads + `task.list`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 25 | min(1.0, run_max_usd) | yes |
+| `investigate` | `profiles/investigate.md` | `investigate-result` | reads + `ha.core_compare`, `task.list`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 25 | min(1.0, run_max_usd) | yes |
 | `summary` | `profiles/summary.md` | `reply-result` | none | USER | 5 | min(0.2, run_max_usd) | no |
 | `update_review` | `profiles/update_review.md` | `update-review` | none | AGENT | 6 | min(0.5, run_max_usd) | no |
-| `maintenance_plan` | `profiles/maintenance_plan.md` | `maintenance-plan` | none | AGENT | 8 | min(0.5, run_max_usd) | no |
+| `maintenance_plan` | `profiles/maintenance_plan.md` | `maintenance-plan` | `ha.core_compare` | AGENT | 8 | min(0.5, run_max_usd) | no |
 
 - R1. "Reads" are the capabilities whose only effect is READ
-  ([capabilities.md](capabilities.md)). A profile's capability list is the
+  ([capabilities.md](capabilities.md)), except `ha.core_compare`, the one
+  read that makes the daemon fetch from the internet (Home Assistant
+  Core's source on GitHub, [capabilities.md](capabilities.md) K14): only
+  `chat`, `investigate` and `maintenance_plan` name it, never `triage`.
+  The prompts tell the model to use it whenever a custom integration
+  shadows or forks a Core one, and to report what it shows as facts,
+  citing the diff (the Core version, the file and the lines). A profile's capability list is the
   run's grant; the daemon refuses any other verb. `summary` uses
   `claude.model_fast` when set, every other profile `claude.model_standard`.
   Test `test_profiles_reference_enabled_capabilities`.

@@ -236,6 +236,21 @@ REGISTRY: tuple[Capability, ...] = (
         validator="opsd.history:validate_history",
     ),
     Capability("ha.system", "system", "Core/Supervisor/OS/host versions and resource use", "opsd.queries:cmd_system"),
+    # The one read that reaches the internet: the daemon fetches Home Assistant Core's own files for the installed
+    # Core version from GitHub (opsd.coresource). Not in triage's grant (opsd.runner NETWORK_READS).
+    Capability(
+        "ha.core_compare",
+        "core-compare",
+        "compare a custom integration with Home Assistant Core's integration of the same domain at the installed"
+        " Core version: a summary and a unified diff per file (fetched by the daemon from GitHub)",
+        "opsd.coresource:cmd_core_compare",
+        {
+            "domain": Arg(str, None, pattern=SLUG_RE, positional=True, help="custom integration domain, e.g. acme"),
+        },
+        quota=Quota(per_run=3, per_day=12),
+        validator="opsd.coresource:validate_compare",
+        refund_refused=True,
+    ),
     # No arguments. It reads only the vacuums' registry options and
     # their cached segments (websocket reads; no service call), see opsd.house.vacuums.
     Capability(

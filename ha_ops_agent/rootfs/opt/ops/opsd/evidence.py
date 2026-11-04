@@ -32,6 +32,7 @@ import html
 import json
 import logging
 import re
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -47,6 +48,8 @@ from opsd.store import Store, StoreError
 _LOGGER = logging.getLogger(__name__)
 
 ALLOWED_HOSTS = frozenset({"www.home-assistant.io", "api.github.com"})
+# Home Assistant Core's own source, for `opsd.coresource` only: the contents API and the raw file host.
+CORE_SOURCE_HOSTS = frozenset({"api.github.com", "raw.githubusercontent.com"})
 MAX_BYTES = 3 * 1024 * 1024
 FETCH_TIMEOUT_S = 20.0
 CACHE_PREFIX = "evidence:"
@@ -271,31 +274,53 @@ def parse_changelog(notes: str, *, title: str, domain: str | None, source: str) 
 
 
 class _SameHosts(urllib.request.HTTPRedirectHandler):
+    def __init__(self, hosts: frozenset[str]) -> None:
+        super().__init__()
+        self._hosts = hosts
+
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:  # noqa: PLR0917
-        _check_url(newurl)
+        _check_url(newurl, self._hosts)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _check_url(url: str) -> None:
+def _check_url(url: str, hosts: frozenset[str] = ALLOWED_HOSTS) -> None:
     parts = urllib.parse.urlsplit(url)
-    if parts.scheme != "https" or parts.hostname not in ALLOWED_HOSTS:
+    if parts.scheme != "https" or parts.hostname not in hosts:
         raise FetchError(f"not an allowed source: {parts.hostname}")
 
 
-def fetch_text(url: str, *, timeout: float = FETCH_TIMEOUT_S) -> str:
-    """GET over HTTPS from an allowed host (redirects too), at most `MAX_BYTES`."""
-    _check_url(url)
-    opener = urllib.request.build_opener(_SameHosts())
-    accept = "application/vnd.github+json" if "api.github.com" in url else "text/html"
+def check_hosts(hosts: frozenset[str]) -> None:
+    """A caller can only narrow the hosts: `ALLOWED_HOSTS`, plus Core's source hosts."""
+    if not hosts or not hosts <= ALLOWED_HOSTS | CORE_SOURCE_HOSTS:
+        raise FetchError("not an allowed source list")
+
+
+def fetch_text(
+    url: str,
+    *,
+    timeout: float = FETCH_TIMEOUT_S,
+    hosts: frozenset[str] = ALLOWED_HOSTS,
+    max_bytes: int = MAX_BYTES,
+    raw: bool = False,
+) -> str:
+    """GET over HTTPS (TLS verified) from an allowed host, at most `max_bytes`. A redirect is followed only to a
+    host in `hosts` too. `hosts` can only narrow `ALLOWED_HOSTS` plus `CORE_SOURCE_HOSTS`; `raw` asks GitHub for a
+    file's plain contents."""
+    check_hosts(hosts)
+    _check_url(url, hosts)
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()), _SameHosts(hosts)
+    )
+    accept = "text/plain" if raw else "application/vnd.github+json" if "api.github.com" in url else "text/html"
     request = urllib.request.Request(url, headers={"User-Agent": "ha-ops-agent", "Accept": accept})
     try:
         with opener.open(request, timeout=timeout) as resp:
-            data = bytes(resp.read(MAX_BYTES + 1))
+            data = bytes(resp.read(max_bytes + 1))
     except urllib.error.HTTPError as err:
         raise FetchError(f"{urllib.parse.urlsplit(url).hostname}: HTTP {err.code}", status=err.code) from err
     except (urllib.error.URLError, OSError, ValueError) as err:
         raise FetchError(f"{urllib.parse.urlsplit(url).hostname}: {str(err)[:120]}") from err
-    if len(data) > MAX_BYTES:
+    if len(data) > max_bytes:
         raise FetchError("answer larger than the limit")
     return data.decode("utf-8", errors="replace")
 

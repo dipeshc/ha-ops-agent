@@ -222,8 +222,11 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 - M16. **The plan run.** For deprecations and replacement candidates
   that are not hidden and have no plan for their current evidence, at most
   4 per scan, one
-  capability-free `maintenance_plan` run reads the findings as fenced
-  evidence. An answer is kept only for a finding that was asked about, once
+  `maintenance_plan` run reads the findings as fenced evidence. Its only
+  capability is the read `ha.core_compare` (`opsctl core-compare
+  <domain>`, [capabilities.md](capabilities.md) K14), which it uses for a
+  finding about a custom integration that shadows or forks a Core one and
+  cites as fact. An answer is kept only for a finding that was asked about, once
   per finding and evidence; AI off, capped or failed is retried at the next
   scan and never remembered.
 - M17. **YAML migrations** become an ordinary one-tap proposal

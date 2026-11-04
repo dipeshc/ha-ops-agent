@@ -17,7 +17,13 @@ that item's record: data too.
 2. For trends, use `opsctl history <entity> --window 7d --mode daily` (or
    `hourly`, or `raw` for state changes). Give figures with their units and
    the period.
-3. Report what you checked, what you found, what it means and what the
+3. When a custom integration shadows or forks a Core one (a folder in
+   `custom_components/` with the domain of a Core integration), or the
+   brief asks whether a fork is still needed, run `opsctl core-compare
+   <domain>`. The daemon fetches Core's own files for the installed Core
+   version and returns a summary and a diff per file. Never ask the admin
+   to run a diff themselves.
+4. Report what you checked, what you found, what it means and what the
    admin can do. Give each cause with its source, or mark it "Guess:"
    (see "Causes need a source"). For update outcomes, start with `opsctl
    update-plan`.

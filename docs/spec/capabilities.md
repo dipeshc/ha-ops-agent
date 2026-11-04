@@ -20,10 +20,10 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   set and the RPC schema are generated from it. Tests
   `test_every_reference_resolves`, `test_guard_parser_and_schema_are_generated`,
   `test_registry_rejects_bad_rows`, `test_disabled_capability_is_not_offered_anywhere`.
-- K2. Verbs on the socket (0.20.0): `status`, `baseline`, `health
+- K2. Verbs on the socket (0.21.0): `status`, `baseline`, `health
   [--diff]`, `repairs`, `entities`, `integrations`, `entries`, `updates`,
   `backups`, `logs <core|supervisor|host|addon>`, `history <entity>`,
-  `system`, `update-plan`, `git-status`, `git-log`, `git-diff`, `git-show`
+  `system`, `core-compare <domain>` (3/12, refund on refusal), `update-plan`, `git-status`, `git-log`, `git-diff`, `git-show`
   (git), `vacuum-rooms` (overlay), `remind` (`task.create`, 5/30), `tasks`,
   `cancel` (10/30), `ack` (`baseline.ack`, agent-self only, 100/400),
   `notify` (`notify.admin`, agent-self only, 1/9), `investigate`
@@ -38,8 +38,12 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   `test_only_the_export_and_the_drafts_are_allowed` and the registry tests.
 
 - K4. "Read" capabilities (effects exactly `{READ}`): `health.snapshot`,
-  `ha.entities`, `ha.entries`, `ha.logs`, `ha.history`, `update.plan`,
-  `vacuum.rooms`, `git.status/log/diff/show`.
+  `ha.entities`, `ha.entries`, `ha.logs`, `ha.history`, `ha.core_compare`,
+  `update.plan`, `vacuum.rooms`, `git.status/log/diff/show`.
+  `ha.core_compare` is the one read that makes the daemon reach the
+  internet (`NETWORK_READS` in `opsd/runner.py`): it is not among the
+  "reads" a run profile gets as a group, and only `chat`, `investigate`
+  and `maintenance_plan` name it ([ai-runner.md](ai-runner.md)).
 
 ## Policy
 
@@ -125,3 +129,51 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   `[A-Za-z0-9_.@-]+`, never containing `..` and never only dots; it is
   percent-encoded as one segment of `/host/logs/identifiers/<id>`.
   Test `test_logs_literal_grep_and_redaction`.
+- K14. **`ha.core_compare`** (verb `core-compare <domain>`, executor
+  `opsd.coresource:cmd_core_compare`, validator
+  `opsd.coresource:validate_compare`) compares a custom integration with
+  Home Assistant Core's integration of the same domain, read-only, with no
+  approval. Effects `{READ}`, quota 3 per run and 12 per day, a validator
+  refusal gives the daily unit back.
+  - **Input.** Only the domain, `[a-z0-9_]{1,64}`, naming a directory
+    `custom_components/<domain>` that is a real directory (not a symbolic
+    link) with a regular `manifest.json`; refused before any quota or
+    network use otherwise, and outside a run. The Core version is the live
+    installed one (Supervisor `/core/info`), never model input, and must
+    be a release tag (`YYYY.M.P`, or a beta `YYYY.M.PbN`); a dev build is
+    refused.
+  - **Fetch** (the daemon only; the AI's sandbox has no network): the file
+    list from `https://api.github.com/repos/home-assistant/core/contents/homeassistant/components/<domain>?ref=<version>`,
+    unauthenticated, and each file from
+    `https://raw.githubusercontent.com/home-assistant/core/<version>/homeassistant/components/<domain>/<file>`,
+    through `evidence.fetch_text` narrowed to that one host (HTTPS, TLS
+    verified, a redirect to any other host refused). These two hosts are
+    `evidence.CORE_SOURCE_HOSTS`; `raw.githubusercontent.com` is not in
+    the general `ALLOWED_HOSTS`. A file name matches `[A-Za-z0-9_.-]{1,64}`
+    and never contains `..`; a listing keeps at most 40 files, a file is
+    at most 256 KiB (larger ones are listed as left out), and each fetched
+    file must match the git blob SHA the listing gives for it or it is not
+    compared. Only files the custom integration also has are fetched.
+    GitHub's 403/429 stops every GitHub call for 30 minutes (the backoff
+    `opsd.evidence` shares). One call stays within 90 seconds, 10 per
+    request.
+  - **Cache** under `/data/core-source/` (directories 0700, files 0600,
+    root-only): listings by tag and domain, files by blob SHA (checked
+    again when read). Listings of tags outside the installed tag and the
+    18 monthly releases before it, and files unused for 30 days or beyond
+    800, are pruned.
+  - **Local read.** Top-level regular files of
+    `custom_components/<domain>/`, read as root, never through a symbolic
+    link, at most 40 and 256 KiB each, UTF-8 only; subdirectories,
+    `.pyc`, hidden and backup files are listed as not compared.
+  - **Answer.** A header with the Core version and the GitHub tree URL; a
+    summary (files compared, changed and identical; files only in the
+    custom integration; files only in Core; changed lines per file as
+    `+added -removed`; subdirectories; what was left out and why); then a
+    unified diff per changed file (`core/<version>/<file>` against
+    `custom/<file>`), fenced in `<core-compare-diff>` as untrusted data
+    (angle brackets replaced) and cut at 32 KiB with a marker saying how
+    much was not shown (so the whole answer stays inside the socket's
+    40 000-character cap). When Core has no such integration the answer
+    says it is a pure custom integration. The answer is redacted.
+  Tests `tests/test_coresource.py`.

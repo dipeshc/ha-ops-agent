@@ -200,6 +200,7 @@ SOURCE_NAMES: dict[str, str] = {
     "ha.logs": "logs",
     "ha.history": "history",
     "ha.system": "system info",
+    "ha.core_compare": "Core comparison",
     "git.status": "git status",
     "git.log": "config history",
     "git.diff": "config history",
@@ -215,6 +216,8 @@ _SOURCE_ARG = re.compile(r"[a-z0-9_.]{1,80}")
 def _source_label(capability: str, args: dict[str, Any]) -> str:
     name = SOURCE_NAMES[capability]
     detail = args.get("entity") if capability in ("ha.entities", "ha.history") else None
+    if capability == "ha.core_compare":
+        detail = args.get("domain")
     if capability == "ha.logs":
         detail = args.get("slug") or args.get("source")
     if isinstance(detail, str) and _SOURCE_ARG.fullmatch(detail):
@@ -291,6 +294,7 @@ STEP_LABELS: dict[str, str] = {
     "ha.updates": "Checking updates",
     "ha.backups": "Checking backups",
     "ha.history": "Reading the history",
+    "ha.core_compare": "Comparing with Home Assistant Core",
     "git.log": "Looking at config history",
     "git.show": "Looking at config history",
     "git.diff": "Looking at config history",

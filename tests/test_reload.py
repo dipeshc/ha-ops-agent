@@ -339,6 +339,16 @@ async def test_never_while_a_vacuum_is_busy(api: FakeReloadAPI, paths: Paths, st
     assert api.posts == []
 
 
+async def test_an_integration_that_cannot_unload_is_never_reloaded(api: FakeReloadAPI, paths: Paths) -> None:
+    # Core leaves such an entry failed_unload, its entities unavailable, until it restarts.
+    for entry in api.entries:
+        if entry["domain"] == "acme_vacuum":
+            entry["supports_unload"] = False
+    with pytest.raises(CapabilityError, match="cannot be unloaded"):
+        await reload(api, paths, "acme_vacuum")
+    assert api.posts == []
+
+
 @pytest.mark.parametrize(
     "content", ["{not json", '["a"]', '{"acme_vacuum": "yesterday"}', '{"acme_vacuum": "2026-01-29T11:55:00"}']
 )

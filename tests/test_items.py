@@ -5,6 +5,7 @@ approval" to "installed, reboot pending", the approved reboot and "verified", an
 that Home, the badge, History, the live `item` event and the push agree.
 """
 
+import json
 import sqlite3
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -13,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from opsd import verdicts
 from opsd.activity import ActivityLog
 from opsd.items import Context, ItemBook, item_id
 from opsd.live import Hub
@@ -70,9 +72,17 @@ async def test_entering_needs_pushes_once_and_coming_back_pushes_again(rig: Rig)
     assert push.tag == item["id"] and push.title == item["title"] and push.url.endswith(f"/t/{item['id']}")
     # Words from the record only; the release-note review (model text) never reaches a push.
     assert push.body == "Needs you: needs your approval. Open it to approve for tonight."
-    # Nothing new: no second push the same day; a day later it is re-surfaced once, same tag.
+    # Nothing new: no second push the same day, nor a day later (only an urgent item is re-surfaced).
     assert await rig.flush() == [push]
     rig.now += timedelta(days=1, minutes=1)
+    assert [m.tag for m in await rig.flush()] == [item["id"]]
+    # Leaving Needs you withdraws its push; coming back is a new need and pushes again.
+    run = rig.store.recent_update_runs(limit=1)[0]
+    plan = {i["entity_id"]: i for i in run["plan"]}
+    rig.approvals.reject_update(plan[WEATHER], plan_run=int(run["id"]), user="u-admin")
+    await rig.flush()
+    assert rig.cleared == [item["id"]]
+    rig.now += timedelta(days=7, minutes=2)
     assert [m.tag for m in await rig.flush()] == [item["id"], item["id"]]
 
 
@@ -520,7 +530,9 @@ def test_review_5_one_bad_item_does_not_stop_the_others(tmp_path: Path, monkeypa
     store.close()
 
 
-async def test_review_6_a_rollback_pushes_time_sensitive(tmp_path: Path) -> None:
+async def test_a_rollback_is_a_fact_on_the_held_versions_approval(tmp_path: Path) -> None:
+    """The daemon put health back by itself: no acknowledgement. The held version's approval is the one question,
+    and the rollback is a fact on it (0.22 asked an urgent OK first, then the approval)."""
     from tests.test_updates import CARD
 
     rig = Rig(tmp_path)
@@ -528,9 +540,13 @@ async def test_review_6_a_rollback_pushes_time_sensitive(tmp_path: Path) -> None
     rig.ops.bad.add((CARD, "v1.16.13"))
     await rig.manager.run_window()
     assert rig.jobs()[CARD].state == "rolled_back"
+    await rig.manager.refresh()
     item = rig.item(CARD, "v1.16.13")
-    [push] = [m for m in await rig.flush() if m.tag == item["id"]]
-    assert push.urgent and push.budget_class == "safety"
+    assert item["state"] == "waiting" and item["need"]["kind"] == "approval"
+    assert any(f["label"] == "Rolled back" and "made health worse" in f["value"] for f in item["facts"])
+    pushes = [m for m in await rig.flush() if m.tag == item["id"]]
+    # It gates tonight's window: pushed on its own, once, not as a safety push.
+    assert len(pushes) == 1 and not pushes[0].urgent and "approve" in pushes[0].body
     rig.store.close()
 
 
@@ -587,25 +603,27 @@ async def test_a_push_counts_only_once_it_was_delivered(tmp_path: Path) -> None:
 
     first = book()
     first.tick()
+    # Not time-sensitive: it goes out as the daily digest (one item: its own push).
     # A restart before it went out: the next start decides it again (nothing was recorded).
-    assert first.outbox and store.item(entry["item"])["push"] == {}  # type: ignore[index]
+    assert first.digest and store.item(entry["item"])["push"] == {}  # type: ignore[index]
     second = book()
     second.tick()
-    assert len(second.outbox) == 1
+    decided = second.digest
+    assert decided is not None and len(decided[0]) == 1
     second.tick()
-    assert len(second.outbox) == 1  # in flight: never decided twice
+    assert second.digest == decided  # in flight: never decided twice
     await second.deliver()
-    push = store.item(entry["item"])["push"]  # type: ignore[index]
-    assert "failed_at" in push and "at" not in push and len(sent) == 1
+    assert store.item(entry["item"])["push"] == {} and len(sent) == 1  # type: ignore[index]
     now["t"] += timedelta(minutes=5)
     second.tick()
-    assert second.outbox == []  # failed a moment ago: retried later, not every minute
+    assert second.digest is None  # failed a moment ago: retried later, not every minute
     now["t"] += timedelta(minutes=15)
     second.tick()
     await second.deliver()
     assert len(sent) == 2 and store.item(entry["item"])["push"]["at"]  # type: ignore[index]
+    assert sent[-1].tag == entry["item"]
     second.tick()
-    assert second.outbox == []
+    assert second.digest is None and second.outbox == []
     store.close()
 
 
@@ -766,7 +784,7 @@ async def test_a_standalone_entry_is_pushed_when_it_is_written(tmp_path: Path) -
     store = Store.open(tmp_path / "ops.db")
     book, sent = book_for(store, Hub(), START)
     ActivityLog(store, Hub(), clock=lambda: START).record("backup", "Backup failed", "no space", needs_admin=True)
-    assert len(book.outbox) == 1  # decided at the write, not at the next minute
+    assert book.digest is not None  # decided at the write (the daily digest), not at the next minute
     await book.deliver()
     assert [m.title for m in sent] == ["Ops Agent: backup"]
     store.close()
@@ -850,4 +868,242 @@ def test_a_need_an_earlier_version_composed_is_recomposed_at_start(tmp_path: Pat
     assert store.needs_count() == 1
     book.recompose()
     assert store.needs_count() == 0 and store.item_by_key(f"fact:{fact}")["state"] == "done"  # type: ignore[index]
+    store.close()
+
+
+# ------------------------------------------------------------ the push policy and one item per cause (0.23.0)
+
+
+def waiting(store: Store, key: str, title: str, **source: Any) -> dict[str, Any]:
+    """An item in Needs you, as a source would write it (`source` says what makes it time-sensitive)."""
+    stamp = START.isoformat()
+    record = {"id": item_id(key), "key": key, "kind": "check", "title": title, "state": "waiting", "gist": "needs you",
+              "kicker": "", "ref": "", "revision": 1,
+              "need": {"kind": "ack", "text": "t", "primary": {"id": "ack", "label": "OK"}, "secondary": [],
+                       "expires_at": None},
+              "as_of": stamp, "at": stamp, "needs_since": stamp, "created_at": stamp, "updated_at": stamp,
+              "source": {"pushes": True, **source}, "push": {}}  # fmt: skip
+    store.put_item(record)
+    found = store.item(record["id"])
+    assert found is not None
+    return found
+
+
+async def test_needs_you_pushes_only_urgent_or_daily_digest(tmp_path: Path) -> None:
+    store = Store.open(tmp_path / "ops.db")
+    now = {"t": START}
+    sent: list[Any] = []
+
+    async def send(message: Any) -> str:
+        sent.append(message)
+        return "sent"
+
+    book = ItemBook(store, Hub(), tz=lambda: UTC, context=Context, send=send, clock=lambda: now["t"])
+    urgent = waiting(store, "x:urgent", "Rollback failed", urgent=True)
+    approval = waiting(store, "x:approval", "Core 2030.3.1", push_now=True)
+    soon = waiting(store, "x:soon", "Removed in 5 days", deadline=(START + timedelta(days=5)).isoformat())
+    far = waiting(store, "x:far", "Removed in 30 days", deadline=(START + timedelta(days=30)).isoformat())
+    plain = waiting(store, "x:plain", "A failed backup")
+    book.tick()
+    await book.deliver()
+    # Time-sensitive ones on their own; the rest in one digest.
+    tags = [m.tag for m in sent]
+    assert tags[:3] == [urgent["id"], approval["id"], soon["id"]] and tags[3] == "ha-ops-digest" and len(sent) == 4
+    assert sent[3].title == "Ops Agent: 2 things need you" and far["title"] in sent[3].body
+    assert plain["title"] in sent[3].body and not sent[3].urgent
+    # A new need later that day waits for the next day's digest (one digest a day).
+    later = waiting(store, "x:later", "Another failed backup")
+    now["t"] += timedelta(hours=3)
+    book.tick()
+    await book.deliver()
+    assert len(sent) == 4
+    # The next day: only the urgent item is pushed again; the new need goes out as that day's digest (alone: its
+    # own push). Nothing else resurfaces.
+    now["t"] += timedelta(days=1)
+    book.tick()
+    await book.deliver()
+    assert sorted(m.tag for m in sent[4:]) == sorted([urgent["id"], later["id"]])
+    store.close()
+
+
+async def test_a_resolved_item_clears_its_push(tmp_path: Path) -> None:
+    store = Store.open(tmp_path / "ops.db")
+    sent: list[Any] = []
+    cleared: list[str] = []
+
+    async def send(message: Any) -> str:
+        sent.append(message)
+        return "sent"
+
+    async def clear(tag: str) -> str:
+        cleared.append(tag)
+        return "sent"
+
+    raw = [
+        {"key": "entry:abc", "kind": "config_entry", "severity": "warning", "summary": "acme_hub failed"},
+        {"key": "entry:def", "kind": "config_entry", "severity": "warning", "summary": "acme_tv failed"},
+    ]
+    ctx = {"health_at": START.isoformat(), "health_items": raw}
+    book = ItemBook(store, Hub(), tz=lambda: UTC, context=lambda: Context(**ctx), send=send, clear=clear,
+                    clock=lambda: START)  # fmt: skip
+    # Triage says both need the admin (its verdicts are kept in one write): the item book pushes them (one digest).
+    with store.atomic():
+        for entry in raw:
+            verdicts.record(store, f"health:{entry['key']}", verdict="needs_owner", reason="the hub is unplugged",
+                            fingerprint=verdicts.health_fingerprint(entry["key"], entry["summary"]), by="triage",
+                            now=START)  # fmt: skip
+    book.write_health()
+    await book.deliver()
+    [digest] = sent
+    assert digest.tag == "ha-ops-digest"
+    # One recovers: the digest stays while the other waits; both gone, the digest is withdrawn.
+    ctx["health_items"] = raw[1:]
+    book.write_health()
+    await book.deliver()
+    assert cleared == []
+    ctx["health_items"] = []
+    book.write_health()
+    await book.deliver()
+    assert cleared == ["ha-ops-digest"]
+    # An item pushed on its own is withdrawn by its own tag (the item id).
+    record = waiting(store, "x:urgent", "Rollback failed", urgent=True)
+    book.tick()
+    await book.deliver()
+    assert sent[-1].tag == record["id"]
+    resolved = store.item(record["id"])
+    assert resolved is not None
+    store.put_item(resolved | {"state": "done", "need": None, "needs_since": None, "resolved_at": START.isoformat()})
+    await book.deliver()
+    assert cleared[-1] == record["id"]
+    store.close()
+
+
+def test_a_deprecation_repair_is_one_item(tmp_path: Path) -> None:
+    """A deprecation repair is the maintenance finding's item; the health check's `repair:` item follows it and asks
+    nothing (0.22 asked on both)."""
+    from opsd import maintenance
+    from opsd.maintenance import Finding
+
+    store = Store.open(tmp_path / "ops.db")
+    raw = [{"key": "repair:acme_hub:deprecated_yaml", "kind": "repair", "severity": "warning",
+            "summary": "new repair acme_hub:deprecated_yaml"}]  # fmt: skip
+    book, _ = book_for(store, Hub(), START, health_at=START.isoformat(), health_items=raw)
+    book.write_health()
+    health = store.item_by_key("health:repair:acme_hub:deprecated_yaml")
+    assert health is not None and health["needs"]
+    finding = Finding(key="0123456789abcdef", variant="deprecation", signal="repair", what="deprecated",
+                      domain="acme_hub", removal="2030.9", sources=["repair acme_hub:deprecated_yaml"])  # fmt: skip
+    with store.atomic():
+        store.kv_set(maintenance.FINDINGS_KEY, json.dumps([finding.to_json()]), now=START)
+        store.kv_set(maintenance.META_KEY, json.dumps({"at": START.isoformat(), "installed": "2030.1.0"}), now=START)
+    health = store.item_by_key("health:repair:acme_hub:deprecated_yaml")
+    assert health is not None and not health["needs"] and health["follows"] == f"maint:{finding.key}"
+    assert health["gist"] == "tracked on its maintenance item"
+    assert store.needs_count() == 0  # the finding itself is not due yet: nothing asks
+    store.close()
+
+
+def test_a_new_log_error_is_not_cleared_while_it_continues(tmp_path: Path) -> None:
+    """A new log fingerprint is reported once; its item then leaves without claiming the error stopped."""
+    store = Store.open(tmp_path / "ops.db")
+    raw = [{"key": "log:0123456789ab", "kind": "log", "severity": "warning", "summary": "new ERROR from acme_hub"}]
+    ctx: dict[str, Any] = {"health_at": START.isoformat(), "health_items": raw}
+    book = ItemBook(store, Hub(), tz=lambda: UTC, context=lambda: Context(**ctx), clock=lambda: START)
+    book.write_health()
+    ctx["health_items"] = []
+    book.write_health()
+    item = store.item_by_key("health:log:0123456789ab")
+    assert item is not None and item["state"] == "done" and "cleared" not in item["gist"]
+    assert item["gist"].startswith("not new any more")
+    store.close()
+
+
+def test_a_later_good_backup_resolves_a_failed_one(tmp_path: Path) -> None:
+    store = Store.open(tmp_path / "ops.db")
+    raw = [{"key": "backup:run_failed", "kind": "backup", "severity": "warning",
+            "summary": "the last backup the agent started failed: no space"}]  # fmt: skip
+    book, _ = book_for(store, Hub(), START, health_at=START.isoformat(), health_items=raw)
+    log = ActivityLog(store, Hub(), clock=lambda: START)
+    failed = log.record("backup", "Backup (self-heal): failed", "no space", needs_admin=True)
+    assert failed is not None
+    book.write_health()
+    # One item per cause: the health item follows the backup's own item while that one asks.
+    health = store.item_by_key("health:backup:run_failed")
+    assert health is not None and not health["needs"] and health["follows"] == f"activity:{failed['id']}"
+    assert store.needs_count() == 1
+    log.record("backup", "Backup (self-heal): done", "encrypted, complete")
+    item = store.item(failed["item"])
+    assert item is not None and not item["needs"] and item["gist"].endswith("resolved: a later backup succeeded")
+    assert store.needs_count() == 0
+    store.close()
+
+
+def test_a_triage_verdict_anchors_the_reason_on_its_item(tmp_path: Path) -> None:
+    store = Store.open(tmp_path / "ops.db")
+    raw = [{"key": "entry:abc", "kind": "config_entry", "severity": "warning", "summary": "acme_hub failed"},
+           {"key": "log:0123456789ab", "kind": "log", "severity": "warning", "summary": "new ERROR from acme_tv"},
+           {"key": "access:lock.side_entrance", "kind": "access", "severity": "critical",
+            "summary": "lock.side_entrance is unavailable"}]  # fmt: skip
+    book, _ = book_for(store, Hub(), START, health_at=START.isoformat(), health_items=raw)
+    said = {
+        "entry:abc": ("needs_owner", "the hub lost power; it needs a power cycle"),
+        "log:0123456789ab": ("not_affected", "a known harmless timeout of acme_tv"),
+        "access:lock.side_entrance": ("not_affected", "it is fine"),
+    }
+    with store.atomic():
+        for entry in raw:
+            verdict, reason = said[entry["key"]]
+            verdicts.record(store, f"health:{entry['key']}", verdict=verdict, reason=reason, by="triage", now=START,
+                            fingerprint=verdicts.health_fingerprint(entry["key"], entry["summary"]))  # fmt: skip
+    book.write_health()
+    owner = store.item_by_key("health:entry:abc")
+    assert owner is not None and owner["needs"] and "power cycle" in owner["agent"]["text"]
+    assert "power cycle" not in owner["need"]["text"] and owner["source"]["pushes"]
+    quiet = store.item_by_key("health:log:0123456789ab")
+    assert quiet is not None and not quiet["needs"] and quiet["gist"].startswith("checked by the agent")
+    # Never for access hardware (or anything critical): it keeps asking.
+    lock = store.item_by_key("health:access:lock.side_entrance")
+    assert lock is not None and lock["needs"] and lock["source"]["urgent"]
+    # A changed summary is a new question: the old verdict is not read.
+    raw[0]["summary"] = "acme_hub failed again"
+    book.write_health()
+    again = store.item_by_key("health:entry:abc")
+    assert again is not None and again["agent"] is None
+    store.close()
+
+
+async def test_a_rate_limited_need_waits_for_the_next_budget_not_every_cycle(tmp_path: Path) -> None:
+    """A warning triage says needs the admin is not time-sensitive: it goes out as the day's digest (alone, as its
+    own push). When the daily push budget refuses it, that is recorded once and it is sent when the budget renews,
+    not re-attempted every 15 minutes."""
+    store = Store.open(tmp_path / "ops.db")
+    now = {"t": START}
+    outcomes = ["rate_limited", "sent"]
+    sent: list[Any] = []
+
+    async def send(message: Any) -> str:
+        sent.append(message)
+        return outcomes.pop(0)
+
+    raw = [{"key": "entry:abc", "kind": "config_entry", "severity": "warning", "summary": "cast is failed_unload"}]
+    book = ItemBook(store, Hub(), tz=lambda: UTC, send=send, clock=lambda: now["t"],
+                    context=lambda: Context(health_at=START.isoformat(), health_items=raw))  # fmt: skip
+    verdicts.record(store, "health:entry:abc", verdict="needs_owner", reason="it needs a restart of the speaker",
+                    fingerprint=verdicts.health_fingerprint("entry:abc", raw[0]["summary"]), by="triage",
+                    now=START)  # fmt: skip
+    book.write_health()
+    item = store.item_by_key("health:entry:abc")
+    assert item is not None and item["needs"] and not book.timely(item, START)
+    assert book.outbox == [] and book.digest is not None  # the digest, not a direct push
+    await book.deliver()
+    assert len(sent) == 1 and sent[0].tag == item["id"]
+    for _ in range(8):
+        now["t"] += timedelta(minutes=15)
+        book.tick()
+        await book.deliver()
+    assert len(sent) == 1
+    now["t"] = datetime.combine(START.date() + timedelta(days=1), datetime.min.time(), UTC) + timedelta(minutes=1)
+    book.tick()
+    await book.deliver()
+    assert len(sent) == 2 and store.item(item["id"])["push"]["at"]  # type: ignore[index]
     store.close()

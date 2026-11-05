@@ -300,7 +300,12 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   opening Home. Each item it covers is recorded as pushed for its need; a
   new need later that day waits for the next day's digest. It is
   delivered like any push (quiet hours hold it, the normal budget counts
-  it once).
+  it once). A push or digest the daily budget refuses (`rate_limited`) is
+  recorded once and tried again when the budget renews (the next UTC day),
+  never every cycle; any other failed delivery is retried after 15 minutes.
+  A triage `needs_owner` warning is not time-sensitive: it goes out in the
+  digest. Test
+  `test_a_rate_limited_need_waits_for_the_next_budget_not_every_cycle`.
 - N1b. **Withdrawn when resolved.** When an item whose push was delivered
   leaves Needs you, the daemon withdraws it: a Companion
   `clear_notification` with `tag` the item id (the tag its push carried),

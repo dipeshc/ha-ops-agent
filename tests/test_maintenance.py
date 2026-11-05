@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from opsd import evidence, inventory, maintenance, privsep
+from opsd import evidence, inventory, maintenance, privsep, verdicts
 from opsd.claude_runner import RunResult
 from opsd.evidence import CORE_COMPONENT, RELEASE_INDEX, REPO_API, EvidenceCache, EvidenceSource, parse_post
 from opsd.items import Context, ItemBook
@@ -104,6 +104,7 @@ class Rig:
         self.logs: list[dict[str, Any]] = list(LOGS)
         self.inventory = inv()
         self.offline = offline
+        self.posts = dict(POSTS)
         self.fetched: list[str] = []
         self.prompts: list[str] = []
         self.answer: dict[str, Any] | None = None
@@ -120,8 +121,14 @@ class Rig:
             self.sent.append(message)
             return "sent"
 
+        self.cleared: list[str] = []
+
+        async def clear(tag: str) -> str:
+            self.cleared.append(tag)
+            return "sent"
+
         self.book = ItemBook(self.store, Hub(), tz=lambda: BERLIN, context=lambda: Context(acting=self.acting),
-                             send=send, clock=lambda: self.now)  # fmt: skip
+                             send=send, clear=clear, clock=lambda: self.now)  # fmt: skip
 
     def fetch(self, url: str) -> str:
         self.fetched.append(url)
@@ -129,8 +136,8 @@ class Rig:
             raise evidence.FetchError("offline")
         if url == RELEASE_INDEX:
             return INDEX
-        if url in POSTS:
-            return POSTS[url]
+        if url in self.posts:
+            return self.posts[url]
         return github(url)
 
     async def gather(self) -> Gathered:
@@ -184,9 +191,10 @@ def test_yaml_features_name_integration_keys_and_platforms() -> None:
     text = "sensor:\n  - platform: acme_meter  # the meter\n    name: x\nacme_hub:\n  host: y\ntemplate: []\n"
     assert inventory.yaml_features("configuration.yaml", text) == ["acme_hub", "platform:acme_meter"]
     # Elsewhere only platforms count: an automation's keys are not integrations.
-    assert inventory.yaml_features("automations/a.yaml", "acme_hub:\n- platform: acme_meter\n") == [
-        "platform:acme_meter"
-    ]
+    assert inventory.yaml_features("templates/a.yaml", "acme_hub:\n- platform: acme_meter\n") == ["platform:acme_meter"]
+    # In an automation, script or blueprint `platform:` names a trigger (`event`, `state`), not an integration.
+    for path in ("automations/a.yaml", "automations.yaml", "scripts.yaml", "blueprints/automation/x.yaml"):
+        assert inventory.yaml_features(path, "- platform: event\n  event_type: x\n- platform: state\n") == []
 
 
 def test_the_inventory_reads_only_the_files_the_export_may_hold(paths: Any, tmp_path: Path) -> None:
@@ -331,8 +339,10 @@ async def test_only_deprecations_within_30_days_of_their_deadline_need_the_admin
     assert near["source"]["recheck_at"] == ASKS_AT.isoformat()
     assert near["title"] in {r["title"] for r in rig.book.home()["coming"]}
     await rig.deliver()
-    # The release-notes findings for 2030.3 are inside their 30 days already; the 2030.4 one is not.
-    assert all("2030.3" in m.title for m in rig.sent) and rig.sent
+    # The release-notes removals for 2030.3 are inside their 30 days already; the 2030.4 one is not. Neither is
+    # within 7 days, so both go out as the one daily digest.
+    [digest] = rig.sent
+    assert digest.tag == "ha-ops-digest" and digest.body.count("removed in 2030.3") == 2
     rig.now = ASKS_AT
     rig.book.tick()
     items = rig.items()
@@ -1112,3 +1122,365 @@ async def test_an_old_fork_reason_is_cleared_when_a_changed_fork_cannot_be_judge
     await rig.scan()
     assert len(by_signal(rig, "replacement")) == 1
     assert not rig.store.kv_get(maintenance.FORK_KEY + "acme_weather")
+
+
+# ------------------------------------------------------------------ relevance, deadlines and verdicts (0.23.0)
+
+UNRELEASED = (FIXTURES / "release-post-unreleased.html").read_text()
+# The live case: a release post of a minor not installed yet, with breaking changes for six integrations. Two are
+# configured here (acme_hub by a config entry, acme_tv by a YAML platform); the YAML says `entity_id` everywhere, and
+# Core's loaded components include the entity-platform halves `climate`, `event` and `group`.
+LIVE_CONFIGURATION = (
+    "homeassistant:\n  name: Example\nacme_hub:\n  host: hub.example.local\n  legacy_polling: true\n"
+    "media_player:\n  - platform: acme_tv\n    host: tv.example.local\n"
+)
+LIVE_AUTOMATIONS = (
+    "- alias: Porch light\n  triggers:\n    - trigger: state\n      entity_id: binary_sensor.example_motion\n"
+    "    - platform: event\n      event_type: example_button\n"
+    "  actions:\n    - action: light.turn_on\n      target:\n        entity_id: light.example_lamp\n"
+)
+
+
+def live_inventory() -> inventory.Inventory:
+    return inventory.build(
+        entries=[{"domain": "acme_hub"}, {"domain": "zha"}],
+        components=["acme_hub", "zha", "acme_tv", "climate.acme_hub", "event.acme_hub", "group", "sensor.zha",
+                    "media_player.acme_tv"],
+        texts={"configuration.yaml": LIVE_CONFIGURATION, "automations/porch.yaml": LIVE_AUTOMATIONS},
+        custom={}, registry=[], resources=[], dashboards={}, addons={"addons": []},
+    )  # fmt: skip
+
+
+def live_rig(tmp_path: Path) -> Rig:
+    rig = Rig(tmp_path)
+    rig.issues, rig.logs = [], []
+    rig.inventory = live_inventory()
+    rig.posts = {f"{BASE}/2030/03/05/release-20303/": UNRELEASED, f"{BASE}/2030/02/04/release-20302/": OLDER,
+                 f"{BASE}/2029/12/03/release-202912/": OLDER}  # fmt: skip
+    return rig
+
+
+def answer(finding: Finding, verdict: str, reason: str = "checked the config") -> dict[str, Any]:
+    return {"plans": [{"key": finding.key, "plan": "Nothing to change." if verdict == "not_affected" else "Check it.",
+                       "verdict": verdict, "reason": reason, "evidence": ["configuration.yaml"]}],
+            "summary": "s"}  # fmt: skip
+
+
+def notes_items(rig: Rig) -> list[dict[str, Any]]:
+    keys = {f"maint:{f.key}" for f in by_signal(rig, "notes")}
+    return [r for r in rig.store.items_all() if r["key"] in keys]
+
+
+def test_a_note_for_an_unconfigured_integration_is_no_finding() -> None:
+    """A note for an integration that is not configured here is no finding because a generic option name such as
+    `entity_id` appears in the YAML; only a configured integration's note is."""
+    post = parse_post(UNRELEASED, "src") | {"version": "2030.3", "url": "src"}
+    found = maintenance.from_notes([post], live_inventory(), "2030.2.1")
+    [minor] = found
+    assert minor.detail["integrations"] == ["acme_hub", "acme_tv"]
+    assert not any("acme_cloudcam" in a or "acme_doorbell" in a for a in minor.affected)
+    assert "integration acme_hub" in minor.affected and "configuration.yaml:5" in minor.affected
+    # The generic term never counts as a place, even for the configured integration's note.
+    assert not any(a.startswith("automations/") for a in minor.affected)
+
+
+def test_entity_platform_domains_alone_never_make_a_finding() -> None:
+    """`climate`, `event` and `group` are loaded on every install (the halves of `<platform>.<integration>`):
+    loading alone is not configuring, so their notes are no findings."""
+    inv = live_inventory()
+    assert inv.uses("climate") and not inv.configured("climate") and not inv.configured("group")
+    # An automation's `platform: event` trigger configures nothing either.
+    assert inv.uses("event") and not inv.configured("event")
+    assert inv.configured("acme_hub") and inv.configured("acme_tv") and not inv.configured("acme_doorbell")
+    post = parse_post(UNRELEASED, "src") | {"version": "2030.3", "url": "src"}
+    [minor] = maintenance.from_notes([post], inv, "2030.2.1")
+    assert {n["domain"] for n in minor.detail["notes"]} == {"acme_hub", "acme_tv"}
+
+
+def test_a_breaking_change_without_a_named_removal_has_no_deadline() -> None:
+    post = parse_post(UNRELEASED, "src") | {"version": "2030.3", "url": "src"}
+    [minor] = maintenance.from_notes([post], live_inventory(), "2030.2.1")
+    assert minor.deadline is None and minor.asks_at() is None and not minor.asks("2030.2.1", NOW)
+    assert not minor.named_removal and minor.minor_of == "2030.3"
+    # It never holds a Core update back either: only a removal with a deadline does.
+    assert removal_block({"kind": "core", "latest": "2030.3.1"}, [minor]) is None
+    # A removal the text names, or a farewell item, still has one.
+    ahead = parse_post(AHEAD, "src") | {"version": "2030.3", "url": "src"}
+    removals = [f for f in maintenance.from_notes([ahead], inv(), INSTALLED) if f.named_removal]
+    assert {f.removal for f in removals} == {"2030.3", "2030.6"} and all(f.deadline for f in removals)
+
+
+async def test_a_breaking_change_gist_never_says_removed(tmp_path: Path) -> None:
+    rig = live_rig(tmp_path)
+    await rig.scan()
+    [item] = notes_items(rig)
+    assert item["title"] == "Core 2030.3: breaking changes for acme_hub, acme_tv"
+    assert item["gist"].startswith("changes with 2030.3") and "removed" not in item["gist"] + item["title"]
+
+
+async def test_one_core_release_is_one_item(tmp_path: Path) -> None:
+    rig = live_rig(tmp_path)
+    await rig.scan()
+    [item] = notes_items(rig)
+    notes = [f for f in item["facts"] if f["label"].startswith("Breaking change")]
+    assert [f["label"] for f in notes] == ["Breaking change (acme_hub)", "Breaking change (acme_tv)"]
+    assert "legacy_polling" in notes[0]["value"]
+
+
+async def test_the_live_case_makes_no_needs_and_no_push(tmp_path: Path) -> None:
+    """The regression of the live case: six notes for a minor not installed yet, two integrations configured, a
+    generic `entity_id` everywhere in the YAML. Without a check: nothing in Needs you, no push. A check that says it
+    needs the admin makes exactly one Core-minor item with the note as a fact; one that says not affected closes it
+    and withdraws its push."""
+    rig = live_rig(tmp_path)
+    await rig.scan()
+    await rig.deliver()
+    assert rig.store.needs_count() == 0 and rig.sent == []
+    [minor] = by_signal(rig, "notes")
+    # The next day the check answers: it needs the admin (the option is set in configuration.yaml).
+    rig.answer = answer(minor, "needs_owner", "configuration.yaml sets acme_hub legacy_polling, which 2030.3 ignores")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    [item] = notes_items(rig)
+    assert item["needs"] and item["need"]["kind"] == "ack" and rig.store.needs_count() == 1
+    assert any("legacy_polling" in f["value"] for f in item["facts"] if f["label"] == "Breaking change (acme_hub)")
+    assert "legacy_polling" in item["agent"]["text"] and "legacy_polling" not in item["need"]["text"]
+    await rig.deliver()
+    [push] = rig.sent
+    assert push.tag == item["id"] and not push.urgent
+    # Plan a fix concludes nothing is needed (the admin removed the option): the item closes, its push is withdrawn.
+    verdicts.record(rig.store, f"maint:{minor.key}", fingerprint=minor.evidence, verdict="not_affected",
+                    reason="the option is no longer set", by="plan_fix", now=rig.now)  # fmt: skip
+    [item] = notes_items(rig)
+    assert item["state"] == "done" and item["gist"] == "checked: not affected here: the option is no longer set"
+    assert not item["needs"] and [a["id"] for a in item["actions"]] == ["reopen"]
+    await rig.deliver()
+    assert rig.cleared == [item["id"]] and len(rig.sent) == 1
+
+
+async def test_a_not_affected_plan_closes_the_finding_and_is_remembered(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    await rig.scan()
+    removal = next(f for f in by_signal(rig, "notes") if f.removal == "2030.6")
+    rig.answer = answer(removal, "not_affected", "acme_sprinkler is set up from the UI here; no YAML to move")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    item = rig.items()[removal.title()]
+    assert item["state"] == "done" and item["gist"].startswith("checked: not affected here: acme_sprinkler")
+    assert "acme_sprinkler is set up from the UI here" in item["agent"]["text"]
+    # Remembered: later scans do not ask the run again, and the item stays closed (History, with its reason).
+    prompts = len(rig.prompts)
+    rig.answer = None
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    assert not any(removal.key in p for p in rig.prompts[prompts:])
+    assert rig.items()[removal.title()]["state"] == "done"
+    # The admin can reopen it: it behaves as without a verdict until its evidence changes.
+    record = rig.items()[removal.title()]
+    assert rig.manager.reopen(removal.key)
+    reopened = rig.items()[removal.title()]
+    assert reopened["state"] == "proposed" and reopened["revision"] > record["revision"]
+
+
+async def test_a_changed_evidence_fingerprint_reopens_a_remembered_verdict(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    await rig.scan()
+    removal = next(f for f in by_signal(rig, "notes") if f.removal == "2030.6")
+    rig.answer = answer(removal, "not_affected", "nothing here uses it")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    assert rig.items()[removal.title()]["state"] == "done"
+    # Home Assistant rewrites the note: a new change id, so a new question; the old verdict is not read.
+    rig.posts[f"{BASE}/2030/03/05/release-20303/"] = AHEAD.replace("Your configuration is imported on start.",
+                                                                   "Move it to the UI before you update.")  # fmt: skip
+    rig.answer = None
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    [changed] = [f for f in by_signal(rig, "notes") if f.removal == "2030.6"]
+    assert changed.key == removal.key and changed.evidence != removal.evidence
+    assert maintenance.verdict_of(rig.store, changed) is not None  # the failed re-check, nothing settled
+    assert rig.items()[removal.title()]["state"] == "proposed"
+    assert any(removal.key in p for p in rig.prompts)
+
+
+def test_an_unrelated_edit_keeps_the_fingerprint() -> None:
+    """Line numbers are no evidence: an edit above a line a finding names keeps its plan, hiding and verdict."""
+    one = Finding(key="0123456789abcdef", variant="deprecation", signal="notes", what="removed in 2030.6",
+                  domain="acme_sprinkler", removal="2030.6", named_removal=True,
+                  affected=["integration acme_sprinkler", "automations/garden.yaml:3"], fixable=["yaml"],
+                  detail={"changes": ["e02a40602e77"]})  # fmt: skip
+    moved = Finding(**(one.to_json() | {"affected": ["integration acme_sprinkler", "automations/garden.yaml:9"]}))
+    assert moved.evidence == one.evidence
+    other = Finding(**(one.to_json() | {"affected": ["integration acme_sprinkler", "automations/porch.yaml:3"]}))
+    assert other.evidence != one.evidence
+
+
+async def test_a_needs_owner_verdict_puts_a_core_minor_in_needs_you(tmp_path: Path) -> None:
+    rig = live_rig(tmp_path)
+    await rig.scan()
+    [minor] = by_signal(rig, "notes")
+    assert minor.minor_of == "2030.3" and not notes_items(rig)[0]["needs"]
+    rig.answer = answer(minor, "needs_owner", "the option is set")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    [item] = notes_items(rig)
+    assert item["state"] == "waiting" and item["source"]["ack"] == f"verdict:{minor.evidence}"
+    # OK keeps it quiet until its evidence changes.
+    assert rig.book.ack(item, now=rig.now)
+    assert not notes_items(rig)[0]["needs"]
+
+
+async def test_a_failed_check_asks_as_before(tmp_path: Path) -> None:
+    """AI off, capped or a failed run: a finding that would ask without verdicts asks (fail safe); it is checked
+    again a day later and a verdict then closes it."""
+    rig = Rig(tmp_path)
+    rig.now = ASKS_AT
+    await rig.scan()
+    near = rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]
+    assert near["state"] == "waiting"
+    [repair] = by_signal(rig, "repair")
+    found = maintenance.verdict_of(rig.store, repair)
+    assert found is not None and found.failed and found.exhausted
+    # A repair Home Assistant still lists is only quieted by a "not affected", never closed.
+    rig.answer = answer(repair, "not_affected", "the YAML block is already gone")
+    rig.now += timedelta(days=1, minutes=1)
+    await rig.scan()
+    quiet = rig.items()[near["title"]]
+    assert quiet["state"] == "proposed" and not quiet["needs"] and "still lists the repair" in quiet["gist"]
+
+
+async def test_a_verdict_never_closes_a_critical_or_access_item(tmp_path: Path) -> None:
+    """A "not affected" never closes or quiets a lock, the alarm or access hardware, and never a finding whose
+    deadline is within 14 days on model text alone."""
+    rig = Rig(tmp_path)
+    rig.issues = [{"domain": "acme_side_lock", "issue_id": "deprecated_yaml", "breaks_in_ha_version": "2030.3.0",
+                   "translation_key": "deprecated_yaml", "severity": "warning"}]  # fmt: skip
+    await rig.scan()
+    [repair] = by_signal(rig, "repair")
+    rig.answer = answer(repair, "not_affected", "lock.side_entrance is fine")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    item = rig.items()[repair.title()]
+    assert item["state"] == "waiting" and item["needs"]
+    soon = Finding(key="0123456789abcdef", variant="deprecation", signal="notes", what="removed in 2030.3",
+                   domain="acme_sprinkler", removal="2030.3", named_removal=True)  # fmt: skip
+    found = verdicts.Verdict(verdict="not_affected", reason="r", fingerprint=soon.evidence, at="", by="plan_fix")
+    assert verdicts.closes(found, guard=False, deadline=soon.deadline, now=NOW) == "quiet"
+    assert verdicts.closes(found, guard=True, now=NOW) == "none"
+    assert verdicts.guarded(domain="lock") and verdicts.guarded(domain="alarm_control_panel")
+    assert verdicts.guarded(severity="critical") and verdicts.guarded(key="access:lock.side_entrance")
+    assert verdicts.guarded(key="core:down") and verdicts.guarded(key="custom:acme_weather")
+
+
+async def test_findings_an_earlier_version_raised_resolve_on_the_first_scan(tmp_path: Path) -> None:
+    """0.22 stored a finding for every breaking change of a newer release, with that release as an invented
+    deadline, also for integrations that are not configured (only loaded, or not at all). The first 0.23.0 scan
+    resolves each with its reason, also when the release posts cannot be read, and withdraws their pushes. A real
+    removal 0.22 found (a farewell item of a configured integration) keeps asking under its key."""
+    rig = live_rig(tmp_path)
+    legacy = []
+    for n, domain in enumerate(("acme_cloudcam", "acme_doorbell", "climate", "group", "event", "acme_hub")):
+        legacy.append(Finding(key=f"{n:016x}", variant="deprecation", signal="notes", what="changes in 2030.3",
+                              domain=domain, removal="2030.3", affected=[f"integration {domain}"],
+                              sources=["src"], quote=f"{domain}: something changes"))  # fmt: skip
+    real = Finding(key="00000000000000ff", variant="deprecation", signal="notes", what="removed in 2030.3",
+                   domain="acme_hub", removal="2030.3", affected=["integration acme_hub"], sources=["src"],
+                   quote="Acme Hub: Acme Hub was removed: the vendor shut down its cloud.")  # fmt: skip
+    # As 0.22 stored them: without the `named_removal` field.
+    stored = [{k: v for k, v in f.to_json().items() if k != "named_removal"} for f in [*legacy, real]]
+    with rig.store.atomic():
+        rig.store.kv_set(maintenance.FINDINGS_KEY, json.dumps(stored), now=rig.now)
+        rig.store.kv_set(maintenance.META_KEY, json.dumps({"at": rig.now.isoformat(), "installed": INSTALLED}),
+                         now=rig.now)  # fmt: skip
+    # Under the 0.23.0 rules none of them asks any more (no named removal: no deadline), but the real removal...
+    kept = rig.store.item_by_key(f"maint:{real.key}")
+    assert kept is not None and kept["needs"] and rig.store.needs_count() == 1
+    # ...but 0.22 had put each in Needs you and pushed it: as the store holds them at the upgrade.
+    asking = [r for r in rig.store.items_all() if r["kind"] == "maintenance" and r["key"] != kept["key"]]
+    for record in asking:
+        need = {"kind": "ack", "text": "x", "primary": {"id": "ack", "label": "OK"}, "secondary": [],
+                "expires_at": None}  # fmt: skip
+        rig.store.put_item(record | {"state": "waiting", "need": need, "needs_since": rig.now.isoformat(),
+                                     "resolved_at": None, "push": {"key": "waiting:ack:ack", "at": rig.now.isoformat(),
+                                                                   "tag": record["id"]}})  # fmt: skip
+    assert rig.store.needs_count() == len(legacy) + 1
+    # The first scan after the upgrade (here offline: the release posts cannot be read).
+    rig.offline = True
+    rig.now += timedelta(hours=1)
+    await rig.scan()
+    gone = {r["key"]: r for r in rig.store.items_all() if r["key"] in {f"maint:{f.key}" for f in legacy}}
+    assert all(not r["needs"] and r["state"] == "done" for r in gone.values())
+    reasons = {r["key"].removeprefix("maint:"): r["gist"] for r in gone.values()}
+    assert reasons[legacy[0].key] == "resolved: acme_cloudcam is not configured here"
+    assert reasons[legacy[2].key] == "resolved: climate is not configured here"
+    assert reasons[legacy[5].key].startswith("resolved: re-checked under the 0.23.0 rules: no removal is named")
+    await rig.deliver()
+    assert sorted(rig.cleared) == sorted(r["id"] for r in asking)
+    still = rig.store.item_by_key(f"maint:{real.key}")
+    assert still is not None and still["needs"] and rig.store.needs_count() == 1
+
+
+def test_glossary_tooltips_never_reach_a_note_or_its_domain() -> None:
+    """home-assistant.io inlines glossary tooltips ("Groups are a way to organize ...", linking the glossary's
+    integration) into note text. They are stripped, and a note's integration is its own documentation link."""
+    post = parse_post(UNRELEASED, "src")
+    [note] = [c for c in post["changes"] if c["title"] == "Acme Zigbee"]
+    assert note["domain"] == "acme_zigbee"
+    assert "Groups are a way" not in note["text"] and "Automations in Home Assistant" not in note["text"]
+    assert "Each Acme Zigbee group now reports its members" in note["text"]
+    assert "acme_zigbee.members" in note["terms"]
+    # With `group` configured here (a light group platform), the Acme Zigbee note still says nothing about this
+    # install (only the post's own Group note then counts).
+    inv = live_inventory()
+    inv.yaml["configuration.yaml"] = [*inv.yaml["configuration.yaml"], "platform:group"]
+    assert inv.configured("group")
+    [minor] = maintenance.from_notes([post | {"version": "2030.3", "url": "src"}], inv, "2030.2.1")
+    assert [n["domain"] for n in minor.detail["notes"] if n["title"] == "Group"] == ["group"]
+    assert not [n for n in minor.detail["notes"] if n["title"] == "Acme Zigbee"]
+
+
+def test_the_check_gets_what_decides_each_note() -> None:
+    """The check reads entities (with platform, device class and effect), entries and repairs, and sees a Core
+    minor's notes one per line, so a note limited to some entities is decidable rather than "unknown"."""
+    from opsd.runner import MAINTENANCE_PLAN
+
+    assert {"ha.entities", "ha.entries", "ha.repairs", "ha.core_compare"} <= MAINTENANCE_PLAN.capabilities
+    assert not {"integration.reload", "baseline.ack", "change.propose"} & MAINTENANCE_PLAN.capabilities
+    post = parse_post(UNRELEASED, "src") | {"version": "2030.3", "url": "src"}
+    [minor] = maintenance.from_notes([post], live_inventory(), "2030.2.1")
+    prompt = maintenance.build_plan_prompt([minor], git=True)
+    evidence = prompt[prompt.index("<evidence>") : prompt.index("</evidence>")]
+    assert "- note (acme_hub): Acme Hub: The legacy_polling option" in evidence
+    assert "- note (acme_tv): Acme TV:" in evidence and "verdict wanted: yes" in prompt
+
+
+async def test_a_parser_fix_takes_effect_over_a_cached_post(tmp_path: Path) -> None:
+    """A post parsed by an earlier parser (cached under its old key, 12 hours) is read again at once: the cache key
+    carries the parser version, so a glossary-polluted note does not outlive the fix."""
+    rig = live_rig(tmp_path)
+    url = f"{BASE}/2030/03/05/release-20303/"
+    stale = parse_post(UNRELEASED, url)
+    for change in stale["changes"]:
+        if change["title"] == "Acme Zigbee":
+            # What the parser before the fix made of it: the glossary tooltip's integration as the note's.
+            change["domain"], change["text"] = "acme_hub", "Each Acme Zigbee group Groups are a way to organize ..."
+    EvidenceCache(rig.store, clock=lambda: rig.now).put(f"{url}#maintenance", stale)
+    await rig.scan()
+    [minor] = by_signal(rig, "notes")
+    assert not [n for n in minor.detail["notes"] if n["title"] == "Acme Zigbee"]
+    assert any(u == url for u in rig.fetched) and evidence.POST_PARSER >= 2
+
+
+async def test_a_not_affected_check_cancels_a_queued_plan(tmp_path: Path) -> None:
+    rig = live_rig(tmp_path)
+    cancelled: list[tuple[str, str]] = []
+    rig.manager._cancel_plan = lambda item, reason: cancelled.append((item, reason))
+    await rig.scan()
+    [minor] = by_signal(rig, "notes")
+    assert not cancelled
+    rig.answer = answer(minor, "not_affected", "no TVOC sensor and no effect None here")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    [item] = notes_items(rig)
+    assert item["state"] == "done"
+    assert cancelled == [(item["id"], "checked: not affected here, nothing to plan")]

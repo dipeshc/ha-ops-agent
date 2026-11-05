@@ -22,7 +22,7 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 | `investigate` | `profiles/investigate.md` | `investigate-result` | reads + `ha.core_compare`, `fork.propose`, `task.list`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 25 | min(1.0, run_max_usd) | yes |
 | `summary` | `profiles/summary.md` | `reply-result` | none | USER | 5 | min(0.2, run_max_usd) | no |
 | `update_review` | `profiles/update_review.md` | `update-review` | none | AGENT | 6 | min(0.5, run_max_usd) | no |
-| `maintenance_plan` | `profiles/maintenance_plan.md` | `maintenance-plan` | `ha.core_compare`, `fork.propose` | AGENT | 8 | min(0.5, run_max_usd) | no |
+| `maintenance_plan` | `profiles/maintenance_plan.md` | `maintenance-plan` | reads + `ha.core_compare`, `fork.propose` | AGENT | 16 | min(0.5, run_max_usd) | no |
 
 - R1. "Reads" are the capabilities whose only effect is READ
   ([capabilities.md](capabilities.md)), except `ha.core_compare`, the one

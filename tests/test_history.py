@@ -286,3 +286,32 @@ def test_entities_lookup_uses_the_same_rules(paths: Paths, monkeypatch: pytest.M
     listed = queries.cmd_entities(ctx, Args({"entity": None, "platform": "mobile_app", "unavailable": False,
                                              "limit": 10}))  # fmt: skip
     assert listed["count"] == 2 and {r["state"] for r in listed["entities"]} == {"(private)"}
+
+
+def test_a_platform_listing_shows_device_class_and_effect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a release note limited to some entities is decided by ("only TVOC sensors", "the effect None")."""
+    from opsd import queries
+    from opsd.capabilities import Args
+
+    states = [
+        {"entity_id": "sensor.example_air", "state": "12", "attributes": {"device_class": "volatile_organic_compounds",
+         "unit_of_measurement": "µg/m³", "friendly_name": "Air", "token": "secret"}},
+        {"entity_id": "light.example_lamp", "state": "on", "attributes": {"effect": "None", "friendly_name": "Lamp"}},
+    ]  # fmt: skip
+    registry = [{"entity_id": "sensor.example_air", "platform": "acme_hub"},
+                {"entity_id": "light.example_lamp", "platform": "acme_hub"}]  # fmt: skip
+
+    class Client:
+        def core(self, _path: str) -> Any:
+            return states
+
+    async def ws(_client: Any, _msg_type: str, **_: Any) -> Any:
+        return registry
+
+    monkeypatch.setattr(queries, "_ws", ws)
+    ctx: Any = type("Ctx", (), {"client": Client()})()
+    listed = queries.cmd_entities(ctx, Args({"entity": None, "platform": "acme_hub", "unavailable": False,
+                                             "limit": 10}))  # fmt: skip
+    rows = {r["entity_id"]: r for r in listed["entities"]}
+    assert rows["sensor.example_air"]["device_class"] == "volatile_organic_compounds"
+    assert rows["light.example_lamp"]["effect"] == "None" and "secret" not in json.dumps(listed)

@@ -32,16 +32,21 @@ expires), and the minute tick recomposes it then. A `follows` child (the Supervi
 parent is done. Activity entries that belong to no process (a health check, a reload) are standalone
 items written by `ActivityLog`.
 
-Pushes (by design): none for routine results, summaries or
-digests. The book pushes only when an item enters Needs you (an approval to
-give, a reboot to allow, a failure or escalation to acknowledge), once per
-need, re-surfaced at most once a day while it waits; time-sensitive for
-escalations. Title, body and actions come from the record (never `agent`),
-the tag is the item id so the Companion app replaces an item's earlier push,
-and tapping opens the item. The health check pushes its own items.
+Pushes (by design): none for routine results or summaries. The book pushes
+only when an item enters Needs you (an approval to give, a reboot to allow, a
+failure or escalation to acknowledge), once per need, and only what is
+time-sensitive on its own (urgent, a deadline within `TIMELY`, an approval
+that gates tonight's window); every other new need goes into at most one
+digest push a day. Only an urgent item is pushed again while it waits. Title,
+body and actions come from the record (never `agent`), the tag is the item id
+so the Companion app replaces an item's earlier push, tapping opens the item,
+and the push is withdrawn (`clear_notification` by that tag) when the item
+leaves Needs you. The health check pushes its own items, except one triage
+checked as needing the admin.
 """
 
 import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -53,11 +58,12 @@ from datetime import UTC, datetime, time, timedelta, tzinfo
 from functools import partial
 from typing import Any
 
-from opsd import dashboards, forkrebase
+from opsd import dashboards, forkrebase, verdicts
 from opsd import maintenance as maint
 from opsd.approvals import LIVE, approvable, dashboard_subject, fork_subject, is_change, is_dashboard, is_fork
 from opsd.changes import UNCLEAN_KEY, diff_complete
 from opsd.channels import REPLY_ACTION, BudgetClass, Message
+from opsd.chatcards import refusal_card
 from opsd.conversation import clean_text, fence
 from opsd.live import Hub
 from opsd.notify import panel_url
@@ -93,11 +99,25 @@ JOBS_SINCE = timedelta(days=14)
 RECENT_REJECT = timedelta(days=7)
 # An install that failed and changed nothing asks the admin only once the same version failed this often.
 REPEATED_FAILURES = 2
+# Only an urgent item is pushed again while it waits, at most this often.
 RESURFACE = timedelta(days=1)
+# A need with a deadline this close pushes on its own; anything else not urgent waits for the daily digest.
+TIMELY = timedelta(days=7)
+DIGEST_KEY = "items.digest"
+DIGEST_TAG = "ha-ops-digest"
 # A push that was not delivered (failed, rate limited) is tried again after this long.
 RETRY = timedelta(minutes=15)
 # Outcomes that count as delivered: sent, relayed while Core was down, or held for after quiet hours.
 DELIVERED = frozenset({"sent", "relayed", "held"})
+# The channel's daily push budget refused it (`notify.Notifier.send`).
+RATE_LIMITED = "rate_limited"
+
+
+def budget_renews(now: datetime) -> datetime:
+    """When the notifier's daily push budget renews: its day is the UTC date."""
+    return datetime.combine(now.astimezone(UTC).date() + timedelta(days=1), time(0, 0), UTC)
+
+
 PUSH_BODY = 400
 ACK_KEY = "item.ack:"
 REBOOT_SUBJECT = "reboot:"
@@ -461,6 +481,8 @@ class Composer:
             # Its link to the config change it needs (opsd.updatefix): that proposal's own item is the one tap.
             base.facts.append({"label": "Config change it needs", "value": f"#{fix['change']}: {fix.get('state')}",
                                "at": (latest or {}).get("created_at")})  # fmt: skip
+        if kind == "core":
+            base.facts += self._core_notes(version)
         review = (item or {}).get("review")
         if isinstance(review, Mapping) and review.get("reason"):
             base.agent = {"text": f"Release-note review: risk {review.get('risk')}. {review.get('reason')}",
@@ -565,10 +587,31 @@ class Composer:
         secondary.append(act("reject", "Reject", "text"))
         base.state, base.gist = "waiting", f"needs your approval{skipped}"
         base.need = need("approval", text, act("approve", "Approve for tonight"), secondary)
+        # It gates tonight's update window: time-sensitive (pushed on its own, never in the digest).
+        base.source["push_now"] = True
         base.since = (job.finished_at if skipped and job else None) or str((latest or {}).get("created_at") or "")
         if approval is not None:
             base.source["approval"] = approval["id"]
         return base
+
+    def _core_notes(self, version: str) -> list[dict[str, Any]]:
+        """The relevant release-note items of the Core minors this update reaches (the maintenance scan's Core-minor
+        findings): facts on the update's item, the one item for them."""
+        target = maint.minor(version)
+        if target is None:
+            return []
+        found: list[dict[str, Any]] = []
+        scanned = None
+        for finding in maint.load(self.store):
+            at = maint.minor(finding.minor_of) if finding.minor_of else None
+            if at is None or at > target:
+                continue
+            scanned = scanned or maint.meta(self.store).get("at")
+            for note in [n for n in _list(finding.detail.get("notes")) if isinstance(n, Mapping)][:8]:
+                value = self.ctx.redact(clean_text(f"{note.get('title')}: {note.get('text')}", 600))
+                found.append({"label": f"Breaking change in {finding.minor_of} ({note.get('domain') or 'Core'})",
+                              "value": value, "at": scanned})  # fmt: skip
+        return found[:12]
 
     def _running(self, base: Spec, job: UpdateJob, jobs: list[UpdateJob]) -> Spec:
         names = ["Backup", "Install", "Reboot", "Verify"] if job.kind == "os" else ["Backup", "Install", "Verify"]
@@ -626,6 +669,7 @@ class Composer:
                     f"minutes offline), then confirms {job.to_version} and compares health with the check before the "
                     f"update. Or reboot it yourself ({REBOOT_HELP}); the daemon confirms it afterwards.")  # fmt: skip
             base.need = need("approval", text, act("reboot_window", f"Reboot tonight at {self.ctx.window}"))
+            base.source["push_now"] = True
             base.since = job.finished_at or job.updated_at
             if approval is not None:
                 base.source["approval"] = approval["id"]
@@ -633,8 +677,11 @@ class Composer:
         if job.state in ("failed", "rolled_back", "rollback_failed"):
             token = f"job:{job.id}"
             fell_back = job.state == "failed" and job.detail.startswith("after the reboot")
-            # Rolled back, escalated or not activated: time-sensitive (never held or capped).
-            urgent = job.state in ("rolled_back", "rollback_failed") or fell_back
+            # Escalated or not activated: time-sensitive (never held or capped).
+            urgent = job.state == "rollback_failed" or fell_back
+            if job.state == "rolled_back":
+                # The daemon put health back by itself: no acknowledgement (one question: the held approval).
+                return self._rolled_back(base, job, item)
             if acked(store, key, token):
                 return None
             failures = [j for j in jobs if j.entity_id == job.entity_id and j.state == "failed"]
@@ -644,12 +691,7 @@ class Composer:
             base.state, base.since = "failed", job.finished_at
             detail = clean_text(job.detail, 300)
             regressions = clean_text("; ".join(str(r) for r in job.regressions[:2]), 200)
-            if job.state == "rolled_back":
-                base.gist = f"made health worse; rolled back to {job.from_version}"
-                text = (f"{job.to_version} made health worse ({regressions or detail}), so the daemon rolled it "
-                        f"back to {job.from_version}. Health is back to normal. The version stays held until you "
-                        "approve it again.")  # fmt: skip
-            elif job.state == "rollback_failed":
+            if job.state == "rollback_failed":
                 base.gist = "escalated: not rolled back"
                 backup = _dict((store.update_run(job.run_id) or {}).get("backup"))
                 named = f"{backup['name']} ({backup.get('slug')})" if backup.get("name") else "the pre-update backup"
@@ -672,6 +714,22 @@ class Composer:
             base.urgent = urgent
             return base
         return None
+
+    @staticmethod
+    def _rolled_back(base: Spec, job: UpdateJob, item: Mapping[str, Any] | None) -> Spec | None:
+        """A version the daemon rolled back fixed itself (health is back): no acknowledgement. While the plan offers
+        it again as a held version, the rollback is a fact on that one approval (None: the plan decides); otherwise
+        it is History."""
+        regressions = clean_text("; ".join(str(r) for r in job.regressions[:2]), 200) or clean_text(job.detail, 200)
+        fact = {"label": "Rolled back", "value": f"{job.to_version} made health worse ({regressions}); the daemon "
+                f"rolled it back to {job.from_version}", "at": job.finished_at}  # fmt: skip
+        if item is not None and approvable(item) and item.get("held"):
+            base.facts.append(fact)
+            return None
+        base.state, base.since, base.need = "failed", job.finished_at, None
+        base.gist = f"made health worse; rolled back to {job.from_version}; held until you approve it again"
+        base.facts.append(fact)
+        return base
 
     def _retried(self, job: UpdateJob, item: Mapping[str, Any] | None, failures: int) -> bool:
         """A failed install that needs nobody: it failed cleanly before or during the install call (never while
@@ -716,7 +774,11 @@ class Composer:
                 spec.state, spec.gist, spec.quiet = "cancelled", summary or "skipped", True
                 spec.since = run.get("finished_at") or run.get("updated_at")
                 why = self.store.kv_get(f"{ABORT_FAILED_KEY}{run['id']}")
-                if why and not acked(self.store, key, f"run:{run['id']}"):
+                if why and self._superseded(run):
+                    # A later night ran normally: the failure fixed itself, nothing to acknowledge.
+                    spec.state, spec.quiet = "failed", False
+                    spec.gist = f"nothing was installed: {clean_text(why, 160)}; a later night ran normally"
+                elif why and not acked(self.store, key, f"run:{run['id']}"):
                     # A failure, not a busy night: nothing installs until it is fixed, so the admin hears of it.
                     spec.state, spec.quiet = "failed", False
                     text = (f"Nothing was installed: {clean_text(why, 200)}. Approved and automatic updates wait for "
@@ -738,6 +800,11 @@ class Composer:
                     spec.source["ack"] = f"run:{run['id']}"
                     spec.urgent = True
         return spec
+
+    def _superseded(self, run: Mapping[str, Any]) -> bool:
+        """A later update night in act mode finished `done`: it supersedes an earlier aborted one."""
+        return any(int(r["id"]) > int(run["id"]) and r.get("mode") == "act" and r.get("state") == "done"
+                   for r in self.store.recent_update_runs(limit=30))  # fmt: skip
 
     # ---------------------------------------------------------------- changes
 
@@ -994,6 +1061,7 @@ class Composer:
                 spec.gist = f"waiting for your approval{f' ({detail})' if detail else ''}"
                 secondary = [act("approve_rebase_now", "Rebase now"), act("reject", "Reject", "text")]
                 spec.need = need("approval", text, act("approve_rebase", "Rebase tonight"), secondary)
+                spec.source["push_now"] = True
                 spec.state, spec.since = "waiting", str(record.get("created_at") or "")
                 if approval is not None:
                     spec.source["approval"] = approval["id"]
@@ -1098,10 +1166,17 @@ class Composer:
     # ----------------------------------------------------------------- health
 
     def health(self) -> list[Spec]:
-        """The health check's open items (`open-items.json`)."""
+        """The health check's open items (`open-items.json`), one item per cause: an update's info item is the
+        update's own item, a repair a maintenance finding carries follows that finding, and a failed standalone
+        backup follows the backup's own item."""
         ctx = self.ctx
         specs = []
+        carried = self._carried_repairs()
+        backup = self._failed_backup()
         for raw in ctx.health_items:
+            if str(raw.get("key") or "").startswith("update:"):
+                # The update has its own item (Coming up or Needs you): a second card would say the same.
+                continue
             key = f"health:{raw.get('key')}"
             severity = str(raw.get("severity") or "info")
             detail = _dict(raw.get("detail"))
@@ -1124,10 +1199,21 @@ class Composer:
                         urgent=critical, pushes=False)  # fmt: skip
             spec.facts = [{"label": "Health check", "value": observed, "at": ctx.health_at}]
             after = _parse(detail.get("needs_after"))
+            follows = carried.get(str(raw.get("key")))
+            superseded = False
+            if str(raw.get("key")) == "backup:run_failed" and backup is not None:
+                follows, superseded = backup
             if severity == "info":
-                # Information (a pending update version, the config repository's state): shown, never a question.
+                # Information (the config repository's state): shown, never a question.
                 spec.state, spec.need = "proposed", None
                 spec.gist = "info: noted; it does not need you"
+                spec.actions = [act("snooze", "Snooze 7 days"), act("accept", "Accept as normal", "text")]
+            elif follows is not None and not critical:
+                # The same cause has its own item already: this one follows it and asks nothing.
+                spec.state, spec.need, spec.follows = "proposed", None, follows
+                spec.gist = ("tracked on its maintenance item" if follows.startswith("maint:")
+                             else "a later backup succeeded; the next health check clears it" if superseded
+                             else "tracked on the failed backup's own item")  # fmt: skip
                 spec.actions = [act("snooze", "Snooze 7 days"), act("accept", "Accept as normal", "text")]
             elif after is not None and self.now < after:
                 # Shown, but it asks only once it lasts (remote access drops for a while often).
@@ -1135,6 +1221,8 @@ class Composer:
                 spec.gist = f"{severity}: watching; asks you if it lasts past {after.astimezone(self.tz):%H:%M}"
                 spec.actions = [act("snooze", "Snooze 7 days"), act("accept", "Accept as normal", "text")]
                 spec.source["recheck_at"] = _iso(after)
+            else:
+                self._triaged(spec, raw, severity)
             specs.append(spec)
         open_keys = {spec.key for spec in specs}
         for handled in ctx.health_handled:
@@ -1142,6 +1230,53 @@ class Composer:
             if done is not None and done.key not in open_keys:
                 specs.append(done)
         return specs
+
+    def _triaged(self, spec: Spec, raw: Mapping[str, Any], severity: str) -> None:
+        """Triage's verdict on a health item it investigated (`opsd.verdicts`, by `triage`): its reason is the item's
+        `agent` text. `needs_owner` keeps it in Needs you and lets the item book push it; `not_affected` or `fixed`
+        quiet a warning to Coming up. Guarded items (critical, access hardware, Assist, Core down, a broken custom
+        integration) keep their need whatever it says."""
+        key = str(raw.get("key") or "")
+        found = verdicts.current(self.store, f"health:{key}",
+                                 verdicts.health_fingerprint(key, str(raw.get("summary") or "")))  # fmt: skip
+        if found is None or not found.settled or not found.reason:
+            return
+        reason = self.ctx.redact(clean_text(found.reason, 300))
+        spec.agent = {"text": f"Checked by the agent: {reason}", "sources": ["triage"], "not_read": [],
+                      "run_id": None}  # fmt: skip
+        guard = verdicts.guarded(severity=severity, key=key, text=key)
+        if found.verdict == "needs_owner":
+            text = ("The agent looked into this and says it needs you; its findings are under The agent says. "
+                    "Snooze it for 7 days, or accept it as normal for 30 days.")  # fmt: skip
+            spec.need = need("ack", text, act("snooze", "Snooze 7 days"), [act("accept", "Accept as normal", "text")])
+            # The safety net already pushes every critical item: only a warning is pushed by the item book.
+            spec.pushes = severity != "critical"
+            return
+        if verdicts.closes(found, guard=guard, now=self.now) == "close":
+            spec.state, spec.need = "proposed", None
+            spec.gist = f"checked by the agent: {reason}"[:300]
+            spec.actions = [act("snooze", "Snooze 7 days"), act("accept", "Accept as normal", "text")]
+
+    def _carried_repairs(self) -> dict[str, str]:
+        """Repair keys (`<domain>:<issue>`) a maintenance finding carries, to that finding's item key."""
+        found: dict[str, str] = {}
+        for finding in maint.load(self.store):
+            for source in finding.sources:
+                if finding.signal == "repair" and source.startswith("repair "):
+                    found[f"repair:{source.removeprefix('repair ')}"] = f"maint:{finding.key}"
+        return found
+
+    def _failed_backup(self) -> tuple[str, bool] | None:
+        """(the key of the backup item a `backup:run_failed` health item follows, whether a later backup superseded
+        the failure): the failed backup's own item while it asks, else the newest backup when it succeeded."""
+        backups = sorted((r for r in self.store.items_all(prefix="activity:") if r.get("kind") == "backup"),
+                         key=lambda r: (str(r["created_at"]), int(str(r["key"]).split(":")[1] or 0)))  # fmt: skip
+        asking = next((r for r in backups if r.get("needs")), None)
+        if asking is not None:
+            return str(asking["key"]), False
+        if backups and backups[-1]["state"] == "done":
+            return str(backups[-1]["key"]), True
+        return None
 
     def _handled(self, handled: Mapping[str, Any]) -> Spec | None:
         """A health item acked since the check (by the agent or you): resolved, with who, until when and why."""
@@ -1179,7 +1314,7 @@ class Composer:
         specs = []
         for finding in maint.load(store):
             spec = self._with_plan(self._maintenance(finding, installed, at, live), changes)
-            busy = spec.source.get("plan") == "running" or "linked" in spec.source
+            busy = spec.source.get("plan") in ("running", "waiting") or "linked" in spec.source
             if maint.hidden(store, finding) and not finding.asks(installed, self.now) and not busy:
                 # Hidden by the admin until its evidence changes, or until it may ask (30 days before its deadline):
                 # quiet until then. A hidden removal still holds a Core update back (`maintenance.removals`).
@@ -1201,13 +1336,16 @@ class Composer:
         payload = task.payload
         runs = [str(r) for r in payload.get("runs") or [] if isinstance(r, str)]
         spec.source["plan_task"] = task.id
+        if task.state == "pending" and spec.state == "done" and spec.actor == "agent":
+            # Checked "not affected": closed, and a plan only queued for it is moot (the scan cancels it).
+            return spec
+        if task.state == "pending" and (payload.get("waiting") or payload.get("blocked")):
+            return self._plan_waits(spec, task)
         if task.state in ("pending", "running"):
             of = max(1, int(payload.get("max_steps") or 1))
             done = min(int(payload.get("step") or 0), of)
             names = PLAN_PHASES if of == len(PLAN_PHASES) else [f"Step {n}" for n in range(1, of + 1)]
-            waiting = clean_text(str(payload.get("waiting") or ""), 160)
-            words = f"planning a fix · waiting: {waiting}" if waiting else (
-                f"planning a fix · step {min(done + 1, of)} of {of}")  # fmt: skip
+            words = f"planning a fix · step {min(done + 1, of)} of {of}"
             spec.phase = {"names": names, "current": done, "started_at": payload.get("started_at"),
                           "usual_s": PLAN_USUAL_S}  # fmt: skip
             spec.source["plan"] = "running"
@@ -1224,7 +1362,11 @@ class Composer:
             spec.actions = [stop]
             return spec
         if task.state == "done" and isinstance(payload.get("plan"), str) and payload["plan"]:
-            spec.agent = {"text": str(payload["plan"]), "run_id": runs[-1] if runs else None, "not_read": [],
+            # The agent's checked verdict, when there is one, stays first: it is what decided the item.
+            earlier = str((spec.agent or {}).get("text") or "")
+            checked = earlier.split("\n\n", 1)[0] if earlier.startswith("Checked (") else ""
+            text = f"{checked}\n\n{payload['plan']}" if checked else str(payload["plan"])
+            spec.agent = {"text": clean_text(text, 3200), "run_id": runs[-1] if runs else None, "not_read": [],
                           "sources": [clean_text(str(x), 80) for x in payload.get("sources") or []][:6]}  # fmt: skip
         elif task.state == "failed":
             why = clean_text(str(payload.get("stopped") or "it stopped"), 160)
@@ -1232,6 +1374,34 @@ class Composer:
             spec.gist += f"the plan could not finish: {why}"
             spec.actions = [act("plan_fix", "Retry the plan") if a["id"] == "plan_fix" else a for a in spec.actions]
         return self._linked(spec, runs, changes) if runs else spec
+
+    def _plan_waits(self, spec: Spec, task: Task) -> Spec:
+        """A Plan a fix that a cap refused: nothing runs, so it is not In progress and offers no Stop. It is queued
+        (Coming up, at its retry time) with one statement of why and when it retries by itself, and Cancel. The words
+        are composed now from the stored reason code and retry time (never text an earlier version stored)."""
+        spec.source["plan"] = "waiting"
+        cancel = act("cancel", "Cancel the plan", "text")
+        blocked = task.payload.get("blocked") if isinstance(task.payload.get("blocked"), Mapping) else {}
+        retry_at = _parse(task.payload.get("retry_at")) or _parse(task.next_fire_at)
+        reason = str((blocked or {}).get("reason") or "")
+        if reason:
+            said = refusal_card(reason, str((blocked or {}).get("detail") or ""), now=self.now, tz=self.tz,
+                                retry_at=retry_at).text  # fmt: skip
+        else:
+            # Stored before 0.23.0 as text only: the reason is unknown, the retry time is not.
+            at = f" at {retry_at.astimezone(self.tz):%a %H:%M}" if retry_at is not None else ""
+            said = f"a usage limit held it. Retrying automatically{at}."
+        words = clean_text(f"Plan a fix queued: {said}", 300)
+        if self._asks(spec):
+            # The finding's own question stays; the queued plan is named beside it.
+            spec.gist = f"{spec.gist}; {words}" if spec.gist else words
+            spec.actions = [*(a for a in spec.actions if a["id"] != "plan_fix"), cancel]
+            return spec
+        spec.state, spec.need, spec.urgent, spec.pushes, spec.phase = "scheduled", None, False, False, None
+        spec.gist = words
+        spec.when = task.next_fire_at
+        spec.actions = [cancel]
+        return spec
 
     @staticmethod
     def _asks(spec: Spec) -> bool:
@@ -1273,14 +1443,18 @@ class Composer:
 
     def _maintenance(self, finding: maint.Finding, installed: str, at: str | None,
                      live: Mapping[str, dict[str, Any]]) -> Spec:  # fmt: skip
-        """A finding's item: every word but `agent` (the plan run's text) is the daemon's."""
+        """A finding's item: every word but `agent` (the plan run's text, the agent's verdict) is the daemon's."""
         store, ctx = self.store, self.ctx
         key = f"maint:{finding.key}"
         left = finding.left(installed)
         variant = finding.variant
         if variant == "deprecation":
             gist = "no removal date yet"
-            if left is not None:
+            if finding.minor_of is not None or (finding.signal == "notes" and finding.deadline is None
+                                                and finding.removal):  # fmt: skip
+                # Breaking changes of a release not installed yet: what changes, never "removed".
+                gist = f"changes with {finding.minor_of or finding.removal}, not installed yet"
+            elif left is not None:
                 due = "due with the next Core update" if left == 0 else f"{left} release{'s' if left != 1 else ''} left"
                 gist = f"removed in {finding.removal}, {due}"
             if finding.signal == "log":
@@ -1291,11 +1465,16 @@ class Composer:
             gist = "a suggestion"
         spec = Spec(key=key, kind="maintenance", title=ctx.redact(clean_text(finding.title(), 120)), state="proposed",
                     kicker=maint.VARIANTS[variant], gist=gist, created=at, as_of=at,
-                    source={"finding": finding.key}, pushes=False)  # fmt: skip
+                    source={"finding": finding.key, "fingerprint": finding.evidence}, pushes=False)  # fmt: skip
         spec.about = " ".join(f"{n}. {clean_text(s, 300)}" for n, s in enumerate(finding.steps[:5], 1)) or None
         facts = [("Affected", "; ".join(finding.affected[:8]))]
+        notes = [n for n in _list(finding.detail.get("notes")) if isinstance(n, Mapping)]
+        if notes:
+            # One fact per release-note item of the Core minor: Home Assistant's words, redacted.
+            facts += [(f"Breaking change ({n.get('domain') or 'Core'})", f"{n.get('title')}: {n.get('text')}")
+                      for n in notes[:8]]  # fmt: skip
         # A log line is anyone's text: it is shown only as untrusted text under `agent`, never as a fact.
-        if finding.quote and finding.signal != "log":
+        elif finding.quote and finding.signal != "log":
             facts.append(("Home Assistant says" if finding.signal != "replacement" else "Evidence", finding.quote))
         for label in ("parity", "impact"):
             if finding.detail.get(label):
@@ -1313,6 +1492,19 @@ class Composer:
         if variant != "deprecation":
             spec.actions = finding_actions(finding, self.now)
             return spec
+        due_at = finding.deadline
+        if due_at is not None:
+            spec.source["deadline"] = _iso(due_at)
+        verdict = maint.verdict_of(store, finding)
+        if verdict is not None and verdict.settled and verdict.reason:
+            words = {"not_affected": "not affected here", "fixable": "it can propose the fix",
+                     "needs_owner": "it needs you"}.get(verdict.verdict, verdict.verdict)  # fmt: skip
+            said = f"Checked ({words}): {verdict.reason}"
+            if verdict.evidence:
+                said += f" (read: {'; '.join(verdict.evidence[:4])})"
+            text = f"{said}\n\n{spec.agent['text']}" if spec.agent and spec.agent.get("text") else said
+            spec.agent = {"text": ctx.redact(clean_text(text, 3000)), "sources": ["the findings above"],
+                          "not_read": [], "run_id": None}  # fmt: skip
         proposal = maint.proposal_of(store, finding.key)
         if proposal is not None:
             spec.facts.append({"label": "Config change", "value": f"#{proposal['change']}: {proposal['state']}",
@@ -1320,8 +1512,11 @@ class Composer:
         result = maint.result_of(store, finding.key)
         board = maint.dashboard_plan(store, finding.key)
         bound = (board or {}).get("binding")
+        checking = maint.checking(store, finding)
         # Only a deadline close enough asks (Needs you); until then the finding and its one-tap fix are Coming up.
-        asks = finding.asks(installed, self.now)
+        # A finding without a deadline asks only when the agent's check says it needs the admin.
+        asks = not checking and (finding.asks(installed, self.now) or (
+            due_at is None and verdict is not None and verdict.verdict == "needs_owner"))  # fmt: skip
         start = finding.asks_at()
         if start is not None and start > self.now:
             spec.source["recheck_at"] = _iso(start)
@@ -1378,18 +1573,72 @@ class Composer:
             spec.gist = f"{gist}; config change #{proposal['change']} {ready}"
             spec.actions = finding_actions(finding, self.now, plan=False, dismiss=not asks)
             return spec
+        closed = self._checked(spec, finding, verdict, installed)
+        if closed is not None:
+            return closed
         # Never hidden while it asks: hiding only quiets an item that does not ask yet.
         spec.actions = finding_actions(finding, self.now, dismiss=not asks)
+        if checking:
+            spec.gist = f"{gist}; checking whether it affects this install"
         if asks:
-            token = f"left:{finding.removal}:{left}"
+            checked = verdict is not None and verdict.verdict == "needs_owner"
+            token = f"left:{finding.removal}:{left}" if due_at is not None else f"verdict:{finding.evidence}"
             if not acked(store, key, token):
-                text = (f"{finding.title()}: {gist}. Nothing here changes it by itself; the plan below says what to "
-                        "do. OK hides this until one release closer.")  # fmt: skip
+                said = (
+                    " The agent checked it and says it needs you; its reasons are under The agent says."
+                    if checked
+                    else " Nothing here changes it by itself; the plan below says what to do."
+                )
+                closer = ("OK hides this until one release closer." if due_at is not None
+                          else "OK hides this until its evidence changes.")  # fmt: skip
+                text = f"{finding.title()}: {gist}.{said} {closer}"
                 spec.state, spec.need = "waiting", need("ack", text, act("ack", "OK"))
                 # Plan or put off, never hidden while it asks (OK hides it until one release closer).
                 spec.actions = finding_actions(finding, self.now, dismiss=False)
                 spec.source["ack"] = token
                 spec.since, spec.pushes = at, True
+        return self._with_update(spec, finding)
+
+    def _checked(self, spec: Spec, finding: maint.Finding, verdict: verdicts.Verdict | None,
+                 installed: str) -> Spec | None:  # fmt: skip
+        """A finding the agent checked "not affected" (`opsd.verdicts`): closed, with the reason, in History and
+        reversible (Reopen); or only quieted to Coming up when the guards say so (a repair Home Assistant still
+        lists, a deadline within 14 days that only model text vouches for). None: it is composed as usual."""
+        guard = verdicts.guarded(domain=finding.domain, text=finding.title())
+        mode = verdicts.closes(verdict, guard=guard, listed=finding.signal == "repair", deadline=finding.deadline,
+                               now=self.now)  # fmt: skip
+        if mode == "none" or verdict is None:
+            return None
+        reason = self.ctx.redact(clean_text(verdict.reason, 200))
+        reopen = act("reopen", "Reopen", "text")
+        if mode == "quiet":
+            why = ("Home Assistant still lists the repair" if finding.signal == "repair"
+                   else "its deadline is close, so it stays listed")  # fmt: skip
+            spec.state, spec.need, spec.pushes = "proposed", None, False
+            spec.gist = f"checked: not affected here: {reason}; {why}"
+            spec.actions = [*finding_actions(finding, self.now, dismiss=True), reopen]
+            return spec
+        spec.state, spec.need, spec.pushes, spec.urgent = "done", None, False, False
+        spec.gist = f"checked: not affected here: {reason}"
+        spec.actions = [reopen]
+        spec.actor = "agent"
+        spec.since = verdict.at or None
+        spec.source.pop("recheck_at", None)
+        return spec
+
+    def _with_update(self, spec: Spec, finding: maint.Finding) -> Spec:
+        """A Core minor's breaking changes while a Core update into that minor is pending: the update's item is the
+        one item (it lists the notes as facts), so the finding follows it quietly, unless it asks by itself."""
+        target = maint.minor(finding.minor_of) if finding.minor_of else None
+        if target is None or spec.need is not None or spec.urgent:
+            return spec
+        for record in self.store.items_all(open_only=True, prefix="updates:"):
+            source = record.get("source") or {}
+            reached = maint.minor(source.get("version"))
+            if source.get("kind") == "core" and reached is not None and reached >= target:
+                spec.follows, spec.quiet, spec.pushes = str(record["key"]), True, False
+                spec.gist = f"{spec.gist}; shown on the Core update to {clean_text(str(source.get('version')), 20)}"
+                return spec
         return spec
 
     def follow(self, specs: list[Spec], parents: list[dict[str, Any]]) -> None:
@@ -1437,20 +1686,28 @@ class Composer:
 
 
 Send = Callable[[Message], Awaitable[str]]
+Clear = Callable[[str], Awaitable[str]]
 # Why a group no longer lists an item it wrote (each group's own words; an update says its reason itself).
 _GONE = {"health": ("done", "cleared: not reported by the latest health check"),
          "maint": ("done", "resolved: the latest maintenance scan no longer finds it")}  # fmt: skip
+LOG_GONE = "not new any more: this error is part of the baseline now; it is reported again if it grows tenfold"
 
 
 class ItemBook:
     def __init__(self, store: Store, hub: Hub, *, tz: Callable[[], tzinfo], context: Callable[[], Context],
-                 send: Send | None = None,
+                 send: Send | None = None, clear: Clear | None = None,
                  clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:  # fmt: skip
         self.store = store
         self.hub = hub
         self._tz = tz
         self._context = context
         self._send = send
+        # Withdraws a delivered push by its tag (Companion `clear_notification`); None: nothing is withdrawn.
+        self._clear = clear
+        # Tags to withdraw at the next `deliver` (items that left Needs you, a digest none of whose items waits).
+        self.clears: list[str] = []
+        # The digest decided and not sent yet: (item id, need) pairs and the local day.
+        self.digest: tuple[list[tuple[str, str]], str] | None = None
         self._clock = clock
         # (item id, the need it was decided for, the push): delivered only if the item still waits for that need.
         self.outbox: list[tuple[str, str, Message]] = []
@@ -1480,6 +1737,7 @@ class ItemBook:
         tasks: set[int] = set()
         maintenance = False
         forks = False
+        health = False
         for kind, ref in touched:
             if kind == "job":
                 job = self.store.update_job(int(ref))
@@ -1492,6 +1750,9 @@ class ItemBook:
             elif kind == "run":
                 updates = None
                 runs.add(int(ref))
+                # A good night resolves an earlier one aborted by a failure (`Composer._superseded`).
+                runs.update(int(r["id"]) for r in self.store.recent_update_runs(limit=30)
+                            if r.get("state") == "aborted")  # fmt: skip
             elif kind == "approval":
                 found = self.store.approval(str(ref))
                 subject = str((found or {}).get("subject") or "")
@@ -1523,6 +1784,12 @@ class ItemBook:
                 found = self.store.item(str(ref))
                 if found is not None:
                     self._note(found)
+                    if not found.get("needs") and (found.get("push") or {}).get("tag"):
+                        # A standalone item resolved at its source (a failed backup a later one superseded).
+                        self._withdraw(found)
+                        self.store.set_item_fields(str(found["id"]), push={})
+                    # A failed standalone backup is the item a `backup:run_failed` health item follows.
+                    health |= found.get("kind") == "backup"
             elif kind == "kv":
                 key = str(ref)
                 if key in _UPDATE_FLAGS or key.startswith(ABORT_FAILED_KEY):
@@ -1536,12 +1803,14 @@ class ItemBook:
                     changes.add(int(key.rsplit(":", 1)[1]))
                     # A plan-made change's failure may be carried on its finding: recompose it too.
                     maintenance = True
-                elif key.startswith((f"{ACK_KEY}maint:", _MAINTENANCE_STATE)):
+                elif key.startswith((f"{ACK_KEY}maint:", _MAINTENANCE_STATE, f"{verdicts.KEY}maint:")):
                     maintenance = True
+                elif key.startswith(f"{verdicts.KEY}health:"):
+                    health = True
                 elif key.startswith((f"{ACK_KEY}fork:", forkrebase.PROPOSAL_KEY)):
                     # A fork rebase a plan proposed is decided on its finding's item.
                     forks = maintenance = True
-        if not (updates is None or updates or runs or changes or facts or tasks or maintenance or forks):
+        if not (updates is None or updates or runs or changes or facts or tasks or maintenance or forks or health):
             return
         composer = self._composer()
         if updates is None or updates:
@@ -1558,6 +1827,8 @@ class ItemBook:
             self._safely("maint", partial(self._maintenance, composer))
         if forks:
             self._safely("fork", partial(self._forks, composer))
+        if health:
+            self._safely("health", partial(self._health, composer))
 
     def _forks(self, composer: Composer) -> None:
         for record in forkrebase.proposals(self.store):
@@ -1680,8 +1951,18 @@ class ItemBook:
         state, gist = _GONE[prefix]
         for old in self.store.items_all(open_only=True, prefix=f"{prefix}:"):
             if old["key"] not in listed:
-                reason = maint.fork_reason(self.store, old["key"].removeprefix("maint:")) if prefix == "maint" else None
-                self._write(self._resolved(old, state, reason or gist), old)
+                self._write(self._resolved(old, state, self._gone(prefix, str(old["key"])) or gist), old)
+
+    def _gone(self, prefix: str, key: str) -> str | None:
+        """A group's own reason for one item it no longer lists, when it has one (never a claim it cannot make)."""
+        if prefix == "maint":
+            return maint.gone_reason(self.store, key.removeprefix("maint:"))
+        if key.startswith("health:log:") and not key.endswith(":growth"):
+            # Its fingerprint joined the baseline: the error may well continue, so it is not "cleared".
+            return LOG_GONE
+        if key.startswith("health:update:"):
+            return "shown on its update's own item"
+        return None
 
     def _health(self, composer: Composer) -> None:
         specs = composer.health()
@@ -1694,6 +1975,9 @@ class ItemBook:
 
     def _maintenance(self, composer: Composer) -> None:
         self._group("maint", composer.maintenance())
+        if self.store.items_all(open_only=True, prefix="health:repair:"):
+            # A repair a finding now carries follows that finding (one item per cause).
+            self._safely("health", partial(self._health, composer))
         # A finding's open config change asks or waits with its finding's deadline.
         for row in self.store.changes(states=("open",), limit=50):
             if str(row.get("requested_by") or "").startswith(maint.PROPOSER):
@@ -1807,6 +2091,8 @@ class ItemBook:
             return None
         needs = in_needs(spec.state, spec.need)
         terminal = spec.state in TERMINAL
+        if old is not None and old["needs"] and not needs:
+            self._withdraw(old)
         revision = int(old["revision"]) + 1 if old else 1
         # A new record takes its source's own times; a change to a stored one is stamped now.
         needs_since: str | None = None
@@ -1889,32 +2175,99 @@ class ItemBook:
         source = record.get("source") or {}
         return stale and record["kind"] == "update" and not source.get("job") and not source.get("approval")
 
+    @staticmethod
+    def timely(record: Mapping[str, Any], now: datetime) -> bool:
+        """A need that pushes on its own (N1): urgent, a deadline within `TIMELY`, or an approval that gates tonight's
+        update window. Every other new need waits for the daily digest."""
+        source = record.get("source") or {}
+        if source.get("urgent") or source.get("push_now"):
+            return True
+        due = _parse(source.get("deadline"))
+        return due is not None and due - now <= TIMELY
+
+    def _due(self, record: Mapping[str, Any], now: datetime, stale: bool) -> str | None:
+        """What a record in Needs you is owed now: `push` (on its own), `digest`, `silent` (its source never pushes)
+        or None (nothing: pushed already, retried later, expired, pending, or a plan-only update before a fresh
+        plan)."""
+        if not record["needs"] or self._held(record, stale):
+            return None
+        source = record.get("source") or {}
+        current = record.get("need") or {}
+        key = self._push_key(record)
+        sent = record.get("push") or {}
+        last = _parse(sent.get("at"))
+        failed = _parse(sent.get("failed_at")) if sent.get("key") == key else None
+        limited = _parse(sent.get("limited_until")) if sent.get("key") == key else None
+        if limited is not None and now < limited:
+            # The daily push budget refused it: tried once more when the budget renews, never every cycle.
+            return None
+        new = sent.get("key") != key or last is None
+        resurface = not new and last is not None and bool(source.get("urgent")) and now - last >= RESURFACE
+        due = (new or resurface) and (failed is None or now - failed >= RETRY)
+        expires = _parse(current.get("expires_at"))
+        if not due or (expires is not None and expires <= now) or (str(record["id"]), key) in self._pending:
+            return None
+        if not source.get("pushes", True):
+            return "silent"
+        return "push" if self.timely(record, now) else "digest"
+
     def _decide_pushes(self, now: datetime) -> None:
-        """Queue a push for each item that entered Needs you (or waited a day). It is recorded as pushed only
-        once the channel delivered it (`deliver`), so a restart or a failure never loses it. A plan-only update
-        item waits for a fresh plan (`plan_stale`)."""
+        """Queue a push for each time-sensitive item that entered Needs you, and gather the rest into the daily digest.
+        Only an urgent item is pushed again while it waits (`RESURFACE`). It is recorded as pushed only once the
+        channel delivered it (`deliver`), so a restart or a failure never loses it. A plan-only update item waits for a
+        fresh plan (`plan_stale`)."""
         stale = self.plan_stale
+        digest: list[dict[str, Any]] = []
         for record in self.store.items_all(open_only=True):
-            if not record["needs"] or self._held(record, stale):
-                continue
-            source = record.get("source") or {}
-            current = record.get("need") or {}
-            key = self._push_key(record)
-            ident = str(record["id"])
-            sent = record.get("push") or {}
-            last = _parse(sent.get("at"))
-            failed = _parse(sent.get("failed_at")) if sent.get("key") == key else None
-            fresh = sent.get("key") != key or last is None or now - last >= RESURFACE
-            due = fresh and (failed is None or now - failed >= RETRY)
-            expires = _parse(current.get("expires_at"))
-            if not due or (expires is not None and expires <= now) or (ident, key) in self._pending:
-                continue
-            if not source.get("pushes", True):
+            owed = self._due(record, now, stale)
+            ident, key = str(record["id"]), self._push_key(record)
+            if owed == "silent":
                 # Nothing goes out for it (the health check's own items): decided once.
                 self.store.set_item_fields(ident, push={"key": key, "at": _iso(now)})
-                continue
-            self._pending.add((ident, key))
-            self.outbox.append((ident, key, self.message(record)))
+            elif owed == "digest":
+                digest.append(record)
+            elif owed == "push":
+                self._pending.add((ident, key))
+                self.outbox.append((ident, key, self.message(record)))
+        self._decide_digest(digest, now)
+
+    def _digest_state(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.store.kv_get(DIGEST_KEY) or "{}")
+        except StoreError, sqlite3.Error, ValueError:
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _decide_digest(self, records: list[dict[str, Any]], now: datetime) -> None:
+        """At most one digest a local day for the new needs that are not time-sensitive (N1a)."""
+        if not records or self.digest is not None:
+            return
+        state = self._digest_state()
+        today = now.astimezone(self._tz()).date().isoformat()
+        if state.get("day") == today and state.get("at"):
+            return
+        failed = _parse(state.get("failed_at"))
+        if failed is not None and now - failed < RETRY:
+            return
+        limited = _parse(state.get("limited_until"))
+        if limited is not None and now < limited:
+            # The daily push budget refused the digest: it goes out in the next allowed slot, not every cycle.
+            return
+        pairs = [(str(r["id"]), self._push_key(r)) for r in records]
+        self.digest = (pairs, today)
+
+    @classmethod
+    def digest_message(cls, records: list[dict[str, Any]]) -> Message:
+        """The daily digest: one item is its own push; several are one push with their titles (daemon words)."""
+        if len(records) == 1:
+            return cls.message(records[0])
+        names = [str((r.get("source") or {}).get("push_title") or r["title"])[:80] for r in records[:6]]
+        more = f" and {len(records) - 6} more" if len(records) > 6 else ""
+        body = f"Needs you: {'; '.join(names)}{more}. Open Home to see them."
+        if len(body) > PUSH_BODY:
+            body = body[: PUSH_BODY - 1].rstrip() + "…"
+        return Message(f"Ops Agent: {len(records)} things need you", body, tag=DIGEST_TAG,
+                       budget_class=BudgetClass.AGENT, url=panel_url())  # fmt: skip
 
     @staticmethod
     def message(record: Mapping[str, Any]) -> Message:
@@ -1937,9 +2290,20 @@ class ItemBook:
                        url=deep_link(str(record["id"])), thread_id=thread_of(record),
                        actions=(REPLY_ACTION,) if thread_of(record) else ())  # fmt: skip
 
+    @property
+    def due_out(self) -> bool:
+        """Something waits for `deliver`: a push, the digest or a withdrawal."""
+        return bool(self.outbox or self.digest is not None or self.clears)
+
+    def _withdraw(self, record: Mapping[str, Any]) -> None:
+        """An item whose delivered push carried its own tag left Needs you: withdraw that push (N1b)."""
+        tag = (record.get("push") or {}).get("tag")
+        if isinstance(tag, str) and tag == str(record["id"]) and tag not in self.clears:
+            self.clears.append(tag)
+
     async def deliver(self) -> list[str]:
         """Send the pushes `flush` and `tick` decided (quiet hours and caps apply in the daemon's send), then record the
-        outcome."""
+        outcome; then the daily digest; then withdraw the pushes of items that left Needs you."""
         outcomes = []
         queued, self.outbox = self.outbox, []
         latest = {ident: index for index, (ident, _, _) in enumerate(queued)}
@@ -1959,11 +2323,72 @@ class ItemBook:
                     outcome = "failed"
                 outcomes.append(outcome)
                 stamp = _iso(self._clock())
-                record = {"key": key, "at": stamp} if outcome in DELIVERED else {"key": key, "failed_at": stamp}
+                record = ({"key": key, "at": stamp, "tag": message.tag} if outcome in DELIVERED
+                          else {"key": key, "failed_at": stamp})  # fmt: skip
+                if outcome == RATE_LIMITED:
+                    record["limited_until"] = _iso(budget_renews(self._clock()))
                 self.store.set_item_fields(ident, push=record)
             finally:
                 self._pending.discard((ident, key))
+        digested = await self._deliver_digest()
+        if digested is not None:
+            outcomes.append(digested)
+        await self._deliver_clears()
         return outcomes
+
+    async def _deliver_digest(self) -> str | None:
+        decided, self.digest = self.digest, None
+        if decided is None or self._send is None:
+            return None
+        _, today = decided
+        # Gathered again now: needs written since the decision (another source's write) go out in the same digest.
+        now = self._clock()
+        stale = self.plan_stale
+        live = [r for r in self.store.items_all(open_only=True) if self._due(r, now, stale) == "digest"]
+        if not live:
+            return None
+        message = self.digest_message(live)
+        try:
+            outcome = await self._send(message)
+        except Exception:
+            _LOGGER.exception("digest push failed")
+            outcome = "failed"
+        now = self._clock()
+        stamp = _iso(now)
+        if outcome not in DELIVERED:
+            noted = {"failed_at": stamp}
+            if outcome == RATE_LIMITED:
+                noted["limited_until"] = _iso(budget_renews(now))
+                _LOGGER.info("digest held for the next push budget", extra={"until": noted["limited_until"]})
+            self.store.kv_set(DIGEST_KEY, json.dumps(self._digest_state() | noted), now=now)
+            return outcome
+        for current in live:
+            self.store.set_item_fields(str(current["id"]), push={"key": self._push_key(current), "at": stamp,
+                                                                 "tag": message.tag, "digest": True})  # fmt: skip
+        self.store.kv_set(DIGEST_KEY, json.dumps({"day": today, "at": stamp, "tag": message.tag,
+                                                  "ids": [str(r["id"]) for r in live]}), now=now)  # fmt: skip
+        _LOGGER.info("digest push", extra={"items": len(live), "outcome": outcome})
+        return outcome
+
+    async def _deliver_clears(self) -> None:
+        """Withdraw the pushes of items that left Needs you, and the digest once none of its items is there."""
+        state = self._digest_state()
+        if state.get("tag") == DIGEST_TAG and not state.get("cleared"):
+            ids = [str(i) for i in state.get("ids") or []]
+            if ids and not any((self.store.item(i) or {}).get("needs") for i in ids):
+                self.clears.append(DIGEST_TAG)
+                now = self._clock()
+                self.store.kv_set(DIGEST_KEY, json.dumps(state | {"cleared": _iso(now)}), now=now)
+        tags, self.clears = self.clears, []
+        if self._clear is None:
+            return
+        for tag in tags:
+            try:
+                outcome = await self._clear(tag)
+            except Exception:
+                _LOGGER.exception("push withdrawal failed", extra={"tag": tag})
+                continue
+            _LOGGER.info("push withdrawn", extra={"tag": tag, "outcome": outcome})
 
     # ------------------------------------------------------------------- reads
 

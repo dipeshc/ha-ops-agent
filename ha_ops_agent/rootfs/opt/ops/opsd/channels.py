@@ -178,6 +178,10 @@ class CompanionPush:
                 actions.append(companion_action(action_id, action))
         return self._notifier.send(self._push(message, tuple(actions)), core_up=core_up, now=now)
 
+    def clear(self, tag: str, *, core_up: bool) -> str:
+        """Withdraw a delivered push by its tag (the item id it carried, or the digest's)."""
+        return self._notifier.clear(tag, core_up=core_up)
+
     @staticmethod
     def _push(message: Message, actions: tuple[dict[str, Any], ...]) -> Push:
         return Push(

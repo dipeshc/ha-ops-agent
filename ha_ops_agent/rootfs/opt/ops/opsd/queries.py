@@ -117,8 +117,10 @@ def cmd_entities(ctx: ExecContext, args: Args) -> Any:
     if platform:
         reg = {e["entity_id"]: e for e in registry}
         rows = [
-            {"entity_id": s["entity_id"], "last_changed": s.get("last_changed"),
-             "state": "(private)" if privacy.refusal(s["entity_id"], reg.get(s["entity_id"])) else s.get("state")}
+            {"entity_id": s["entity_id"], "last_changed": s.get("last_changed"), "state": "(private)"}
+            if privacy.refusal(s["entity_id"], reg.get(s["entity_id"]))
+            # Its unit, device class and effect too: what a release note limited to some entities is decided by.
+            else privacy.describe(s, str(s["entity_id"]))
             for s in states
             if reg.get(s["entity_id"], {}).get("platform") == platform
         ]  # fmt: skip

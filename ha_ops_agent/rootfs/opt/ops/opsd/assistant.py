@@ -40,13 +40,14 @@ import asyncio
 import dataclasses
 import hashlib
 import logging
+import re
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
 
-from opsd import forkrebase, proposals
+from opsd import forkrebase, proposals, verdicts
 from opsd.activity import ActivityLog
 from opsd.capabilities import CAPABILITIES
 from opsd.channels import (
@@ -122,10 +123,15 @@ PLAN_FIX_BRIEF = (
     " the proposal rules allow it: then propose it, so it waits for his approval like any proposal. Where the fix"
     " is outside what you may propose (for example a custom integration's own code, an integration to replace, or"
     " anything in the UI), say so plainly, say that the admin or an engineering session must do it, and that he can"
-    " use Remind me on the item to come back to it."
+    " use Remind me on the item to come back to it. In the last step, also give your verdict on whether the item"
+    " really affects this install: not_affected (you checked and nothing here needs a change), fixable (you proposed"
+    " the fix), needs_owner (only the admin can do or decide it) or unknown, with the reason and what you read."
 )
 # A plan's text on its finding (the last step's findings).
 PLAN_CHARS = 3000
+# The admin's Plan a fix taps a day: their own allowance, apart from the investigations the agent starts in chat.
+PLAN_FIX_PER_DAY = 4
+PLAN_FIX_QUOTA = "cap:plan_fix"
 # Run ids an investigation keeps (its approval requests are voided if it is cancelled).
 MAX_RUN_IDS = 6
 INVESTIGATION_LIVE = ("queued", "running", "next", "waiting")
@@ -838,22 +844,27 @@ class Assistant:
             return f"{MAX_OPEN_INVESTIGATIONS} investigations are already open; try again later."
         if self.store.count_open_tasks("admin") >= MAX_OPEN_TASKS["admin"]:
             return "Too many open reminders and follow-ups; cancel some first."
-        quota = CAPABILITIES["task.investigate"].quota.per_day
         day = self._day(now)
-        if not self.store.bump(day, "cap:task.investigate", limit=quota or None):
-            return "Today's investigations are used up; try again tomorrow."
+        # The admin's own allowance: investigations the agent started in chat never use it up.
+        if not self.store.bump(day, PLAN_FIX_QUOTA, limit=PLAN_FIX_PER_DAY):
+            return f"Today's {PLAN_FIX_PER_DAY} plans are used up; try again tomorrow."
         title = clean_text(f"Plan a fix: {record.get('title') or 'maintenance item'}", MAX_TITLE_CHARS)
+        source = record.get("source") or {}
+        # Bound to the finding's evidence, not the item's revision (which the plan itself moves): the same tap the
+        # same day is a duplicate and gives its quota unit back.
+        fingerprint = str(source.get("fingerprint") or f"r{record.get('revision')}")[:32]
         task, created = self.store.create_task(
             kind="followup", title=title, owner="admin", created_by=f"panel:{user[:64]}", next_fire_at=now,
             payload={"investigation": True, "plan_fix": True, "note": PLAN_FIX_BRIEF, "max_steps": PLAN_FIX_STEPS,
                      "step": 0, "findings": [], "origin": str(Origin.ADMIN_CHAT), "user_id": user,
-                     "item": str(record["id"]), "started_at": now.isoformat(timespec="seconds")},
-            idempotency_key=f"plan_fix:{record['id']}:{record.get('revision')}:{now.date().isoformat()}", now=now,
+                     "item": str(record["id"]), "started_at": now.isoformat(timespec="seconds"),
+                     "finding": str(source.get("finding") or ""), "fingerprint": fingerprint},
+            idempotency_key=f"plan_fix:{record['id']}:{fingerprint}:{now.date().isoformat()}", now=now,
             thread_id=thread,
         )  # fmt: skip
         if not created:
-            # The same request again (same item, revision and day): the quota unit goes back.
-            self.store.unbump(day, "cap:task.investigate")
+            # The same request again (same item, evidence and day): the quota unit goes back.
+            self.store.unbump(day, PLAN_FIX_QUOTA)
             return "This fix was already planned today; the plan is on the item."
         self.audit("task.investigate", f"admin-chat:{user[:64]}", args={"task": task.id, "item": record["id"]},
                    outcome="accepted", detail="plan a fix (panel)")  # fmt: skip
@@ -1149,7 +1160,7 @@ class Assistant:
             outcome = await self.runner.run_agent(
                 INVESTIGATE, redactor.redact(prompt), principal=_principal(task), now=now, redactor=redactor,
                 thread_id=thread, generation=task.generation, wait_s=CHAT_WAIT_S,
-                cancelled=lambda: self._cancel_requested(task.id),
+                cancelled=lambda: self._cancel_requested(task.id), owner=bool(task.payload.get("plan_fix")),
             )  # fmt: skip
         finally:
             self._investigating.pop(thread, None)
@@ -1184,6 +1195,8 @@ class Assistant:
         noted = clean_text(redactor.redact(summary or reply), FINDINGS_CHARS)
         payload |= {"step": step, "waits": 0, "findings": [*earlier, noted][-MAX_FINDINGS:]}
         payload.pop("waiting", None)
+        payload.pop("retry_at", None)
+        payload.pop("blocked", None)
         self.note("investigation", f"Investigation step {step} of {of}: {task.title}", summary, ref={"task": task.id})
         self.audit("task.investigate", _principal(task).label(), args={"task": task.id, "step": step,
                    "run": outcome.context.run_id}, outcome="step", detail=summary)  # fmt: skip
@@ -1196,6 +1209,7 @@ class Assistant:
         if task.payload.get("plan_fix"):
             # The last step's findings are the plan: the finding shows them under The agent says.
             payload |= {"plan": clean_text(reply, PLAN_CHARS), "sources": list(run_meta.get("sources") or [])}
+            self._plan_verdict(task, run.structured, redactor, now)
         await self._end_investigation(task, card, "done", step, of, payload=payload)
         footer = sources_line(run_meta)
         record = self.record_of(thread)
@@ -1208,6 +1222,25 @@ class Assistant:
             thread, self.item_message(thread, title, f"{reply}\n\n{footer}" if footer else reply), what="investigation"
         )
 
+    def _plan_verdict(self, task: Task, structured: Any, redactor: Redactor, now: datetime) -> None:
+        """A plan's verdict is its finding's (`opsd.verdicts`, by `plan_fix`), for the fingerprint the item showed
+        when the plan started: a plan that concludes nothing is needed closes the finding until that evidence
+        changes."""
+        finding = str(task.payload.get("finding") or "")
+        fingerprint = str(task.payload.get("fingerprint") or "")
+        found = verdicts.answer(structured.get("verdict") if isinstance(structured, Mapping) else None)
+        if found is None or not re.fullmatch(r"[0-9a-f]{16}", finding) or not fingerprint:
+            return
+        verdict, reason, evidence = found
+        try:
+            verdicts.record(self.store, f"maint:{finding}", fingerprint=fingerprint, verdict=verdict,
+                            reason=redactor.redact(reason), evidence=[redactor.redact(e) for e in evidence],
+                            by="plan_fix", now=now)  # fmt: skip
+        except (StoreError, sqlite3.Error) as err:
+            _LOGGER.warning("plan verdict not kept", extra={"task": task.id, "error": str(err)[:160]})
+            return
+        _LOGGER.info("maintenance verdict", extra={"finding": finding, "verdict": verdict, "by": "plan_fix"})
+
     async def _investigation_blocked(  # noqa: PLR0917 - internal step of run_investigation
         self,
         task: Task,
@@ -1219,22 +1252,42 @@ class Assistant:
         of: int,
         now: datetime,
     ) -> None:
-        """A cap or control refused the step: wait for it to lift (a few times), then stop."""
+        """A cap or control refused the step: it waits for the block to lift and is retried then by itself (a few
+        times, at most a day ahead), then stops. One statement says why and when."""
         reason, detail = split_reason(status, error)
-        text = refusal_card(reason, detail, now=now, tz=self._tz()).text
         waits = int(payload.get("waits") or 0)
         hint = self._reset_hint(reason, detail, now)
         at = max(hint or now + INVESTIGATION_RETRY, now + STEP_GAP)
         if waits >= MAX_INVESTIGATION_WAITS or at - now > INVESTIGATION_MAX_WAIT:
+            text = refusal_card(reason, detail, now=now, tz=self._tz(), reset_at=hint).text
             await self._end_investigation(task, card, "failed", done, of, detail=text, payload=payload)
             return
         payload["waits"] = waits + 1
-        local = at.astimezone(self._tz()).strftime("%a %H:%M")
-        # Daemon words for the finding's state line while a plan waits.
-        payload["waiting"] = f"{text} Next try {local}."
+        # Daemon words for the finding's state line while a plan waits: the block, and the automatic retry.
+        text = refusal_card(reason, detail, now=now, tz=self._tz(), retry_at=at).text
+        payload["waiting"] = text
+        # The reason code: the finding's line is composed from it when shown, never from stored words.
+        payload["blocked"] = {"reason": reason, "detail": detail}
+        payload["retry_at"] = at.isoformat(timespec="seconds")
         self.store.reschedule(task.id, next_fire_at=at, now=now, payload=payload)
-        self._set_card(card, task, "waiting", done, of, detail=f"{text} Next try {local}.")
+        self._set_card(card, task, "waiting", done, of, detail=text)
         self.audit("task.investigate", "system", args={"task": task.id}, outcome="waiting", detail=status)
+
+    def cancel_queued_plan(self, item: str, reason: str) -> bool:
+        """A finding the agent checked "not affected" needs no plan: its queued Plan a fix (one a cap holds, so nothing
+        runs) is cancelled, the item's history says why, and the admin's Plan a fix allowance gets the tap back.
+        A plan already running is left to finish (its own verdict then decides)."""
+        task = self.store.plan_task(item)
+        record = self.store.item(item)
+        if task is None or task.state != "pending" or task.thread_id is None or record is None:
+            return False
+        if self.cancel_investigation(task.thread_id, task.id) != "ok":
+            return False
+        started = _parse(task.payload.get("started_at")) or datetime.now(UTC)
+        self.store.unbump(self._day(started), PLAN_FIX_QUOTA)
+        self.store.add_item_event(item, at=datetime.now(UTC), actor="daemon", text=f"Plan a fix cancelled: {reason}",
+                                  revision=int(record["revision"]))  # fmt: skip
+        return True
 
     def cancel_investigation(self, thread: str, task_id: int) -> str:
         """The admin's Cancel: `ok`, `not_found` or `not_open`. A running step is stopped at once."""

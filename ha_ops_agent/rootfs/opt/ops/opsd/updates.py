@@ -6,11 +6,14 @@ At the update window (default 04:00 local) the daemon:
    rule (`policy.classify`: a patch or minor that has soaked is AUTO). An
    AUTO candidate still asks when a version of it was held, when a repair
    names it (Core: one that breaks in the target version), or when Home
-   Assistant's own notes list a breaking change for an integration this
-   house uses (`opsd.evidence`, read-only; unreadable notes ask too), or
+   Assistant's own notes list a breaking change for an integration configured
+   here (`opsd.evidence`, read-only; unreadable notes ask too; a change that
+   names no integration never asks alone), or
    when its version reaches the removal of something this install still uses,
    named by a repair or the release notes (`maintenance.removal_block`; the maintenance scan runs first when its
-   last one is older than a day). A candidate whose release age is unknown
+   last one is older than a day). A hold by the notes alone is checked by the
+   isolated review run: a `not_affected` verdict for those exact notes
+   releases it (`opsd.verdicts`). A candidate whose release age is unknown
    waits (the soak-unknown hold, checked again every night) and asks only
    after `UNKNOWN_AGE_ASK_DAYS`, or when one of these checks touches it. A
    capability-free AI `update_review` run then reads the candidates'
@@ -74,7 +77,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
 
-from opsd import forkrebase, proposals, updatefix
+from opsd import forkrebase, proposals, updatefix, verdicts
 from opsd.approvals import ApprovalError, Approvals, approvable, is_fork, is_reboot
 from opsd.backups import wait_for_backup
 from opsd.baseline import honoured_expected
@@ -87,7 +90,7 @@ from opsd.conversation import clean_text, fence
 from opsd.evidence import EvidenceSource
 from opsd.health import Snapshot, parse_time
 from opsd.live import Hub
-from opsd.maintenance import removal_block
+from opsd.maintenance import minor, removal_block
 from opsd.policy import Bump, Decision, Tier, parse_version, same_version
 from opsd.profile import VersionGate
 from opsd.redact import Redactor
@@ -858,14 +861,52 @@ class UpdateManager:
             removes = self._removes(item)
             if block is None and removes is not None:
                 block = removes, None
+            checked: dict[str, Any] | None = None
             if block is None and notes and item.get("kind") == "core":
                 domains = domains if domains is not None else await self._domains()
                 block = await self._core_breaks(item, domains)
                 if block is not None and block[1] is None and unknown_age(item):
                     # Notes that could not be read touch nothing: the soak-unknown hold keeps waiting.
                     block = None
-            result.append(item if block is None else self._held_for_change(item, *block))
+                if block is not None and block[1] is not None:
+                    checked = self._notes_hold(item, block[1])
+                    if checked is None:
+                        # The isolated review checked these notes and found nothing here affected (U9a).
+                        block = None
+            if block is None:
+                result.append(item)
+                continue
+            held = self._held_for_change(item, *block)
+            if checked is not None and held.get("tier") == Tier.APPROVE and not held.get("fix"):
+                held = self._for_check(held, checked)
+            result.append(held)
         return result
+
+    def _notes_hold(self, item: Mapping[str, Any], needs: Mapping[str, Any]) -> dict[str, Any] | None:
+        """A notes-only hold (U9a): None when a `not_affected` verdict of the isolated review holds for these exact
+        notes (the hold is released), else what the review needs to check it (its cause and fingerprint)."""
+        target = minor(item.get("latest"))
+        if target is None:
+            return {}
+        cause = f"core:{target[0]}.{target[1]}"
+        fingerprint = str(needs.get("fingerprint") or "")
+        found = verdicts.current(self.store, cause, fingerprint)
+        if found is not None and found.by == "update_review" and found.verdict == "not_affected":
+            return None
+        return {"cause": cause, "fingerprint": fingerprint, "settled": found is not None and found.settled,
+                "before": {k: item.get(k) for k in ("tier", "reason", "waits")}}  # fmt: skip
+
+    def _for_check(self, held: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """A notes-only hold goes to the isolated review (U8) so it can be checked, also with git off; once it has a
+        verdict for these notes it is not sent again (no nightly run for the same question)."""
+        if not checked.get("cause"):
+            return held
+        held = held | {"notes_hold": checked}
+        if "needs_change" not in held and not checked.get("settled"):
+            needs = held.get("core_notes")
+            if isinstance(needs, Mapping):
+                held["needs_change"] = dict(needs)
+        return held
 
     def _held_for_change(self, item: dict[str, Any], why: str, needs: dict[str, Any] | None) -> dict[str, Any]:
         """An AUTO candidate that a repair or a breaking change touches. Its link to the config change it needs
@@ -881,6 +922,8 @@ class UpdateManager:
         if needs is not None and record is None and item.get("kind") == "core" and self.options.git_on:
             # The review may write the config change only where a proposal can carry it (git on).
             held["needs_change"] = needs
+        if needs is not None and item.get("kind") == "core":
+            held["core_notes"] = needs
         return held | ({"fix": record} if record is not None else {})
 
     def _removes(self, item: Mapping[str, Any]) -> str | None:
@@ -914,11 +957,11 @@ class UpdateManager:
         if not found.available:
             problem = clean_text("; ".join(found.problems[:1]), 120) or "unreadable"
             return f"Home Assistant's notes could not be read ({problem}), so it asks you", None
-        # A Core-wide change (no integration named) or a developer-blog notice can break the custom integrations
-        # the house profile names as fragile, so those count.
+        # Only an integration configured here counts (`domains`); a change that names none alone never holds a
+        # minor. A developer-blog notice can break the custom integrations the house profile names as fragile.
         custom = bool(domains & self.options.profile.updates.custom_domains)
         hits = [c for c in found.changes
-                if (c.kind in ("breaking", "removed") and (c.domain is None or c.domain in domains))
+                if (c.kind in ("breaking", "removed") and c.domain is not None and c.domain in domains)
                 or (c.kind == "devblog" and custom)]  # fmt: skip
         if not hits:
             return None
@@ -927,6 +970,7 @@ class UpdateManager:
         return why, {
             "domains": names,
             "notes": [f"{c.domain or 'core'}: {c.title}: {c.text} ({c.source})" for c in hits[:6]],
+            "fingerprint": verdicts.notes_fingerprint((c.kind, c.domain, c.title) for c in hits),
         }
 
     async def _apply_review(self, plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -963,6 +1007,7 @@ class UpdateManager:
                 structured = await self._review_batch(self._review, batch, cached)
                 if batch is fixable and structured is not None:
                     plan = await self._propose_fixes(plan, fixable, structured)
+                    plan = self._checked_notes(plan, fixable, structured)
         return apply_review(plan, cached)
 
     async def _review_batch(self, review: Callable[[str], Awaitable[RunResult]], batch: list[dict[str, Any]],
@@ -1013,7 +1058,7 @@ class UpdateManager:
             entity, version = str(item.get("entity_id")), str(item.get("latest"))
             fix = answers.get(entity) if entity in wanted else None
             edits = updatefix.parse_edits(fix.get("edits")) if isinstance(fix, Mapping) else []
-            if self._propose_fix is None or not edits or not isinstance(fix, Mapping):
+            if self._propose_fix is None or not self.options.git_on or not edits or not isinstance(fix, Mapping):
                 out.append(item)
                 continue
             domains = frozenset(str(d) for d in item["needs_change"].get("domains") or [])
@@ -1031,6 +1076,36 @@ class UpdateManager:
             out.append({k: v for k, v in item.items() if k != "needs_change"} | {
                 "fix": record, "waits": True, "reason": f"needs config change #{record['change']} first "
                                                          f"({item.get('reason')})"})  # fmt: skip
+        return out
+
+    def _checked_notes(self, plan: list[dict[str, Any]], asked: list[dict[str, Any]],
+                       structured: Any) -> list[dict[str, Any]]:  # fmt: skip
+        """The isolated review's verdict on a notes-only hold (U9a), kept for those exact notes (`opsd.verdicts`, by
+        `update_review`). `not_affected` releases the hold: the candidate is AUTO again with its own reason (it
+        still soaks, and tonight's review of it still applies). Any other verdict keeps the hold."""
+        wanted = {str(i["entity_id"]) for i in asked if isinstance(i.get("notes_hold"), Mapping)}
+        raw = structured.get("assessments") if isinstance(structured, Mapping) else None
+        answers = {str(a.get("entity_id")): a for a in raw or [] if isinstance(a, Mapping)}
+        now = self._clock()
+        out = []
+        for item in plan:
+            entity = str(item.get("entity_id"))
+            answer = answers.get(entity) if entity in wanted else None
+            check = item.get("notes_hold")
+            verdict = answer.get("verdict") if answer is not None else None
+            if not isinstance(check, Mapping) or not check.get("cause") or verdict not in verdicts.VERDICTS:
+                out.append(item)
+                continue
+            reason = clean_text(str((answer or {}).get("reason") or ""), 300) or "no reason given"
+            verdicts.record(self.store, str(check["cause"]), fingerprint=str(check.get("fingerprint") or ""),
+                            verdict=str(verdict), reason=reason, by="update_review", now=now)  # fmt: skip
+            self._audit("update.verdict", outcome=str(verdict), entity=entity, version=item.get("latest"))
+            if verdict != "not_affected" or item.get("fix"):
+                out.append(item)
+                continue
+            before = dict(check.get("before") or {})
+            dropped = ("needs_change", "notes_hold", "core_notes")
+            out.append({k: v for k, v in item.items() if k not in dropped} | before)
         return out
 
     def _cached_review(self, item: Mapping[str, Any]) -> dict[str, dict[str, Any]]:

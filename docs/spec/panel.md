@@ -165,7 +165,9 @@ The record behind Home, History and the item page
   in 30 / 90 days"), `remind_deadline` ("Remind me near the deadline",
   only while its deadline is more than 31 days away) and `dismiss` ("Hide
   until it changes", not while it asks); `plan_fix` is left out while a
-  config change answers it ([maintenance.md](maintenance.md) M14a). Test
+  config change answers it ([maintenance.md](maintenance.md) M14a). A
+  finding the agent checked "not affected" offers `reopen` ("Reopen",
+  M14d). Test
   `test_the_panel_applies_an_approved_dashboard_plan_end_to_end`.
 
 - N21. **Every item shown is actionable, and every item has a
@@ -280,7 +282,9 @@ All under `api/`, admin and ingress checks on every one, CSRF on every POST.
   revision and the `change.shown` hash it shows ([maintenance.md](maintenance.md)
   M14b), `remind_month`, `remind_quarter`,
   `remind_deadline` (an admin reminder about the item), `dismiss` (hide
-  the finding until its evidence changes), `reject` (drop the dashboard
+  the finding until its evidence changes), `reopen` (override the agent's
+  "not affected": the finding behaves as without a verdict until its
+  evidence changes), `reject` (drop the dashboard
   plan) and
   `apply_dashboard` (request the dashboard approval for the shown `change`
   and confirm it in the same request, as `approve_dashboard`; see

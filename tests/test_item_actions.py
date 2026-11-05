@@ -183,8 +183,10 @@ async def test_plan_a_fix_runs_on_the_finding_itself(h: Harness, local_ingress: 
         assert [a["id"] for a in running["actions"]] == ["stop"]
         assert d.store.item_by_key(f"task:{task.id}") is None
         assert [r["id"] for r in d.items.home()["running"]] == [item["id"]]
-        # One plan per item at a time, and the capability's daily quota counts it.
-        assert d.store.count(d.day(datetime.now(UTC)), "cap:task.investigate") == 1
+        # One plan per item at a time, and the admin's own Plan a fix allowance counts it (never the investigations
+        # the agent starts in chat).
+        today = d.day(datetime.now(UTC))
+        assert d.store.count(today, "cap:plan_fix") == 1 and d.store.count(today, "cap:task.investigate") == 0
         act = {"action": "plan_fix", "revision": running["revision"]}
         status, _, _again = await panel.request("POST", f"/api/items/{item['id']}/act", body=act)
         assert status == 409
@@ -209,6 +211,153 @@ async def test_plan_a_fix_runs_on_the_finding_itself(h: Harness, local_ingress: 
         assert "REPLY" in str(push["data"].get("actions"))
     finally:
         await panel.server.stop()
+
+
+async def test_a_plan_a_fix_verdict_closes_its_finding(h: Harness, local_ingress: None) -> None:  # noqa: F811
+    """A plan that concludes nothing is needed closes its finding (the verdict is the plan's, for the fingerprint the
+    item showed), and it stays closed; the same tap the same day stays a duplicate after the plan moved the
+    revision."""
+    far = Finding(key="aabbccddeeff0011", variant="deprecation", signal="notes", what=f"removed in {NOW.year + 1}.6",
+                  domain="acme_pump", removal=f"{NOW.year + 1}.6", named_removal=True,
+                  affected=["integration acme_pump"], sources=["src"], quote="Acme Pump: YAML removed")  # fmt: skip
+    d, panel = await started(h)
+    try:
+        assert d.store is not None and d.assistant is not None
+        store_findings(d.store, far)
+        await d.items_flush()
+        item = d.store.item_by_key(f"maint:{far.key}")
+        assert item is not None and item["source"]["fingerprint"] == far.evidence
+        act = {"action": "plan_fix", "revision": item["revision"]}
+        status, _, _body = await panel.request("POST", f"/api/items/{item['id']}/act", body=act)
+        assert status == 200
+        h.claude_reply = {"reply": "Nothing to change: acme_pump is set up from the UI here.", "summary": "s",
+                          "next": None, "verdict": {"verdict": "not_affected", "reason": "set up from the UI here",
+                                                    "evidence": ["configuration.yaml"]}}  # fmt: skip
+        for due in d.store.claim_due(datetime.now(UTC) + timedelta(seconds=1)):
+            await d.assistant.on_task_fired(due)
+        await d.assistant.drain()
+        await d.items_flush()
+        done = d.store.item(item["id"])
+        assert done is not None and done["state"] == "done"
+        assert done["gist"] == "checked: not affected here: set up from the UI here"
+        assert [a["id"] for a in done["actions"]] == ["reopen"]
+        # Reopened by the admin; planning it again today is the same request (its quota unit goes back).
+        status, _, body = await panel.request("POST", f"/api/items/{item['id']}/act",
+                                              body={"action": "reopen", "revision": done["revision"]})  # fmt: skip
+        assert status == 200 and body["item"]["state"] == "proposed"
+        again = {"action": "plan_fix", "revision": body["item"]["revision"]}
+        status, _, body = await panel.request("POST", f"/api/items/{item['id']}/act", body=again)
+        assert status == 409 and "already planned today" in body["message"]
+    finally:
+        await panel.server.stop()
+
+
+async def test_a_capped_plan_waits_queued_and_retries_by_itself(h: Harness, local_ingress: None) -> None:  # noqa: F811
+    """A Plan a fix that a cap refuses runs nothing: it is queued (not In progress, no Stop), says once why and when
+    it retries by itself, and offers Cancel."""
+    import dataclasses
+
+    d, panel = await started(h)
+    try:
+        assert d.store is not None and d.assistant is not None
+        caps = d.runner._caps()
+        d.runner._caps = lambda: dataclasses.replace(caps, profile_runs={**caps.profile_runs, "investigate": 0})
+        store_findings(d.store, SUGGESTION)
+        await d.items_flush()
+        item = d.store.item_by_key(f"maint:{SUGGESTION.key}")
+        assert item is not None
+        status, _, _body = await panel.request("POST", f"/api/items/{item['id']}/act",
+                                               body={"action": "plan_fix", "revision": item["revision"]})  # fmt: skip
+        assert status == 200
+        for due in d.store.claim_due(datetime.now(UTC) + timedelta(seconds=1)):
+            await d.assistant.on_task_fired(due)
+        await d.assistant.drain()
+        await d.items_flush()
+        queued = d.store.item(item["id"])
+        assert queued is not None and queued["state"] == "scheduled" and not queued["needs"]
+        assert [a["id"] for a in queued["actions"]] == ["cancel"] and queued["phase"] is None
+        gist = queued["gist"]
+        assert gist.startswith("Plan a fix queued: Today's limit for investigations and Plan a fix is reached")
+        assert "Retrying automatically at" in gist and "will not be retried" not in gist and "Next try" not in gist
+        [task] = d.store.open_investigations()
+        assert task.state == "pending" and task.next_fire_at is not None and task.next_fire_at == queued["at"]
+        cancel = {"action": "cancel", "revision": queued["revision"]}
+        status, _, _cancelled = await panel.request("POST", f"/api/items/{item['id']}/act", body=cancel)
+        assert status == 200 and d.store.open_investigations() == []
+    finally:
+        await panel.server.stop()
+
+
+async def test_a_not_affected_verdict_closes_a_finding_whose_plan_waits(h: Harness, local_ingress: None) -> None:  # noqa: F811
+    """A verdict closes the finding even while a capped Plan a fix waits for it; the queued plan is cancelled, the
+    item's history says why, and the admin's Plan a fix allowance gets the tap back."""
+    import dataclasses
+
+    from opsd import verdicts
+
+    far = Finding(key="aabbccddeeff0022", variant="deprecation", signal="notes", what=f"removed in {NOW.year + 1}.6",
+                  domain="acme_pump", removal=f"{NOW.year + 1}.6", named_removal=True,
+                  affected=["integration acme_pump"], sources=["src"], quote="Acme Pump: YAML removed")  # fmt: skip
+    d, panel = await started(h)
+    try:
+        assert d.store is not None and d.assistant is not None
+        caps = d.runner._caps()
+        d.runner._caps = lambda: dataclasses.replace(caps, profile_runs={**caps.profile_runs, "investigate": 0})
+        store_findings(d.store, far)
+        await d.items_flush()
+        item = d.store.item_by_key(f"maint:{far.key}")
+        assert item is not None
+        status, _, _body = await panel.request("POST", f"/api/items/{item['id']}/act",
+                                               body={"action": "plan_fix", "revision": item["revision"]})  # fmt: skip
+        assert status == 200
+        for due in d.store.claim_due(datetime.now(UTC) + timedelta(seconds=1)):
+            await d.assistant.on_task_fired(due)
+        await d.assistant.drain()
+        await d.items_flush()
+        queued = d.store.item(item["id"])
+        assert queued is not None and queued["state"] == "scheduled"
+        today = d.day(datetime.now(UTC))
+        assert d.store.count(today, "cap:plan_fix") == 1
+        verdicts.record(
+            d.store,
+            f"maint:{far.key}",
+            fingerprint=far.evidence,
+            verdict="not_affected",
+            reason="acme_pump is set up from the UI here",
+            by="maintenance_plan",
+            now=datetime.now(UTC),
+        )
+        await d.items_flush()
+        closed = d.store.item(item["id"])
+        assert closed is not None and closed["state"] == "done" and closed["gist"].startswith("checked: not affected")
+        assert d._cancel_queued_plan(item["id"], maintenance.NOTHING_TO_PLAN)
+        assert d.store.open_investigations() == [] and d.store.count(today, "cap:plan_fix") == 0
+        events = [e["text"] for e in d.store.item_events(item["id"])]
+        assert "Plan a fix cancelled: checked: not affected here, nothing to plan" in events
+        await d.items_flush()
+        assert d.store.item(item["id"])["state"] == "done"  # type: ignore[index]
+    finally:
+        await panel.server.stop()
+
+
+def test_a_waiting_plan_stored_before_0_23_is_worded_now(tmp_path: Path) -> None:
+    """A capped plan's line is composed when shown, from its reason code and retry time: text an earlier version
+    stored ("Today's limit for chat runs ... will not be retried automatically. Next try ...") is never shown."""
+    store = Store.open(tmp_path / "ops.db")
+    ItemBook(store, Hub(), tz=lambda: UTC, clock=lambda: NOW, context=lambda: Context(acting=True))
+    store_findings(store, SUGGESTION)
+    item = store.item_by_key(f"maint:{SUGGESTION.key}")
+    assert item is not None
+    retry = NOW + timedelta(hours=7)
+    old = "Today's limit for chat runs is reached. It will not be retried automatically. Next try Fri 00:00."
+    store.create_task(kind="followup", title="Plan a fix: x", owner="admin", created_by="panel:u", next_fire_at=retry,
+                      payload={"investigation": True, "plan_fix": True, "item": item["id"], "max_steps": 2,
+                               "step": 0, "waiting": old, "waits": 1}, thread_id=f"item:{item['id']}",
+                      idempotency_key="plan_fix:old", now=NOW)  # fmt: skip
+    gist = store.item(item["id"])["gist"]  # type: ignore[index]
+    assert "chat runs" not in gist and "will not be retried" not in gist and "Next try" not in gist
+    assert gist == f"Plan a fix queued: a usage limit held it. Retrying automatically at {retry:%a %H:%M}."
+    store.close()
 
 
 async def test_stop_on_a_running_plan_cancels_it(h: Harness, local_ingress: None) -> None:  # noqa: F811

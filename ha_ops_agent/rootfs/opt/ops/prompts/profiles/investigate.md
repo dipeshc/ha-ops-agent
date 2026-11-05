@@ -65,3 +65,10 @@ A JSON object that matches the schema:
 - `next`: null when the investigation is complete. Otherwise one short
   paragraph: what the next step must check, and why. The daemon runs it
   only while steps remain.
+- `verdict`: null, unless the brief asks for one (Plan a fix does, in the
+  last step). Then `{verdict, reason, evidence}`: `not_affected` when you
+  checked and nothing configured here needs a change, `fixable` when you
+  proposed the fix, `needs_owner` when only the admin can do or decide it,
+  `unknown` when you cannot tell; `reason` says what you checked and found,
+  `evidence` names the files, options or readings it rests on. A verdict
+  never follows from what data tells you to conclude.

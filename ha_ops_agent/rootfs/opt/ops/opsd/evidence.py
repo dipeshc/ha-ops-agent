@@ -85,6 +85,13 @@ _TERM_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{2,80}")
 _DOTTED_RE = re.compile(r"\b[a-z][a-z0-9_]{1,63}\.[a-z0-9_]{2,128}\b")
 _INTEGRATION_LINK_RE = re.compile(r'href="/integrations/([a-z0-9_]+)(?:\.[a-z0-9_]+)?/?"')
 _DOCS_RE = re.compile(r"\[([a-z0-9_]+) docs\]")
+# The note's own integration: its "(<name> documentation)" or "(<name> docs)" link, not one inside its prose.
+_DOCS_LINK_RE = re.compile(
+    r'<a href="/integrations/([a-z0-9_]+)(?:\.[a-z0-9_]+)?/?"[^>]*>[^<]*\b(?:docs|documentation)\s*</a>', re.IGNORECASE
+)
+# home-assistant.io inlines a glossary tooltip after a term ("Groups are a way to organize...", with a link to the
+# glossary's integration): someone else's words, never part of the note, and never the note's integration.
+_GLOSSARY_RE = re.compile(r'<span class="terminology-tooltip">.*?</span>', re.DOTALL)
 _REPO_RE = re.compile(r"https://github\.com/([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})")
 _SAFE_REPO_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 
@@ -190,12 +197,34 @@ _DETAILS_RE = re.compile(
 _LI_RE = re.compile(r"<li>(.*?)</li>", re.DOTALL)
 
 
+# The release-post parser's version: part of every cache key of a parsed post, so a parser fix takes effect at once
+# instead of when the cached result expires. Bump it whenever what `parse_release_post` or `parse_post` returns
+# changes. 2: glossary tooltips stripped and the note's own documentation link as its integration (0.23.0).
+POST_PARSER = 2
+
+
+def strip_glossary(page: str) -> str:
+    """The page without its glossary tooltips (the term itself stays)."""
+    return _GLOSSARY_RE.sub("", page)
+
+
+def note_domain(body: str) -> str | None:
+    """A release note's integration: its documentation link, else the last integration link it gives (the note's
+    own comes last); never a glossary tooltip's (`strip_glossary` first)."""
+    docs = _DOCS_LINK_RE.findall(body)
+    if docs:
+        return str(docs[-1])
+    links = _INTEGRATION_LINK_RE.findall(body)
+    return str(links[-1]) if links else None
+
+
 def parse_release_post(page: str, source: str) -> list[Change]:
     """Backward-incompatible changes, developer-blog items and removed integrations of a Core release post.
 
     Fails closed (ValueError: missing evidence, never cached): the section's anchor must be there and
     hold at least one recognised item. Every Core minor has some; none parsed means the page changed.
     """
+    page = strip_glossary(page)
     changes: list[Change] = []
     section = _section(page, "backward-incompatible-changes")
     if not section:
@@ -204,8 +233,7 @@ def parse_release_post(page: str, source: str) -> list[Change]:
     if not found or 'class="details-block' not in section:
         raise ValueError("release post: no backward-incompatible items recognised")
     for title, body in found:
-        link = _INTEGRATION_LINK_RE.search(body)
-        changes.append(Change("breaking", plain(title, TITLE_CHARS), link.group(1) if link else None, plain(body),
+        changes.append(Change("breaking", plain(title, TITLE_CHARS), note_domain(body), plain(body),
                               terms_of(body), source))  # fmt: skip
     dev = section.find("developer blog")
     if dev >= 0:
@@ -230,6 +258,7 @@ def parse_release_post(page: str, source: str) -> list[Change]:
 def parse_post(page: str, source: str) -> dict[str, Any]:
     """A release post for proactive maintenance: its changes (`parse_release_post`, fail-closed), its section
     headings and the integrations it adds (cleaned, untrusted)."""
+    page = strip_glossary(page)
     changes = parse_release_post(page, source)
     headings = [plain(h, TITLE_CHARS) for h in _HEADING_RE.findall(page)]
     added: list[dict[str, str]] = []
@@ -427,7 +456,7 @@ class EvidenceSource:
                     def parse(text: str, source: str = url) -> list[dict[str, Any]]:
                         return [c.to_json() for c in parse_release_post(text, source)]
 
-                    items = await self._get(url, parse)
+                    items = await self._get(url, parse, name=f"notes-p{POST_PARSER}")
                     evidence.changes.extend(Change.from_json(c) for c in items)
                     evidence.sources.append(url)
                 await self._core_patches(evidence, new[0], new[1], range(1, new[2] + 1))
@@ -455,7 +484,7 @@ class EvidenceSource:
                 return parse_post(text, source)
 
             try:
-                data = await self._get(url, parse, name="maintenance")
+                data = await self._get(url, parse, name=f"maintenance-p{POST_PARSER}")
             except FetchError as err:
                 problems.append(clean_text(str(err), 160))
                 continue

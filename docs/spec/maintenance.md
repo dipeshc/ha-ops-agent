@@ -91,9 +91,17 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   per scan (far behind, the newest win): backward-incompatible items, the developer-blog
   list and the farewell list. Only items of a post that is not installed yet,
   or that name a removal in a newer release, can be findings. An item counts
-  only when it is **relevant to this install** (M4a). A post without a
+  only when it is **relevant to this install** (M4a). The site's glossary
+  tooltips (`<span class="terminology-tooltip">`: "Groups are a way to
+  organize ...", with a link to the glossary's integration) are stripped
+  before anything is read, and a note's integration is its own
+  documentation link (else the last integration link it gives), never a
+  word or link of a tooltip. A parsed post is cached under a key that
+  carries the parser's version (`evidence.POST_PARSER`), so a parser fix
+  takes effect at the next scan, not when the cache expires (test
+  `test_a_parser_fix_takes_effect_over_a_cached_post`). A post without a
   recognised backward-incompatible section is a problem, never a guess, and
-  is never cached. Tests
+  is never cached. Tests `test_glossary_tooltips_never_reach_a_note_or_its_domain`,
   `test_repairs_logs_and_notes_become_deprecations_with_their_removal`,
   `test_the_post_parser_keeps_headings_and_new_integrations_and_fails_closed`,
   `test_an_unrecognised_post_is_a_problem_and_never_cached`.
@@ -183,7 +191,9 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   the installed add-ons. **Configured** (`configured`, M4a; also the update
   rule's house integrations, [updates.md](updates.md) U7) is the config-entry
   domains, the YAML integration keys and platforms and the custom
-  integrations, never the loaded components alone. Test
+  integrations, never the loaded components alone. A `platform:` line in an
+  automation, script or blueprint file names a trigger (`event`, `state`),
+  never an integration. Test
   `test_the_inventory_reads_what_the_install_uses`,
   `test_yaml_features_name_integration_keys_and_platforms`.
 - M9. **Readable files only.** The YAML read is the run copy's own list: the
@@ -299,7 +309,11 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   - no verdict yet, while a check is still possible: the finding does not
     ask; its gist adds "checking whether it affects this install";
   - `not_affected`: the finding is `done`, "checked: not affected here:
-    <reason>", in History with the reason under The agent says and a
+    <reason>", also while a Plan a fix waits for it; a Plan a fix only
+    queued for it (a cap holds it, nothing runs) is cancelled, the item's
+    history says "Plan a fix cancelled: checked: not affected here, nothing
+    to plan" and the admin's Plan a fix allowance gets the tap back (test
+    `test_a_not_affected_verdict_closes_a_finding_whose_plan_waits`); in History with the reason under The agent says and a
     **Reopen** action (`reopen`: the admin's own verdict, the finding
     behaves as without a verdict until its fingerprint changes);
   - `needs_owner`: it asks as M12 says (a finding without a deadline asks
@@ -368,9 +382,9 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   `test_remind_me_later_sets_a_reminder_about_the_item`.
 - M14b. **The plan lives on the finding.** "Plan a fix" makes no item of
   its own. While it runs (its task pending or running) the finding is
-  Running, without a need (unless the finding asks by itself, below), gist "planning a fix · step N of 2" (or
-  "planning a fix · waiting: <why>, next try <time>" while a cap holds a
-  step), with the phases "Read the evidence" and "Write the plan" (current
+  Running, without a need (unless the finding asks by itself, below), gist "planning a fix · step N of 2" (but
+  while a cap holds a step it is Scheduled instead, without Stop, as
+  [chat.md](chat.md) T17a says), with the phases "Read the evidence" and "Write the plan" (current
   the steps done, `started_at` the start, usually 4 minutes), a text that
   says it cannot change anything, and the one action **Stop** (`stop`,
   which cancels the pending step or kills the running one); a hidden
@@ -428,7 +442,13 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   at most `MAX_PLAN_ITEMS` (8) per scan, one
   `maintenance_plan` run reads the findings as fenced evidence: the daemon
   matched them, and the run first checks whether each really affects this
-  install (the config in its working directory), then plans. Each answer
+  install, then plans. It has the read capabilities for that (entities
+  with their platform, unit, device class and a light's effect via
+  `opsctl entities --platform`, config entries, repairs, logs) and the
+  config in its working directory; a Core-minor finding's notes are listed
+  one per line and decided one by one, and `unknown` is only for a note
+  nothing it can read decides. A note whose integration is not configured
+  never reaches it (M4a). Test `test_the_check_gets_what_decides_each_note`. Each answer
   carries `verdict`, `reason` and `evidence` (what it read); an answer for
   a finding that was not asked about is dropped. Its
   capabilities are the read `ha.core_compare` (`opsctl core-compare

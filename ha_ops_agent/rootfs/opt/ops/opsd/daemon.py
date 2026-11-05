@@ -25,7 +25,18 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from opsd import __version__, dashboards, forkrebase, inventory, maintenance, privsep, proposals, quiet, updatefix
+from opsd import (
+    __version__,
+    dashboards,
+    forkrebase,
+    inventory,
+    maintenance,
+    privsep,
+    proposals,
+    quiet,
+    updatefix,
+    verdicts,
+)
 from opsd.activity import ActivityLog
 from opsd.aicontrol import AiControl
 from opsd.api import CORE_WS_URL, LiveAPI, core_release_age_days, github_release_age_days
@@ -58,7 +69,7 @@ from opsd.evidence import EvidenceCache, EvidenceSource
 from opsd.gitops import GitBusyError, GitError, Repo
 from opsd.health import Snapshot, collect, custom_domains
 from opsd.inbound import EVENT_TYPE, AdminIdentity, InboundGate, admin_identity, is_active_admin
-from opsd.items import Context, ItemBook
+from opsd.items import ITEM_ID_RE, Context, ItemBook
 from opsd.jsonstore import append_jsonl, read_json, read_jsonl, write_json_atomic
 from opsd.live import Hub
 from opsd.lock import LockBusyError, run_lock
@@ -448,6 +459,7 @@ class Daemon:
                 propose=self._propose_maintenance if self.repo is not None else None,
                 publish=lambda: self.hub.publish("maintenance", None, {}),
                 fork_print=self._fork_print, fork_check=self._fork_check, fork_text=self._fork_text,
+                cancel_plan=self._cancel_queued_plan,
             )  # fmt: skip
             self.dashboards = dashboards.DashboardWriter(
                 store=self.store, options=options, approvals=Approvals(self.store), ws=self._ws_command,
@@ -466,6 +478,7 @@ class Daemon:
         if self.store is not None:
             self.items = ItemBook(
                 self.store, self.hub, tz=lambda: self.tz, context=self.items_context, send=self.send_now,
+                clear=self.clear_now,
             )  # fmt: skip
             self.items.on_change = self._items_changed
             if self.assistant is not None:
@@ -526,7 +539,7 @@ class Daemon:
         if self.items is None:
             return
         self._needs_changed()
-        if not self.items.outbox:
+        if not self.items.due_out:
             return
         try:
             task = asyncio.get_running_loop().create_task(self.items.deliver())
@@ -861,7 +874,13 @@ class Daemon:
             return None
         outcome = None
         for row in rows:
-            outcome = await asyncio.to_thread(self.channel.send, quiet.from_json(row["message"]),
+            message = quiet.from_json(row["message"])
+            if self._withdrawn(message):
+                # Its item left Needs you while the push waited for the morning: a stale push is worse than none.
+                # Settled (not listed as missed in the panel): there is nothing left to miss.
+                self.store.settle_held([int(row["id"])], to="delivered", outcome="withdrawn", now=now)
+                continue
+            outcome = await asyncio.to_thread(self.channel.send, message,
                                               core_up=self.state.core_down_since is None, now=now)  # fmt: skip
             if outcome == "failed":
                 break  # this one and the rest are tried again on the next liveness pass
@@ -869,6 +888,16 @@ class Daemon:
             self.store.settle_held([int(row["id"])], to=to, outcome=outcome, now=now)
         self.hub.publish("state", None, {})
         return outcome
+
+    def _withdrawn(self, message: Message) -> bool:
+        """A held item push whose item is no longer in Needs you (the tag is the item id)."""
+        if self.store is None or not ITEM_ID_RE.fullmatch(message.tag):
+            return False
+        try:
+            found = self.store.item(message.tag)
+        except StoreError, sqlite3.Error:
+            return False
+        return found is not None and not found.get("needs")
 
     def held_view(self, now: datetime) -> dict[str, Any] | None:
         """For the panel: how many pushes wait and until when; undelivered ones from the last day."""
@@ -885,6 +914,10 @@ class Daemon:
 
     async def send_now(self, message: Message) -> str:
         return await self.send(message, core_up=self.state.core_down_since is None, now=datetime.now(UTC))
+
+    async def clear_now(self, tag: str) -> str:
+        """Withdraw a delivered item push by its tag: outside quiet hours and the budgets (it only removes one)."""
+        return await asyncio.to_thread(self.channel.clear, tag, core_up=self.state.core_down_since is None)
 
     # EffectSink, for capability executors running inside an agent run.
     async def send_message(self, message: Message, *, reply: bool = True) -> str:
@@ -982,11 +1015,15 @@ class Daemon:
             early = Baseline.from_json(baseline.to_json())
             early.vacuum_rooms_seen = vacuum_rooms_seen(baseline, snapshot)
             write_json_atomic(self.paths.baseline_file, _unsent(early, pushed, pushed_outcome).to_json())
+        # Information (a new update version, the config repository's state) never starts a triage run: its items are
+        # shown, and the update has its own item.
+        info = [i for i in items if i.severity == "info"]
+        items = [i for i in items if i.severity != "info"]
         if not items:
             advanced = _unsent(advance(baseline, snapshot, now), pushed, pushed_outcome)
             write_json_atomic(self.paths.baseline_file, advanced.to_json())
             # Clear the panel's open items once whatever raised them has resolved.
-            self._save_open_items(pushed, now)
+            self._save_open_items([*info, *pushed], now)
             if pushed:
                 return self._finish(now, trigger, "ok", pushed, "; ".join(i.summary for i in pushed)[:600],
                                     notify=pushed_outcome, unacked=[i.key for i in pushed],
@@ -1014,7 +1051,7 @@ class Daemon:
             notify_outcome = "+".join(o for o in (notify_outcome, pushed_outcome) if o)
         # What the run acked is handled (shown resolved), not open: it never enters Needs you.
         handled = [_handled(by_key[k], baseline, "agent") for k in sorted(acked)]
-        self._save_open_items([*(i for i in items if i.key not in acked), *pushed], now, handled=handled)
+        self._save_open_items([*(i for i in items if i.key not in acked), *info, *pushed], now, handled=handled)
 
         summary = (
             triage.summary
@@ -1154,7 +1191,8 @@ class Daemon:
         effects = outcome.context.effects
         if run.status != "ok":
             return run, None, effects
-        triage = validate_result(run.structured)
+        triage = validate_result(run.structured, {i.key for i in items})
+        self._keep_verdicts(items, triage, now)
         if outcome.run_dir is not None:
             write_json_atomic(
                 outcome.run_dir / "result.json",
@@ -1166,6 +1204,21 @@ class Daemon:
                 },
             )
         return run, triage, effects
+
+    def _keep_verdicts(self, items: list[Item], triage: TriageResult, now: datetime) -> None:
+        """Triage's conclusions live on their items (`opsd.verdicts`, by `triage`), for each item's summary now."""
+        if self.store is None or not triage.verdicts:
+            return
+        by_key = {i.key: i for i in items}
+        try:
+            with self.store.atomic():
+                for key, (verdict, reason) in triage.verdicts.items():
+                    verdicts.record(self.store, f"health:{key}", verdict=verdict, reason=reason, by="triage", now=now,
+                                    fingerprint=verdicts.health_fingerprint(key, by_key[key].summary))  # fmt: skip
+        except (StoreError, sqlite3.Error) as err:
+            _LOGGER.warning("triage verdicts not kept", extra={"error": str(err)[:160]})
+            return
+        _LOGGER.info("triage verdicts", extra={"verdicts": {k: v[0] for k, v in triage.verdicts.items()}})
 
     def _finish(
         self,
@@ -1474,16 +1527,19 @@ class Daemon:
                                  run_config_check=False)  # fmt: skip
 
     async def _house_domains(self) -> frozenset[str]:
-        """The integrations this house uses: its config entries and Core's loaded components (both halves of a
-        `<platform>.<integration>` entry). Read-only; empty when either cannot be read (every Core candidate asks)."""
+        """The integrations configured here (`Inventory.configured`): the enabled config entries, the custom
+        integrations and the YAML integration keys and platforms the last maintenance scan read. Never a loaded
+        component's entity-platform half alone (`sensor`, `climate`, ...: loaded on every install). Read-only; empty
+        when the entries cannot be read (every Core candidate asks)."""
         async with LiveAPI(self.client) as api:
             entries = await api.ws("config_entries/get")
-            config = await api.core_rest("/config")
-        components = config.get("components") if isinstance(config, dict) else None
-        if not isinstance(entries, list) or not isinstance(components, list):
+        if not isinstance(entries, list):
             return frozenset()
         found = {str(e.get("domain")) for e in entries if isinstance(e, dict) and not e.get("disabled_by")}
-        found |= {part for c in components for part in str(c).split(".")}
+        found |= set(await asyncio.to_thread(custom_domains, self.paths.custom_components))
+        if self.store is not None:
+            scanned = maintenance.meta(self.store).get("configured")
+            found |= {str(d) for d in scanned} if isinstance(scanned, list) else set()
         return frozenset(d for d in found if d and d != "None")
 
     async def _propose_fix(self, item: Mapping[str, Any], domains: frozenset[str], why: str,
@@ -1616,6 +1672,9 @@ class Daemon:
         outcome = await self.runner.run_agent(MAINTENANCE_PLAN, redactor.redact(prompt), principal=AGENT_SELF,
                                               now=datetime.now(UTC), redactor=redactor, wait_s=600.0)  # fmt: skip
         return outcome.run
+
+    def _cancel_queued_plan(self, item: str, reason: str) -> bool:
+        return self.assistant is not None and self.assistant.cancel_queued_plan(item, reason)
 
     async def _maintenance_before_plan(self) -> None:
         if self.maintenance is not None and self.maintenance.due(before_update=True):

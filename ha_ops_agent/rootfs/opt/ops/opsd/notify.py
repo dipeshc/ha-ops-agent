@@ -71,6 +71,10 @@ class Push:
     url: str | None = None
 
 
+# The Companion app's command that removes the notification with the same tag.
+CLEAR_MESSAGE = "clear_notification"
+
+
 def slugify(value: str) -> str:
     return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", value.lower())).strip("_")
 
@@ -220,6 +224,28 @@ class Notifier:
             write_json_atomic(self._state_file, state)
         _LOGGER.info("push", extra={"outcome": outcome, "title": push.title, "urgent": push.urgent})
         return outcome
+
+    def clear(self, tag: str, *, core_up: bool) -> str:
+        """Withdraw the delivered push with this tag (Companion `clear_notification`): outside the daily budgets and
+        quiet hours, since it only removes something. Returns `sent`, `relayed` or `failed`. Never raises."""
+        if not self._service or self._blocked() is not None or not tag:
+            return "failed"
+        push = Push("", CLEAR_MESSAGE, tag=tag)
+        if core_up:
+            try:
+                self._call_service("notify", self._service, {"message": CLEAR_MESSAGE, "data": {"tag": tag}})
+                return "sent"
+            except Exception as err:  # noqa: BLE001 - fall through to the relay
+                _LOGGER.warning("core notify clear failed", extra={"error": str(err)[:200]})
+        registration = read_json(self._push_cache_file, None)
+        if not registration:
+            return "failed"
+        try:
+            self._relay(registration, push)
+        except (urllib.error.URLError, OSError, RuntimeError) as err:
+            _LOGGER.warning("relay clear failed", extra={"error": str(err)[:200]})
+            return "failed"
+        return "relayed"
 
     def cache_registration(self, config_entries_file: Path, user_id: str | None, device_id: str | None = None,
                            ) -> bool:  # fmt: skip

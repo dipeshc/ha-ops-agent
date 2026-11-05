@@ -18,12 +18,23 @@ decide.
      never accept a critical item. Only the admin can accept it, on its item
      in Needs you on Home.
    - Needs the admin (something you cannot handle, a physical task, a
-     decision, a security-relevant change): put it in the one push. Also
-     ack it for 1 to 3 days, so that the next check does not triage it
-     again.
-   - Not clear: do not ack it. The next check examines it again.
-3. Send one push or none for the whole run, and only when the admin must
-   act or decide. Give the reason class with `--reason`:
+     decision, a security-relevant change): give it the verdict
+     `needs_owner` with your reason. Do not ack it and do not push it: the
+     daemon keeps it in Needs you with your reason on its item and pushes
+     it itself.
+   - Not clear: do not ack it and give no verdict. The next check examines
+     it again.
+
+   For each item you investigated, add a verdict to `verdicts`: `{key,
+   verdict, reason}` with the exact key, `not_affected` (expected or
+   harmless here), `fixed` (you fixed it, for example with a reload) or
+   `needs_owner`, and one or two sentences: what you checked and what you
+   found. The reason is shown on the item, so make it the conclusion, not
+   the steps.
+3. Items you marked `needs_owner` are pushed by the daemon. Send a push
+   yourself only for something the admin must act on that is not one of
+   the items (at most one for the whole run). Give the reason class with
+   `--reason`:
    - `needs_action`: something you cannot handle that he must do or decide;
    - `physical_task`: a battery, power, re-pairing or anything hands-on;
    - `security`: a change that affects the house's security.
@@ -62,4 +73,5 @@ refused call changes nothing.
 ### Final answer
 
 End with one JSON object that matches the schema: `result` (`ok`,
-`escalated` or `failed`) and `summary` (one or two sentences).
+`escalated` or `failed`), `summary` (one or two sentences) and `verdicts`
+(one entry for each item you reached a conclusion on).

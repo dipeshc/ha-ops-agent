@@ -1,7 +1,10 @@
 """What this install uses, read-only: the inventory proactive maintenance matches notices against.
 
 - integrations: the domains of the enabled config entries, and Core's loaded components (both halves of
-  `<platform>.<integration>`), which include the ones set up in YAML;
+  `<platform>.<integration>`), which include the ones set up in YAML. What is **configured** here
+  (`configured`) is narrower: the config entries, the YAML integration keys and platforms and the custom
+  integrations. The entity-platform half of every loaded `<platform>.<integration>` (`sensor`, `climate`,
+  `group`, ...) is loaded on every install, so loading alone never counts;
 - YAML features: in the config files the agent may read (the tracked files when git is on, else the
   export's allowlist of files on disk, `privsep.disk_files`; never secrets, `.storage/` or hidden
   paths), the top-level integration keys of `configuration.yaml` and `packages/`, and every
@@ -35,6 +38,8 @@ MAX_REFS = 12
 _TOP_KEY_RE = re.compile(r"^([a-z_][a-z0-9_]{1,63}):", re.MULTILINE)
 _PLATFORM_RE = re.compile(r"^\s*-?\s*platform:\s*['\"]?([a-z0-9_]{2,64})['\"]?\s*(?:#.*)?$", re.MULTILINE)
 _DOMAIN_RE = re.compile(r"[a-z0-9_]{1,64}")
+# Files whose `platform:` lines are triggers: automations, scripts and blueprints.
+_TRIGGER_FILES_RE = re.compile(r"(?:automations?|scripts?|blueprints)(?:/|\.ya?ml$)")
 _PLUGIN_RE = re.compile(r"/(?:hacsfiles|local)/([A-Za-z0-9_.-]{1,80})/")
 _FILE_RE = re.compile(r"/([A-Za-z0-9_.-]{1,80})\.js\b")
 # Top-level keys of configuration.yaml that are Home Assistant's own structure, not integrations.
@@ -73,6 +78,14 @@ class Inventory:
     def uses(self, domain: str | None) -> bool:
         return bool(domain) and (domain in self.domains or domain in self.custom or domain in self.yaml_domains())
 
+    def configured_domains(self) -> frozenset[str]:
+        """The integrations set up here: config entries, YAML integration keys and platforms, custom ones."""
+        return frozenset(self.entry_domains | set(self.custom) | self.yaml_domains())
+
+    def configured(self, domain: str | None) -> bool:
+        """Whether `domain` is set up here (`configured_domains`); a loaded component alone is not."""
+        return bool(domain) and domain in self.configured_domains()
+
     def references(self, term: str, *, limit: int = MAX_REFS) -> list[str]:
         """Where a term is used: `<file>:<line>` in the readable YAML, and `dashboard <url_path>` for a card type."""
         if len(term) < 3:
@@ -98,11 +111,14 @@ class Inventory:
 
 
 def yaml_features(path: str, text: str) -> list[str]:
-    """The integration keys (configuration.yaml and packages only) and the platforms a YAML file names."""
+    """The integration keys (configuration.yaml and packages only) and the platforms a YAML file names. In an
+    automation, script or blueprint file `platform:` names a trigger (`state`, `event`, `time`), not an integration
+    set up here, so those files name none."""
     found: list[str] = []
     if path == "configuration.yaml" or path.startswith("packages/"):
         found += [k for k in _TOP_KEY_RE.findall(text) if k not in _STRUCTURE]
-    found += [f"platform:{p}" for p in _PLATFORM_RE.findall(text)]
+    if not _TRIGGER_FILES_RE.match(path):
+        found += [f"platform:{p}" for p in _PLATFORM_RE.findall(text)]
     return sorted(set(found))
 
 

@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
+from opsd.budget import DEFAULT_PROFILE_RUNS, OWNER_RESERVED_RUNS, PROFILE_WORDS, RUNS_PER_DAY
+
 AUTO_RETRY = frozenset({"usage_limited", "share_cap", "run_cap_reached", "account_busy", "skipped_busy",
                         "share_reserve", "cost_cap"})  # fmt: skip
 RETRY_BACKOFF: tuple[timedelta, ...] = tuple(timedelta(minutes=15 * 2**n) for n in range(6))
@@ -31,7 +33,7 @@ _TEXT: dict[str, str] = {
     "share_reserve": "Saving budget for monitoring: chat has used half of the agent's {window} run-time budget, and"
     " the rest is kept for health checks and update reviews.",
     "cost_cap": "Today's AI cost cap is reached.",
-    "run_cap_reached": "Today's limit for chat runs is reached.",
+    "run_cap_reached": "Today's limit for {runs} is reached ({cap} runs a day{kept}).",
     "usage_limited": "The AI provider reported a usage limit, so the agent is backing off.",
     "account_busy": "Your AI subscription is near its limit from other use, so the agent yields.",
     "skipped_busy": "The agent was busy with another run for too long.",
@@ -91,8 +93,11 @@ def refusal_card(
     template = _TEXT.get(reason)
     if template is None:
         return error_card(reason, now=now)
+    kept = OWNER_RESERVED_RUNS.get(detail, 0)
     text = template.format(window=_WINDOWS.get(detail, "subscription"), detail=detail.replace("_", " ") or reason,
-                           limit=limit)  # fmt: skip
+                           limit=limit, runs=PROFILE_WORDS.get(detail, "this kind of run"),
+                           cap=RUNS_PER_DAY.get(detail, DEFAULT_PROFILE_RUNS),
+                           kept=f", the last {kept} kept for your Plan a fix taps" if kept else "")  # fmt: skip
     actions: list[str] = []
     if reset_at is not None and reason != "ai_disabled":
         text += f" It resets about {_when(reset_at, now, tz)}."

@@ -103,6 +103,36 @@ def test_relay_fallback(tmp_path: Path) -> None:
     assert relays[0][0]["push_token"] == "tok"
 
 
+def test_a_withdrawal_clears_by_tag_outside_the_budget(tmp_path: Path) -> None:
+    """`clear_notification` with the push's tag, through the notify service (the relay while Core is down); it never
+    counts against the daily budget, which only limits what reaches the admin."""
+    calls: list[Any] = []
+    relays: list[Any] = []
+    n = make_notifier(tmp_path, calls, relays)
+    for i in range(3):
+        assert n.send(Push("t", f"m{i}"), core_up=True, now=NOW) == "sent"
+    assert n.clear("m-0123456789ab", core_up=True) == "sent"
+    assert calls[-1][2] == {"message": "clear_notification", "data": {"tag": "m-0123456789ab"}}
+    assert n.send(Push("t", "over"), core_up=True, now=NOW) == "rate_limited"
+    assert n.clear("", core_up=True) == "failed"
+    entries_file = tmp_path / "core.config_entries"
+    write_json(entries_file, ENTRIES)
+    assert n.cache_registration(entries_file, "u-admin", "d-admin")
+    assert n.clear("m-0123456789ab", core_up=False) == "relayed"
+    assert relays[-1][1].message == "clear_notification" and relays[-1][1].tag == "m-0123456789ab"
+
+
+def test_triage_verdicts_are_kept_only_for_keys_handed_to_the_run() -> None:
+    raw = {"result": "ok", "summary": "s", "verdicts": [
+        {"key": "entry:abc", "verdict": "needs_owner", "reason": "the hub lost power"},
+        {"key": "entry:abc", "verdict": "not_affected", "reason": "a second one for the same key"},
+        {"key": "entry:other", "verdict": "fixed", "reason": "not handed to the run"},
+        {"key": "log:abc", "verdict": "approve_it", "reason": "not a verdict"},
+        {"key": "log:def", "verdict": "fixed", "reason": ""}]}  # fmt: skip
+    found = validate_result(raw, {"entry:abc", "log:abc", "log:def"})
+    assert found.verdicts == {"entry:abc": ("needs_owner", "the hub lost power")}
+
+
 def items() -> list[Item]:
     return [
         Item(

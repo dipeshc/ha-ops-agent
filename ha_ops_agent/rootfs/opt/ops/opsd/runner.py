@@ -208,17 +208,21 @@ UPDATE_REVIEW = Profile(
     settings=lambda options: RunSettings(options.claude.model_standard, 6, min(0.5, options.limits.run_max_usd)),
 )
 
-# A plan for each new maintenance finding (opsd.maintenance) from its (fenced, untrusted) evidence. It may compare
-# a custom integration with Core's (read-only) and propose a fork rebase (the admin approves it): its answer is
-# advice shown as the agent's words, and the YAML or dashboard edits it suggests only become a proposal or a plan
-# the admin approves.
+# A check and a plan for each new maintenance finding (opsd.maintenance) from its (fenced, untrusted) evidence. It
+# reads what decides whether a note affects this install (entities with their platform, device class and effect,
+# config entries, repairs, logs; the config files in its working directory), may compare a custom integration with
+# Core's (read-only) and propose a fork rebase (the admin approves it): its answer is advice shown as the agent's
+# words, and the YAML or dashboard edits it suggests only become a proposal or a plan the admin approves.
+MAINTENANCE_PLAN_MAX_TURNS = 16
 MAINTENANCE_PLAN = Profile(
     name="maintenance_plan",
     prompt_file="profiles/maintenance_plan.md",
     schema_file="maintenance-plan.schema.json",
-    capabilities=NETWORK_READS | FORK_PROPOSALS,
+    capabilities=READ_CAPABILITIES | NETWORK_READS | FORK_PROPOSALS,
     budget_class=BudgetClass.AGENT,
-    settings=lambda options: RunSettings(options.claude.model_standard, 8, min(0.5, options.limits.run_max_usd)),
+    settings=lambda options: RunSettings(
+        options.claude.model_standard, MAINTENANCE_PLAN_MAX_TURNS, min(0.5, options.limits.run_max_usd)
+    ),
 )
 
 PROFILES: dict[str, Profile] = {
@@ -512,11 +516,13 @@ class AgentRunner:
         wait_s: float = 0.0,
         on_slot: Callable[[RunContext], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        owner: bool = False,
     ) -> RunOutcome:
         """`wait_s` > 0 waits that long for the single AI slot (chat waits for a triage).
 
         `on_slot` is called once the slot is held, before the preflight. `cancelled` is asked
-        then too: if it says so, nothing starts (status `cancelled`, nothing reserved).
+        then too: if it says so, nothing starts (status `cancelled`, nothing reserved). `owner`: the admin's own tap
+        (Plan a fix) may use the runs of the profile's cap kept for the admin (`budget.OWNER_RESERVED_RUNS`).
         """
         context = RunContext(
             profile=profile.name,
@@ -541,14 +547,21 @@ class AgentRunner:
             if cancelled is not None and cancelled():
                 outcome = RunOutcome(RunResult(status="cancelled", error="cancelled before it started"), context)
             else:
-                outcome = await self._run_locked(profile, prompt, context, now, redactor)
+                outcome = await self._run_locked(profile, prompt, context, now, redactor, owner=owner)
         finally:
             self.current = None
             self._slot.release()
         return outcome
 
     async def _run_locked(
-        self, profile: Profile, prompt: str, context: RunContext, now: datetime, redactor: Redactor
+        self,
+        profile: Profile,
+        prompt: str,
+        context: RunContext,
+        now: datetime,
+        redactor: Redactor,
+        *,
+        owner: bool = False,
     ) -> RunOutcome:
         refused = self.preflight(profile, now)
         if refused is not None:
@@ -563,7 +576,7 @@ class AgentRunner:
         reservation = store.reserve_run(
             run_id=context.run_id, profile=profile.name, budget_class=str(profile.budget_class),
             period=self._period(now), at=now, max_turns=settings.max_turns, budget_usd=settings.budget_usd,
-            caps=self._caps(),
+            caps=self._caps(), owner=owner,
         )  # fmt: skip
         if isinstance(reservation, str):
             _LOGGER.warning("run refused by usage cap", extra={"profile": profile.name, "reason": reservation})

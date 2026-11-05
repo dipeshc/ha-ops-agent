@@ -77,6 +77,14 @@
                 }
               }
             }
+          },
+          "verdict": {
+            "enum": [
+              "not_affected",
+              "fixable",
+              "needs_owner",
+              "unknown"
+            ]
           }
         }
       }

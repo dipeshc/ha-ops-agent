@@ -19,6 +19,8 @@ Everything that bounds the power lives here, in code, and fails closed:
 - At most one reload per domain every 10 minutes (persisted in the store's `kv`; a corrupt state refuses),
   on top of the capability's daily quota, which is only taken once every check passed.
 - Never while one of the integration's vacuums is cleaning, returning or paused.
+- Never an integration whose entries report `supports_unload: false`: Core cannot unload them, so a reload
+  leaves the entry `failed_unload` until Core restarts.
 - One overall deadline below the 120 s RPC timeout; a partial reload is reported.
 
 The domain is the only input. Entry ids are resolved here from Core, never taken from
@@ -219,6 +221,8 @@ async def plan(api: ReloadAPI, domain: str, allowed: Iterable[str], never: Itera
     ]
     if not entries:
         raise CapabilityError(f"no enabled config entry for {domain}")
+    if any(e.get("supports_unload") is False for e in entries):
+        raise CapabilityError(f"{domain} cannot be unloaded; a reload would leave it failed until Core restarts")
     registry = _require_list(await api.ws("config/entity_registry/list"), "entity registry")
     entities = _domain_entities(registry, domain, [str(e["entry_id"]) for e in entries])
     states = _states_map(await api.core_rest("/states"))

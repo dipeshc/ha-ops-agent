@@ -15,6 +15,7 @@ from opsd.claude_runner import RunConfig, RunResult
 from opsd.config import Paths
 from opsd.daemon import Daemon, fallback_push, next_run_at
 from opsd.jsonstore import read_json, read_jsonl, write_json_atomic
+from opsd.notify import CLEAR_MESSAGE
 from tests.conftest import FakeHA, make_options
 
 
@@ -100,7 +101,13 @@ class Harness:
         return daemon
 
     def pushes(self) -> list[dict[str, Any]]:
-        return [d for (dom, _, d) in self.client.services if dom == "notify"]
+        """The notifications sent (a withdrawal of one is `clears`)."""
+        return [d for (dom, _, d) in self.client.services if dom == "notify" and d.get("message") != CLEAR_MESSAGE]
+
+    def clears(self) -> list[str]:
+        """The tags of the notifications withdrawn (Companion `clear_notification`)."""
+        return [str(d["data"]["tag"]) for (dom, _, d) in self.client.services
+                if dom == "notify" and d.get("message") == CLEAR_MESSAGE]  # fmt: skip
 
 
 @pytest.fixture
@@ -933,3 +940,52 @@ async def test_the_item_tick_survives_a_failed_minute(h: Harness, monkeypatch: p
     monkeypatch.setattr(d, "items_now", lambda: ticks.append(1))
     await d.liveness_pass()
     assert ticks == [1]
+
+
+async def test_info_items_alone_never_start_triage(h: Harness) -> None:
+    """A new update version is information (the update has its own item): no triage run, no health item for it."""
+    await h.daemon().health_cycle("catch_up")
+    pushes = len(h.pushes())
+    update = next(s for s in h.fake.states if s["entity_id"] == "update.home_assistant_core_update")
+    update["attributes"]["latest_version"] = "2026.10.5"
+    d = h.daemon()
+    outcome = await d.health_cycle("daily")
+    assert outcome.result == "ok" and h.claude_calls == [] and len(h.pushes()) == pushes
+    keys = [i["key"] for i in read_json(h.paths.open_items_file, {}).get("items", [])]
+    assert any(k.startswith("update:") for k in keys)
+    assert d.store is not None and not d.store.items_all(prefix="health:update:")
+
+
+async def test_triage_verdicts_are_kept_on_their_items(h: Harness) -> None:
+    await h.daemon().health_cycle("catch_up")
+    h.fake.states.append({"entity_id": "light.garden", "state": "unavailable",
+                          "last_changed": "2026-01-01T00:00:00+00:00", "attributes": {}})  # fmt: skip
+    h.fake.registry.append({"entity_id": "light.garden", "platform": "zha", "config_entry_id": "zha1"})
+    h.claude_reply = {"result": "ok", "summary": "checked", "verdicts": [
+        {"key": "entities:zha", "verdict": "needs_owner", "reason": "the garden light lost power"},
+        {"key": "not:handed", "verdict": "not_affected", "reason": "a key the run was not given"}]}  # fmt: skip
+    d = h.daemon()
+    await d.health_cycle("daily")
+    assert d.store is not None
+    item = d.store.item_by_key("health:entities:zha")
+    assert item is not None and item["needs"] and "lost power" in item["agent"]["text"]
+    assert not d.store.kv_get("verdict:health:not:handed")
+
+
+async def test_a_held_push_whose_item_resolved_is_dropped(h: Harness) -> None:
+    from opsd.channels import Message
+
+    d = h.daemon()
+    assert d.store is not None and d.items is not None
+    record = {"id": "x-0123456789ab", "key": "x:held", "kind": "check", "title": "t", "state": "done", "gist": "",
+              "kicker": "",
+              "ref": "", "revision": 1, "need": None, "as_of": "2026-01-30T00:00:00+00:00",
+              "at": "2026-01-30T00:00:00+00:00", "created_at": "2026-01-30T00:00:00+00:00",
+              "updated_at": "2026-01-30T00:00:00+00:00", "resolved_at": "2026-01-30T00:00:00+00:00"}  # fmt: skip
+    d.store.put_item(record)
+    from opsd import quiet
+
+    d.store.hold_push(quiet.to_json(Message("t", "b", tag=record["id"])), title="t", now=datetime.now(UTC))
+    pushes = len(h.pushes())
+    await d.flush_held(datetime(2026, 1, 30, 12, 0, tzinfo=UTC))
+    assert len(h.pushes()) == pushes and d.store.held_pushes() == []

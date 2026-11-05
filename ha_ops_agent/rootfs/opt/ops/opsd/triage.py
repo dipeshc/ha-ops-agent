@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from opsd import verdicts
 from opsd.baseline import Item
 from opsd.conversation import fence
 from opsd.health import Snapshot
@@ -17,6 +18,8 @@ class TriageResult:
     result: str
     summary: str
     rejected: list[str] = field(default_factory=list)
+    # Health key -> (verdict, reason): the conclusion each item it investigated carries (`opsd.verdicts`).
+    verdicts: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def _detail(item: Item) -> str:
@@ -76,12 +79,21 @@ def _str(value: Any, limit: int) -> str:
     return value.strip()[:limit] if isinstance(value, str) else ""
 
 
-def validate_result(raw: dict[str, Any] | None) -> TriageResult:
-    """Never trust the model's JSON: the outcome and a clamped summary only.
+def validate_result(raw: dict[str, Any] | None, keys: set[str] | frozenset[str] = frozenset()) -> TriageResult:
+    """Never trust the model's JSON: the outcome, a clamped summary, and a verdict only for a key handed to the run
+    (`keys`), one each, at most `MAX_ITEMS_IN_PROMPT`.
 
     Acks, the push and the log entry are in-run capability calls (checked when they are made).
     """
     if not isinstance(raw, dict):
         return TriageResult(result="failed", summary="no structured result", rejected=["missing result"])
     outcome = raw.get("result") if raw.get("result") in ("ok", "escalated", "failed") else "failed"
-    return TriageResult(result=str(outcome), summary=_str(raw.get("summary"), 600))
+    found: dict[str, tuple[str, str]] = {}
+    entries = raw.get("verdicts")
+    for entry in entries[:MAX_ITEMS_IN_PROMPT] if isinstance(entries, list) else []:
+        key = entry.get("key") if isinstance(entry, dict) else None
+        checked = verdicts.answer(entry, allowed=verdicts.TRIAGE_VERDICTS)
+        if not isinstance(key, str) or key not in keys or key in found or checked is None:
+            continue
+        found[key] = (checked[0], checked[1])
+    return TriageResult(result=str(outcome), summary=_str(raw.get("summary"), 600), verdicts=found)

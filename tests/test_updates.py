@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 import yaml
 
+from opsd import verdicts
 from opsd.approvals import Approvals, approvable
 from opsd.capabilities import CAPABILITIES, RequestError, capability_table, cli_verbs, internal, parse_request
 from opsd.channels import Message
@@ -20,6 +21,7 @@ from opsd.evidence import Change, Evidence
 from opsd.health import Snapshot, addon_slug_from_unique_id, derive_updates, hacs_repo
 from opsd.items import Context, ItemBook, item_id
 from opsd.live import Hub
+from opsd.maintenance import Finding
 from opsd.policy import Bump, Decision, Tier, same_version
 from opsd.redact import Redactor
 from opsd.runner import CHAT, FOLLOWUP, PROFILES, TRIAGE
@@ -36,8 +38,8 @@ from opsd.updates import (
 )
 from opsd.updexec import ExecutorRefused, Executors, verify_backup
 from opsd.updiff import HealthPoint, compare
+from tests.conftest import GENERIC, make_options
 from tests.conftest import WATCHED as WATCHED_ENTITIES
-from tests.conftest import make_options
 from tests.test_changes import w  # noqa: F401
 from tests.test_panel import Panel, h, local_ingress, p  # noqa: F401
 
@@ -349,8 +351,15 @@ class Rig:
             self.sent.append(message)
             return "sent"
 
+        # The pushes withdrawn (Companion `clear_notification`), by tag.
+        self.cleared: list[str] = []
+
+        async def clear(tag: str) -> str:
+            self.cleared.append(tag)
+            return "sent"
+
         # The item book, as the daemon wires it: each write of a record writes its items, its pushes in `sent`.
-        self.book = ItemBook(self.store, self.hub, tz=lambda: UTC, context=self.context, send=push,
+        self.book = ItemBook(self.store, self.hub, tz=lambda: UTC, context=self.context, send=push, clear=clear,
                              clock=lambda: self.now)  # fmt: skip
         self.manager = self.build()
         # The daemon's start: the items that read the options.
@@ -539,14 +548,14 @@ async def test_observe_mode_plans_and_reports_without_backup_or_install(tmp_path
     assert "Needs you" in push.body and not push.urgent and [str(a.kind) for a in push.actions] == ["REPLY"]
     await rig.flush()
     assert len(rig.sent) == 1
-    # The next night with the same plan: the waiting item is re-surfaced once a day, with the same tag, so the
-    # phone replaces the earlier push. A new version of an AUTO candidate is a new Proposed item, never pushed.
+    # The next night with the same plan: the waiting item is not pushed again (only an urgent one re-surfaces).
+    # A new version of an AUTO candidate is a new Proposed item, never pushed.
     rig.ops.entities[CARD]["attributes"]["latest_version"] = "v1.16.14"
     rig.now += timedelta(days=1)
     assert (await rig.manager.run_window())["result"] == "reported"
     await rig.flush()
     assert rig.item(CARD, "v1.16.14")["state"] == "proposed" and rig.item(CARD, "v1.16.13")["state"] == "cancelled"
-    assert [m.tag for m in rig.sent] == [acme_weather["id"], acme_weather["id"]]
+    assert [m.tag for m in rig.sent] == [acme_weather["id"]]
     # The same window never runs twice (tasks fire at least once).
     assert (await rig.manager.run_window())["result"] == "already_ran"
     rig.store.close()
@@ -1618,13 +1627,18 @@ async def test_a_core_breaking_change_for_an_integration_the_house_uses_asks(rig
     assert len(rig.ops.installs()) == calls
 
 
-async def test_a_core_wide_breaking_change_asks(rig: Rig) -> None:
-    """A breaking change that names no integration can touch anything, so a Core update with one asks."""
+async def test_a_core_wide_note_alone_does_not_hold_a_minor(rig: Rig) -> None:
+    """A breaking change that names no integration says nothing about this install: alone it never holds a soaked
+    Core update (0.22 asked for every one, which made almost every minor ask). The entity-platform half of a loaded
+    component is not configured either."""
     only_auto(rig, CORE)
-    rig.evidence.changes = [Change("breaking", "YAML: anchors", None, "Anchors are no longer allowed.", (), "src")]
+    rig.evidence.changes = [
+        Change("breaking", "YAML: anchors", None, "Anchors are no longer allowed.", (), "src"),
+        Change("breaking", "Climate: presets", "climate", "Preset modes changed.", (), "src"),
+    ]
     await rig.manager.run_window()
     [core] = [i for i in rig.run()["plan"] if i["entity_id"] == CORE]
-    assert core["tier"] == "approve" and "breaking changes for Core" in core["reason"] and rig.ops.installs() == []
+    assert core["tier"] == "auto" and rig.ops.installs()[0][0] == "update_core"
 
 
 async def test_a_dev_blog_notice_asks_while_a_fragile_custom_integration_is_loaded(rig: Rig) -> None:
@@ -1935,3 +1949,117 @@ def test_the_macro_scan_never_follows_links_or_opens_special_files(tmp_path: Pat
     outside.write_text('alias: X\naction:\n  - action: "{{ x }}"\n')
     (tmp_path / "automations" / "link.yaml").symlink_to(outside)
     assert macro_consumer(tmp_path) == "automations/link.yaml could not be checked"
+
+
+# ------------------------------------------------------------------ checked holds (0.23.0)
+
+
+def notes_review(rig: Rig, verdict: str) -> None:
+    """A review that answers every candidate low risk, and the isolated run's notes-only hold with `verdict`."""
+
+    async def review(prompt: str) -> RunResult:
+        rig.reviews.append(prompt)
+        found = [{"entity_id": e, "risk": "low", "hold": False, "reason": "fine"} for e in rig.ops.entities
+                 if e in prompt]  # fmt: skip
+        if "<needs_change" in prompt:
+            found = [{"entity_id": CORE, "risk": "low", "hold": False, "verdict": verdict,
+                      "reason": "nothing here uses the legacy template syntax"}]  # fmt: skip
+        return RunResult(status="ok", structured={"summary": "s", "assessments": found})
+
+    rig.manager._review = review
+
+
+def git_off(rig: Rig) -> Rig:
+    """The same house without git proposals (the generic profile): no config change can be proposed."""
+    rig.options = make_options(strict=False, profile=GENERIC, agent__mode="act", updates__auto_install="on",
+                               updates__review=True, updates__hold_if_unreviewed=False)  # fmt: skip
+    assert not rig.options.git_on
+    rig.manager = rig.build()
+    return rig
+
+
+TEMPLATE_NOTE = Change("breaking", "Template: legacy", "template", "Legacy syntax removed.", (), "src")
+
+
+async def test_a_checked_notes_only_hold_is_released(tmp_path: Path) -> None:
+    """A Core update held only by Home Assistant's own notes goes to the isolated review, also with git off; a
+    `not_affected` verdict releases it (it installs as the AUTO update it was) and is kept for those notes."""
+    rig = git_off(Rig(tmp_path, updates__review=True))
+    only_auto(rig, CORE)
+    rig.evidence.changes = [TEMPLATE_NOTE]
+    notes_review(rig, "not_affected")
+    await rig.manager.run_window()
+    own = [r for r in rig.reviews if "<needs_change" in r]
+    assert len(own) == 1 and "Legacy syntax removed." in own[0]
+    assert ("update_core", "2026.10.4") in rig.ops.installs()
+    fingerprint = verdicts.notes_fingerprint([("breaking", "template", "Template: legacy")])
+    found = verdicts.current(rig.store, "core:2026.10", fingerprint)
+    assert found is not None and found.verdict == "not_affected" and found.by == "update_review"
+    rig.store.close()
+
+
+async def test_a_checked_hold_stays_released_and_needs_owner_keeps_it(tmp_path: Path) -> None:
+    rig = git_off(Rig(tmp_path, updates__review=True))
+    only_auto(rig, CORE)
+    rig.evidence.changes = [TEMPLATE_NOTE]
+    notes_review(rig, "needs_owner")
+    await rig.manager.run_window()
+    [core] = [i for i in rig.run()["plan"] if i["entity_id"] == CORE]
+    assert core["tier"] == "approve" and not any(i[0] == "update_core" for i in rig.ops.installs())
+    # The same notes are not sent to the review again the next night (one question, one answer).
+    reviews = len(rig.reviews)
+    rig.now += timedelta(days=1)
+    await rig.manager.run_window()
+    assert not any("<needs_change" in r for r in rig.reviews[reviews:])
+    # A remembered "not affected" for these notes releases the hold in every later plan (here "Plan now"),
+    # without a review.
+    fingerprint = verdicts.notes_fingerprint([("breaking", "template", "Template: legacy")])
+    verdicts.record(rig.store, "core:2026.10", fingerprint=fingerprint, verdict="not_affected", reason="r",
+                    by="update_review", now=rig.now)  # fmt: skip
+    assert (await rig.manager.run_window("manual"))["result"] == "reported"
+    [core] = [i for i in rig.run()["plan"] if i["entity_id"] == CORE]
+    assert core["tier"] == "auto"
+    # Another note is a new question: the hold is back.
+    rig.evidence.changes.append(Change("breaking", "Template: filters", "template", "A filter is renamed.", (), "s"))
+    assert (await rig.manager.run_window("manual"))["result"] == "reported"
+    [core] = [i for i in rig.run()["plan"] if i["entity_id"] == CORE]
+    assert core["tier"] == "approve"
+    rig.store.close()
+
+
+async def test_a_repair_or_removal_hold_is_never_released_by_a_verdict(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, updates__review=True)
+    only_auto(rig, CORE)
+    rig.repairs = {"template:deprecated_legacy": {"severity": "warning", "breaks_in_ha_version": "2026.10.0"}}
+    notes_review(rig, "not_affected")
+    await rig.manager.run_window()
+    [core] = [i for i in rig.run()["plan"] if i["entity_id"] == CORE]
+    assert core["tier"] == "approve" and "repair" in core["reason"] and rig.ops.installs() == []
+    rig.repairs = {}
+    removal = Finding(key="0123456789abcdef", variant="deprecation", signal="repair", what="x", domain="template",
+                      removal="2026.10")  # fmt: skip
+    rig.manager._removals = lambda: [removal]
+    verdicts.record(rig.store, "maint:0123456789abcdef", fingerprint=removal.evidence, verdict="not_affected",
+                    reason="r", by="plan_fix", now=rig.now)  # fmt: skip
+    rig.now += timedelta(days=1)
+    await rig.manager.run_window()
+    [core] = [i for i in rig.run()["plan"] if i["entity_id"] == CORE]
+    assert core["tier"] == "approve" and "removes something" in core["reason"] and rig.ops.installs() == []
+    rig.store.close()
+
+
+async def test_a_later_good_night_resolves_an_aborted_night(rig: Rig) -> None:
+    rig.ops.backup_error = ApiError("POST", "/backups/new/full", 400, "no space")
+    await rig.manager.run_window()
+    aborted = rig.run()
+    await rig.flush()
+    night = rig.store.item(item_id(f"window:{aborted['id']}"))
+    assert night is not None and night["needs"]
+    rig.ops.backup_error = None
+    rig.now += timedelta(days=1)
+    await rig.manager.run_window()
+    assert rig.run()["state"] == "done"
+    await rig.flush()
+    resolved = rig.store.item(night["id"])
+    assert resolved is not None and not resolved["needs"] and "a later night ran normally" in resolved["gist"]
+    assert night["id"] in rig.cleared

@@ -1,5 +1,98 @@
 # Changelog
 
+## 0.23.0
+
+The agent keeps you out of the loop unless it genuinely needs you. Anything
+that reaches you is relevant to this install, already checked, needs you
+specifically, resolves itself when it can, is one item per cause and is
+pushed only when it is time-sensitive. No store schema change (the store
+stays at schema 19); upgrading from 0.22.1 needs nothing, and existing
+options and house profiles stay valid.
+
+- **The agent never reloads an integration that cannot unload.** Core
+  reports `supports_unload: false` for some integrations (Google Cast, for
+  one); reloading one left its entry `failed_unload`, with its entities
+  unavailable, until Core restarted. Such a reload is now refused.
+- **Release notes are matched precisely.** A release-notes item counts only
+  for an integration that is configured here (a config entry, a YAML
+  integration key or platform, a custom integration). An integration that is
+  merely loaded (the `climate`, `event`, `group`, `sensor` halves of every
+  install) never counts, a `platform:` trigger in an automation configures
+  nothing, and a generic option name such as `entity_id` in your YAML is
+  never a reference.
+- **Only a named removal has a deadline.** A breaking change without a
+  removal version no longer gets an invented deadline ("removed in 2026.11,
+  1 release left"). The breaking changes of one Core release that touch this
+  install are one item, "Core <minor>: breaking changes for ...", with each
+  note as a fact and the gist "changes with <minor>". While a Core update
+  into that release is pending, its item carries the notes and is the one
+  item. Only a real removal holds a Core update back.
+- **The agent checks before it asks.** A repair or release-notes finding is
+  checked against your config by the agent first (the plan run, at most 8 a
+  run, cached until the evidence changes; Plan a fix gives a verdict too).
+  "Not affected" closes it with the reason, in History, until its evidence
+  changes; *Reopen* brings it back. "Needs you" puts it in Needs you with the
+  agent's reason. A check that cannot run (AI off, capped, failed) changes
+  nothing: the item asks as before. A verdict never closes a critical item,
+  access hardware, a lock or the alarm, a repair Home Assistant still lists
+  (it is only quieted), or anything with a deadline within 14 days.
+- **Triage's conclusion is on the item.** The triage run gives each health
+  item it investigated a verdict and reason. An item that needs you stays in
+  Needs you with that reason (and is pushed), instead of being snoozed with
+  the reason only in a push; a harmless warning is quieted to Coming up with
+  the reason. A new update version never starts a triage run and is no
+  separate health item.
+- **A Core update held only by its notes can be released.** The isolated
+  review run (Home Assistant's own notes only) checks such a hold, also with
+  git off; "not affected" releases it for those exact notes. A Core-wide note
+  alone no longer holds a minor. Repairs, removals and held versions are
+  never released this way.
+- **Pushes only for what is time-sensitive.** Urgent items, a deadline within
+  7 days and approvals for tonight's update window push on their own;
+  everything else new in Needs you reaches you in at most one digest push a
+  day. Only urgent items are pushed again while they wait. When an item
+  leaves Needs you its push is withdrawn from your phone
+  (`clear_notification`), and a push held for after quiet hours is dropped
+  if its item resolved meanwhile.
+- **Things that fix themselves stop asking.** A night aborted by a failure is
+  resolved by a later good night; a failed backup by a later good backup; a
+  rolled-back update asks only once, as the held version's approval with the
+  rollback as a fact. A health `log:` item no longer claims "cleared" when
+  its error joined the baseline.
+- **One item per cause.** A deprecation repair is its maintenance finding's
+  item (the health check's repair item follows it), and a failed backup's
+  health item follows the backup's own item.
+- **Stable fingerprints.** Plans, hiding and verdicts depend on what a finding
+  means (its change ids or repair, the removal, the files it names), never
+  on line numbers: an unrelated edit no longer re-opens a hidden finding or
+  re-runs its plan. Plan a fix tapped again the same day is still a
+  duplicate after the plan moved the item's revision.
+- **Clean release notes.** The release posts' glossary tooltips ("Groups are a
+  way to organize ...") are no longer read as part of a note, and a note's
+  integration is its own documentation link, not a glossary link.
+- **The check can decide.** The maintenance check reads entities with their
+  platform, device class and light effect, config entries and repairs, sees
+  a release's notes one per line and decides each; "unknown" is only for a
+  note nothing it can read decides.
+- **Plan a fix is the admin's own.** It has its own daily allowance, and 2 of
+  the 6 daily investigation runs are kept for it, so the agent's own runs
+  never use them up. A plan a limit holds is queued (no Stop), says once
+  which limit and when it retries, and retries by itself; a limit message
+  names the actual limit and count.
+- **Loose ends closed.** A "not affected" check closes its finding even while
+  a Plan a fix waits for it, and cancels that queued plan (the tap is given
+  back). A queued plan's line is worded when shown, never from text an
+  earlier version stored. Cached release posts are parsed again when the
+  parser changes.
+- **No push retries every cycle.** A push or digest the daily push budget
+  refuses is sent when the budget renews.
+- **Upgrading.** Findings an earlier version raised that the new rules no
+  longer raise resolve on the first scan with the reason ("<x> is not
+  configured here", "re-checked under the 0.23.0 rules: no removal is
+  named"), also when the release posts cannot be read, and their pushes are
+  withdrawn. A real removal an earlier version found keeps its item and its
+  acknowledgement.
+
 ## 0.22.1
 
 A small fix release. No store schema change (the store stays at schema 19);

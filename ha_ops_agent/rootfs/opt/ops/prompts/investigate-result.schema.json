@@ -1,10 +1,67 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["reply", "summary", "next"],
+  "required": [
+    "reply",
+    "summary",
+    "next"
+  ],
   "properties": {
-    "reply": { "type": "string", "maxLength": 1500 },
-    "summary": { "type": "string", "maxLength": 300 },
-    "next": { "anyOf": [{ "type": "null" }, { "type": "string", "maxLength": 600 }] }
+    "reply": {
+      "type": "string",
+      "maxLength": 1500
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 300
+    },
+    "next": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "maxLength": 600
+        }
+      ]
+    },
+    "verdict": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "verdict",
+            "reason"
+          ],
+          "properties": {
+            "verdict": {
+              "enum": [
+                "not_affected",
+                "fixable",
+                "needs_owner",
+                "unknown"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "evidence": {
+              "type": "array",
+              "maxItems": 6,
+              "items": {
+                "type": "string",
+                "maxLength": 120
+              }
+            }
+          }
+        }
+      ]
+    }
   }
 }

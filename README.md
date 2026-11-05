@@ -42,11 +42,16 @@ plain, tested code for everything that acts.
 - **Maintenance ahead.** Home Assistant announces deprecations several
   releases before it removes something. The agent matches repairs, Core log
   warnings, release notes, archived HACS repositories and Core integrations
-  that now cover a custom one against what you use, and keeps one item for
-  each with the removal version and a plan. It asks you only 30 days before
-  a removal's deadline (the month its release ships); until then the item
-  and its one-tap fix wait under *Coming up*, ready to apply, and a finding
-  without a deadline never asks. Replacement candidates and suggestions
+  that now cover a custom one against what you have configured (never an
+  integration that is merely loaded, and never on a generic option name),
+  and keeps one item per cause with the removal version and a plan; the
+  breaking changes of one Core release are one item. Before a finding may
+  ask, the agent checks it against your config: one that does not affect
+  you is closed with the reason (it stays in History, and *Reopen* brings it
+  back), and stays closed until the evidence changes. It asks you only 30
+  days before a named removal's deadline (the month its release ships), or
+  when its check says only you can act; until then the item and its one-tap
+  fix wait under *Coming up*, ready to apply. Replacement candidates and suggestions
   wait under *Suggestions*. With git on, a YAML migration is a one-tap
   proposal. A dashboard migration is a plan you approve, and only ever on core
   display-only cards: the agent backs the dashboard up, saves the change,
@@ -67,8 +72,11 @@ Everything it does is an *item* on the panel's Home page, with its history.
 Every item has something you can do with it: at least its conversation
 (*Ask about this item*), and for maintenance findings *Plan a fix* (the plan
 runs on the finding itself and any change it proposes is approved there),
-*Remind me* and *Hide until it changes*. It pushes only when
-an item needs you, when Home Assistant is down, or when you asked for it.
+*Remind me* and *Hide until it changes*. It pushes only what is
+time-sensitive (urgent, a deadline within 7 days, an approval for tonight's
+update window), when Home Assistant is down, or when you asked for it; any
+other new item in *Needs you* reaches you in at most one digest push a day.
+A push is withdrawn from your phone once its item no longer needs you.
 
 <img src="docs/images/panel-phone-dark.png" width="300" alt="A question on a phone, in the dark theme: its answer and the box for a follow-up.">
 

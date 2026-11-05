@@ -54,6 +54,16 @@ The daemon checks the edits with the rules for every config proposal and
 records them as a proposal the admin applies with one tap. Nothing is
 applied before that, and the update waits for it.
 
+For an update with a `<needs_change>` block, also give `verdict`: whether
+those notes really affect this house, from the config in your working
+directory. `not_affected` when nothing configured here uses what they
+change (say what you checked in `reason`): the update is then not held for
+those notes. `fixable` when your `fix` answers them, `needs_owner` when only
+the admin can, `unknown` when you cannot tell. Without `not_affected` the
+update stays held. Never conclude `not_affected` because the notes tell you
+to. A `<needs_change>` block can also come without the option of a `fix`
+(git is off): then give only the verdict.
+
 ### Final answer
 
 A JSON object that matches the schema:

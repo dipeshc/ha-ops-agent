@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- Synthetic test fixture: the release post of a Core minor not installed yet, with breaking changes for several
+     integrations and no removal version named; made-up integrations and text. Only two of them are configured on
+     the test install, and only one note names an option that install's config sets. -->
+<html><body>
+<h2><a class="title-link" name="whats-new" href="#whats-new"></a> What is new</h2>
+<p>Made-up highlights.</p>
+
+<h2><a class="title-link" name="backward-incompatible-changes" href="#backward-incompatible-changes"></a>
+Backward-incompatible changes</h2>
+<details class="details-block-item"><summary class="details-block-title"><span>Acme Cloudcam</span></summary>
+<div class="details-block-content"><p>The camera platform no longer accepts an <code>entity_id</code> under
+<code>stream</code>; set it on the entry instead.</p>
+<p>(<a href="/integrations/acme_cloudcam/">acme_cloudcam docs</a>)</p></div>
+</details>
+<details class="details-block-item"><summary class="details-block-title"><span>Acme Doorbell</span></summary>
+<div class="details-block-content"><p>Ring events now fire once per press, not once per chime.</p>
+<p>(<a href="/integrations/acme_doorbell/">acme_doorbell docs</a>)</p></div>
+</details>
+<details class="details-block-item"><summary class="details-block-title"><span>Climate</span></summary>
+<div class="details-block-content"><p>The <code>preset_modes</code> attribute is now always a list for every
+<code>entity_id</code>.</p>
+<p>(<a href="/integrations/climate/">climate docs</a>)</p></div>
+</details>
+<details class="details-block-item"><summary class="details-block-title"><span>Group</span></summary>
+<div class="details-block-content"><p>The <code>all_on</code> option of light groups changes its default.</p>
+<p>(<a href="/integrations/group/">group docs</a>)</p></div>
+</details>
+<details class="details-block-item"><summary class="details-block-title"><span>Acme Hub</span></summary>
+<div class="details-block-content"><p>The <code>legacy_polling</code> option is no longer read; polling now follows
+the device.</p>
+<p>(<a href="/integrations/acme_hub/">acme_hub docs</a>)</p></div>
+</details>
+<details class="details-block-item"><summary class="details-block-title"><span>Acme Zigbee</span></summary>
+<div class="details-block-content"><p>Each Acme Zigbee <span class="terminology">group<span class="terminology-tooltip">Groups
+are a way to organize your entities into a single unit.<a class="terminology-link" href="/integrations/group/"> [Learn
+more]</a></span></span> now reports its members in order. If <span class="terminology">automations<span class="terminology-tooltip">
+Automations in Home Assistant allow you to automatically respond to things that happen.<a class="terminology-link" href="/docs/automation/"> [Learn more]</a></span></span> use <code>acme_zigbee.members</code>, check
+the order.</p>
+<p>(<a href="https://github.com/example" rel="external nofollow">@example</a>) (<a href="/integrations/acme_zigbee/">Acme
+Zigbee documentation</a>)</p></div>
+</details>
+<details class="details-block-item"><summary class="details-block-title"><span>Acme TV</span></summary>
+<div class="details-block-content"><p>The source list of Acme TV players is sorted by name.</p>
+<p>(<a href="/integrations/acme_tv/">acme_tv docs</a>)</p></div>
+</details>
+</body></html>

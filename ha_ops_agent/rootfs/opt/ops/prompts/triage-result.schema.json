@@ -1,9 +1,51 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["result", "summary"],
+  "required": [
+    "result",
+    "summary"
+  ],
   "properties": {
-    "result": { "enum": ["ok", "escalated", "failed"] },
-    "summary": { "type": "string", "maxLength": 600 }
+    "result": {
+      "enum": [
+        "ok",
+        "escalated",
+        "failed"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 600
+    },
+    "verdicts": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "verdict",
+          "reason"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "verdict": {
+            "enum": [
+              "not_affected",
+              "fixed",
+              "needs_owner"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 300
+          }
+        }
+      }
+    }
   }
 }

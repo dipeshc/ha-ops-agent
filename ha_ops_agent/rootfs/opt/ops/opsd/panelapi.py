@@ -599,7 +599,8 @@ class PanelHandlers:
             # A proposal the finding's plan made is decided here: the same checks as on its own item, bound to the
             # revision and the diff hash the admin saw on the finding.
             return await self._act_linked(found, linked, action, user)
-        if action == "stop":
+        if action in ("stop", "cancel"):
+            # Stop a running plan, or cancel one that waits for a cap to lift.
             thread = thread_of(found)
             task = source.get("plan_task")
             if d.assistant is None or thread is None or not isinstance(task, int):
@@ -623,6 +624,9 @@ class PanelHandlers:
                                                                                 "message": outcome})  # fmt: skip
         if action == "dismiss":
             done = manager.hide(finding)
+        elif action == "reopen":
+            # The admin overrides the agent's "not affected": the finding behaves as without a verdict.
+            done = manager.reopen(finding)
         elif action == "reject":
             done = manager.reject_dashboard(finding)
         elif action == "apply_dashboard":

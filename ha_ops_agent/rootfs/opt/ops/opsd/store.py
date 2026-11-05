@@ -1682,6 +1682,7 @@ class Store:
         max_turns: int,
         budget_usd: float,
         caps: Caps,
+        owner: bool = False,
     ) -> Reservation | str:
         """Atomically reserve a run's usage: the reservation, or the cap that refused it.
 
@@ -1705,7 +1706,7 @@ class Store:
                 window = min(WINDOWS, key=lambda w: left[w])
                 return f"{'share_reserve' if user else 'share_cap'}:{window}"
             mine = self._usage(conn, "day = ? AND profile = ?", (period.day, profile))
-            if mine["runs"] >= caps.runs_for(profile):
+            if mine["runs"] >= caps.runs_for(profile, owner=owner):
                 return f"run_cap_reached:{profile}"
             if caps.daily_usd is not None:
                 spent = self._count(conn, period.day, COST_COUNTER) / USD_UNITS

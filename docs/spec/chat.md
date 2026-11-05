@@ -244,12 +244,24 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   investigation card, which then reads "Plan ready: it is above, under
   The agent says." (earlier steps' findings stay agent turns). It obeys T17's limits (one open investigation per
   conversation, two house-wide, the open-task cap) and counts against
-  `task.investigate`'s daily quota of 4 (the same item, finding fingerprint
+  its own daily allowance of 4 taps (`cap:plan_fix`, never
+  `task.investigate`'s quota, which the agent's chat investigations use; its
+  runs may use the 2 investigate runs kept for the admin, [budget.md](budget.md)
+  B1) (the same item, finding fingerprint
   and day again is a duplicate: no second run, the quota unit given back,
   even after the plan moved the item's revision); refused, the action
-  answers 409 with the reason. Tests
+  answers 409 with the reason. A step a cap refuses runs nothing: the
+  finding is Scheduled (never Running, no Stop) at its retry time, gist
+  "Plan a fix queued: <the limit>. Retrying automatically at <time>." (one
+  statement), with **Cancel the plan** (`cancel`); the step runs again by
+  itself when the limit resets (at most 3 waits, at most a day ahead). The
+  line is composed when shown from the stored reason code and retry time,
+  never from stored words (a plan an earlier version queued reads "Plan a
+  fix queued: a usage limit held it. Retrying automatically at <time>.").
+  Tests `test_a_waiting_plan_stored_before_0_23_is_worded_now`,
   `test_plan_a_fix_runs_on_the_finding_itself`,
-  `test_stop_on_a_running_plan_cancels_it`.
+  `test_stop_on_a_running_plan_cancels_it`,
+  `test_a_capped_plan_waits_queued_and_retries_by_itself`.
 - T17b. **A plan's verdict.** The last step of Plan a fix also answers
   `verdict` (`{verdict, reason, evidence}`, or null; every other
   investigation answers null). The daemon keeps it as the finding's verdict

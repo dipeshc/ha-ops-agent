@@ -61,7 +61,8 @@ def find(registry: Any, entity_id: str) -> Mapping[str, Any] | None:
 
 
 def describe(state: Any, entity_id: str) -> dict[str, Any]:
-    """The current state with the only attributes ever returned: unit and friendly name."""
+    """The current state with the only attributes ever returned: unit, friendly name, device class and a light's
+    effect (what a release note's "affects only X" is decided by)."""
     info: dict[str, Any] = {"entity_id": entity_id}
     if not isinstance(state, Mapping):
         return info
@@ -74,7 +75,12 @@ def describe(state: Any, entity_id: str) -> dict[str, Any]:
         return info
     raw = state.get("attributes")
     attrs: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
-    for key, name in (("unit_of_measurement", "unit"), ("friendly_name", "name")):
+    for key, name in (
+        ("unit_of_measurement", "unit"),
+        ("friendly_name", "name"),
+        ("device_class", "device_class"),
+        ("effect", "effect"),
+    ):
         value = attrs.get(key)
         if isinstance(value, str):
             info[name] = value[:80]

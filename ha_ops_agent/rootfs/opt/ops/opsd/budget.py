@@ -33,6 +33,13 @@ from opsd.config import Options
 WINDOW = timedelta(hours=5)
 RUNS_PER_DAY = {"triage": 6, "chat": 20, "followup": 3, "investigate": 6, "summary": 6, "update_review": 2}
 DEFAULT_PROFILE_RUNS = 3
+# Runs of a profile's daily cap that only the admin's own taps may use (Plan a fix): the agent's other runs of that
+# profile stop this many short, so they never starve what the admin asked for. The cap itself is unchanged.
+OWNER_RESERVED_RUNS = {"investigate": 2}
+# What a profile's runs are, in a refusal ("Today's limit for <these> is reached").
+PROFILE_WORDS = {"triage": "health triage runs", "chat": "chat runs", "followup": "follow-ups",
+                 "investigate": "investigations and Plan a fix", "summary": "conversation summaries",
+                 "update_review": "update reviews", "maintenance_plan": "maintenance checks"}  # fmt: skip
 
 SHARE_LIMIT = 0.05
 SHARE_RANGE = (0.5, 25.0)
@@ -109,8 +116,10 @@ class Caps:
     def seconds_for(self, profile: str) -> float:
         return self.reserve_seconds.get(profile, DEFAULT_RESERVE_SECONDS)
 
-    def runs_for(self, profile: str) -> int:
-        return self.profile_runs.get(profile, DEFAULT_PROFILE_RUNS)
+    def runs_for(self, profile: str, *, owner: bool = False) -> int:
+        """The profile's daily run cap; a run the admin did not ask for stops `OWNER_RESERVED_RUNS` short of it."""
+        cap = self.profile_runs.get(profile, DEFAULT_PROFILE_RUNS)
+        return cap if owner else max(0, cap - OWNER_RESERVED_RUNS.get(profile, 0))
 
     @classmethod
     def from_options(cls, options: Options, *, windows: bool = True) -> Caps:

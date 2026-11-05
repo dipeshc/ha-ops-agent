@@ -13,8 +13,16 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
 
 - B1. Daily run caps per profile: triage 6, chat 20, followup 3,
   investigate 6, summary 6, update_review 2 (others 3); refusal
-  `run_cap_reached:<profile>`. Chat messages are separately capped at 30 a
-  day. Tests `test_usage.py:99-143`, `test_chat_flood_is_capped`.
+  `run_cap_reached:<profile>`, whose card names the actual limit ("Today's
+  limit for investigations and Plan a fix is reached (6 runs a day, the
+  last 2 kept for your Plan a fix taps)"). Of the investigate cap, 2 runs
+  are kept for the admin's own Plan a fix taps (`OWNER_RESERVED_RUNS`):
+  other investigations stop at 4, a Plan a fix run may use all 6, so the
+  agent's runs never starve what the admin asked for and the cap, the
+  run-time budgets and the cost cap are unchanged. Chat messages are
+  separately capped at 30 a day. Tests `test_usage.py:99-143`,
+  `test_chat_flood_is_capped`,
+  `test_the_agents_investigations_never_use_the_runs_kept_for_plan_a_fix`.
 - B2. Per-run turn and cost caps come from the profile table in
   [ai-runner.md](ai-runner.md); the cost cap is passed to the provider on
   every run.

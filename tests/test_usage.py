@@ -681,3 +681,23 @@ async def test_one_websocket_carries_taps_and_the_switch(
     finally:
         for daemon in h.daemons:
             daemon.close()
+
+
+def test_the_agents_investigations_never_use_the_runs_kept_for_plan_a_fix(db: Store) -> None:
+    """The investigate cap (6) is unchanged; the agent's own investigations stop 2 short of it, so the admin's Plan a
+    fix taps always have runs left. The refusal names the actual limit."""
+    from opsd.chatcards import refusal_card
+
+    # No run-time windows (an API key), so only the run caps decide here.
+    caps = dataclasses.replace(Caps.from_options(Options()), windows=False)
+    for n in range(4):
+        assert not isinstance(reserve(db, caps, profile="investigate", run_id=f"inv{n}"), str)
+    assert reserve(db, caps, profile="investigate", run_id="inv4") == "run_cap_reached:investigate"
+    period = Period.at(NOW, UTC)
+    plans = [db.reserve_run(run_id=f"plan{n}", profile="investigate", budget_class="user", period=period, at=NOW,
+                            max_turns=15, budget_usd=0.5, caps=caps, owner=True) for n in range(3)]  # fmt: skip
+    assert [isinstance(p, str) for p in plans] == [False, False, True] and plans[2] == "run_cap_reached:investigate"
+    text = refusal_card("run_cap_reached", "investigate", now=NOW, tz=UTC).text
+    assert text.startswith("Today's limit for investigations and Plan a fix is reached (6 runs a day")
+    assert "chat runs" not in text
+    assert "20 runs a day" in refusal_card("run_cap_reached", "chat", now=NOW, tz=UTC).text

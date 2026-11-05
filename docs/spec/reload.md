@@ -44,8 +44,11 @@ the `integration.reload` row in `opsd/capabilities.py`. Tests:
   shade, curtain, awning or shutter, or a switch, button, valve or cover
   whose id or names match the access-word list (after discounting child
   locks, key locks and control panels); it is refused while any of the
-  domain's vacuums is cleaning, returning or paused; an odd reply fails
-  closed. Tests `test_a_domain_providing_a_lock_or_garage_cover_is_refused`,
+  domain's vacuums is cleaning, returning or paused; it is refused when any
+  of its entries reports `supports_unload: false`, because Core cannot
+  unload such an entry: the reload leaves it `failed_unload` (its entities
+  unavailable) until Core restarts; an odd reply fails
+  closed. Tests `test_an_integration_that_cannot_unload_is_never_reloaded`, `test_a_domain_providing_a_lock_or_garage_cover_is_refused`,
   `test_a_cover_without_a_safe_class_is_protected`,
   `test_switches_named_like_access_are_protected`,
   `test_a_room_named_garage_is_not_an_access_control`, `test_odd_replies_fail_closed`,

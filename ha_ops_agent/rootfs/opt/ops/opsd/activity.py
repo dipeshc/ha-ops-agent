@@ -87,6 +87,9 @@ def standalone(entry: dict[str, Any], *, needs_admin: bool) -> dict[str, Any]:
     return record
 
 
+SUPERSEDED = "resolved: a later backup succeeded"
+
+
 class ActivityLog:
     def __init__(self, store: Store, hub: Hub, *, post: Post | None = None,
                  clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -96,6 +99,23 @@ class ActivityLog:
         self._hub = hub
         self.post = post
         self._clock = clock
+
+    def _superseded_backups(self, now: datetime) -> None:
+        """A backup succeeded: an earlier failed backup that still asks is resolved by it (no acknowledgement). Its
+        push, if one went out, is withdrawn by the item book."""
+        at = now.astimezone(UTC).isoformat(timespec="seconds")
+        for record in self._store.items_all(open_only=True, prefix="activity:"):
+            if record.get("kind") != "backup" or not record.get("needs"):
+                continue
+            revision = int(record["revision"]) + 1
+            gist = f"{record.get('gist')}; {SUPERSEDED}" if record.get("gist") else SUPERSEDED
+            state = "failed" if record["state"] == "failed" else "done"
+            self._store.put_item(dict(record) | {"state": state, "need": None, "needs_since": None,
+                                                 "gist": clean_text(gist, 300), "revision": revision,
+                                                 "updated_at": at, "resolved_at": record.get("resolved_at") or at,
+                                                 "at": record.get("resolved_at") or at})  # fmt: skip
+            self._store.add_item_event(str(record["id"]), at=now, actor="daemon", text=f"Done: {SUPERSEDED}",
+                                       revision=revision)  # fmt: skip
 
     def record(
         self,
@@ -130,6 +150,8 @@ class ActivityLog:
             else:
                 standalone_item = standalone(entry, needs_admin=needs_admin)
                 with self._store.atomic():
+                    if kind == "backup" and not needs_admin:
+                        self._superseded_backups(now)
                     self._store.put_item(standalone_item)
                     self._store.add_item_event(standalone_item["id"], at=now,
                                                actor="agent" if kind in AGENT_TEXT else "daemon",

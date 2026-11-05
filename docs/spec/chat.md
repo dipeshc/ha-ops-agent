@@ -244,8 +244,17 @@ requests), `opsd/chatcards.py`, `opsd/events.py`. Tests:
   investigation card, which then reads "Plan ready: it is above, under
   The agent says." (earlier steps' findings stay agent turns). It obeys T17's limits (one open investigation per
   conversation, two house-wide, the open-task cap) and counts against
-  `task.investigate`'s daily quota of 4 (the same item, revision and day
-  again is a duplicate: no second run, the quota unit given back); refused,
-  the action answers 409 with the reason. Tests
+  `task.investigate`'s daily quota of 4 (the same item, finding fingerprint
+  and day again is a duplicate: no second run, the quota unit given back,
+  even after the plan moved the item's revision); refused, the action
+  answers 409 with the reason. Tests
   `test_plan_a_fix_runs_on_the_finding_itself`,
   `test_stop_on_a_running_plan_cancels_it`.
+- T17b. **A plan's verdict.** The last step of Plan a fix also answers
+  `verdict` (`{verdict, reason, evidence}`, or null; every other
+  investigation answers null). The daemon keeps it as the finding's verdict
+  ([maintenance.md](maintenance.md) M14d) for the fingerprint the item
+  showed when the plan started, by `plan_fix`: a plan that concludes
+  nothing is needed (`not_affected`) closes the finding (within the
+  guards) and it stays closed until the fingerprint changes. Test
+  `test_a_not_affected_plan_closes_the_finding_and_is_remembered`.

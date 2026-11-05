@@ -145,6 +145,11 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   is never set false by advancing, accepted exposures and accepted access
   hardware are intersected with the current ones (access hardware that
   recovers and goes down again is reported again), expired acks are removed.
+  A new log fingerprint is therefore reported once: its item then leaves
+  with "not new any more: this error is part of the baseline now; it is
+  reported again if it grows tenfold", never "cleared", because the error
+  may continue ([items-and-pushes.md](items-and-pushes.md) I5a). Test
+  `test_a_new_log_error_is_not_cleared_while_it_continues`.
 - H13. Acks: days are clamped to 1..30. A critical item acked by anyone but
   the admin is a snooze of at most 3 days, never an accept; a warning snooze
   by the AI is at most 7 days. The panel's `accept` (30 days) and `snooze`
@@ -169,10 +174,12 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 
 ## Triage
 
-- H14. The AI runs only when items remain after suppression and after
-  removing kinds the daemon pushes itself. No items: the baseline advances,
-  the result is "No changes since baseline.", no push. Test
-  `test_daemon.py:114-124`.
+- H14. The AI runs only when warning or critical items remain after
+  suppression and after removing kinds the daemon pushes itself; info items
+  (`update:`, `git:`) never start a run and are not in its prompt. No such
+  items: the baseline advances, the open items are saved, the result is "No
+  changes since baseline." (or the info items' summary), no push. Tests
+  `test_daemon.py:114-124`, `test_info_items_alone_never_start_triage`.
 - H15. The prompt holds at most 40 items (critical first), each with key,
   summary and detail (700 characters) fenced as data, plus versions, memory,
   newest complete backup, unavailable count, git state, failed sources and
@@ -185,8 +192,21 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   admin must act or decide: something it cannot handle, a physical task or
   a security-relevant change, given as the push's `reason` class; anything
   for information is a History note (`--reason note`), and a call without
-  a valid reason is refused (capabilities.md K11). Its result is `{result: ok|escalated|failed, summary}`;
-  an unknown result is `failed`. At most 6 triage runs a day.
+  a valid reason is refused (capabilities.md K11). Its result is `{result:
+  ok|escalated|failed, summary, verdicts}`; an unknown result is `failed`.
+  At most 6 triage runs a day.
+- H16a. **The conclusion lives on the item.** `verdicts` holds, per item it
+  investigated, `{key, verdict: not_affected|fixed|needs_owner, reason}`
+  (at most 40, only keys handed to the run, the reason cleaned and cut at
+  300 characters). The daemon keeps each one under `verdict:health:<key>`
+  for that item's current summary (`opsd.verdicts`). `needs_owner` keeps
+  the item in Needs you with the reason under The agent says, and the item
+  book pushes it (N1, the digest unless time-sensitive); the run does not
+  push or ack it. `not_affected` and `fixed` quiet a warning to Coming up
+  with the reason; they never touch a critical item, `access:`, `assist:`,
+  `core:down` or `custom:` (the verdict guards, [maintenance.md](maintenance.md)
+  M14d). Without a verdict an item behaves as before. Test
+  `test_a_triage_verdict_anchors_the_reason_on_its_item`.
 - H17. **Safety net.** Whatever the AI did or whether it ran: any critical
   item sends an urgent safety-class push (tag `ha-ops-fallback`); when
   triage did not run, warnings send one non-urgent push; info-only sends

@@ -67,8 +67,11 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   as `never` until the profile changes (or the gate's `patch` is present or
   superseded, with the `localpatches` overlay); a repair that breaks in the
   target Core version, or raised by the HACS integration's domain, asks; a
-  Core breaking or removed change for a domain the house uses (or with no
-  domain), a developer-blog notice while a fragile custom domain is loaded,
+  Core breaking or removed change for a domain the house has configured
+  (config entries, YAML integration keys and platforms, custom
+  integrations: `Inventory.configured`, never a loaded component's
+  entity-platform half; a change with no domain alone never asks), a
+  developer-blog notice while a fragile custom domain is loaded,
   unreadable notes, or an empty house-domain set all ask; so does a Core
   target that reaches the removal of an unresolved deprecation (hidden or not)
   this install still uses, named by a repair or the release notes (never a
@@ -78,7 +81,7 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   `test_a_repair_that_breaks_in_the_target_core_version_asks`,
   `test_a_core_update_that_reaches_a_removal_asks`,
   `test_a_core_breaking_change_for_an_integration_the_house_uses_asks`,
-  `test_a_core_wide_breaking_change_asks`,
+  `test_a_core_wide_note_alone_does_not_hold_a_minor`,
   `test_unreadable_core_notes_or_house_integrations_ask`.
 
 ## The AI release-note review
@@ -98,6 +101,19 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   only gets a note. An unassessed candidate is held "not assessed"; beyond 8
   candidates the rest are held "not reviewed yet". Tests
   `test_review_can_only_hold_updates_back`, `test_apply_review_never_lowers`.
+- U9a. **The one release: a checked notes-only hold.** A Core candidate held
+  only by Home Assistant's own notes (`_core_breaks` with notes it could
+  read; never a repair, a removal (M26), a held version, unreadable notes
+  or a gate) goes to the second, isolated run of U8 (with git off too; `fix`
+  is still read only with git on). Its assessment may carry `verdict`
+  (`not_affected`, `fixable`, `needs_owner`, `unknown`) with its `reason`.
+  `not_affected` is kept under `verdict:core:<target minor>` for the
+  fingerprint of the notes that hold it (their kinds, domains and titles)
+  and releases that hold: the candidate is AUTO again with its own reason
+  (it still soaks), tonight and in every later plan until those notes
+  change. Anything else keeps the hold. Tests
+  `test_a_checked_notes_only_hold_is_released`,
+  `test_a_repair_or_removal_hold_is_never_released_by_a_verdict`.
 - U10. With `updates.hold_if_unreviewed` (default true) a review that did not
   run (AI off, capped, failed, or `updates.review` false) holds every AUTO
   item that has no earlier assessment of that version; false installs them

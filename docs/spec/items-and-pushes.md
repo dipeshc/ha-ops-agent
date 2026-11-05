@@ -43,7 +43,8 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   fact, a task, an item written directly (I16), or a `kv` key among the
   update flags (paused, a failed night and its acknowledgement, a failed
   backup or check before a night), the item acknowledgements
-  (`item.ack:<key>`) and the maintenance state (`maintenance:`). Before that
+  (`item.ack:<key>`), the maintenance state (`maintenance:`) and the
+  verdicts (`verdict:`, [maintenance.md](maintenance.md) M14d). Before that
   transaction commits, the item book composes the items those records show
   and writes each one, with its event, in the same transaction: a job
   writes its update's item and its night's, an update or reboot approval its
@@ -75,6 +76,12 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   only when its source does: a reminder done weeks ago stays done, the
   oldest of many open changes stays waiting. Tests
   `test_a_resolved_condition_resolves_its_item`,
+  A health `log:<fp>` item that leaves because its fingerprint joined the
+  baseline is not called cleared: "not new any more: this error is part of
+  the baseline now; it is reported again if it grows tenfold" (test
+  `test_a_new_log_error_is_not_cleared_while_it_continues`); a maintenance
+  finding resolves with the scan's own reason when it has one
+  ([maintenance.md](maintenance.md) M14).
   `test_an_old_record_never_turns_into_cancelled`,
   `test_a_house_fact_item_resolves_with_its_decision`.
 - I5b. **Time.** An item whose words depend on the clock carries
@@ -120,13 +127,22 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   asks for approval again). Tests
   `test_a_failed_install_asks_only_when_it_failed_twice`,
   `test_review_1_a_silent_night_does_not_swallow_a_later_needs_you_push`.
+  A rolled-back version the latest plan still offers asks no separate
+  acknowledgement: the rollback is a fact ("Rolled back") on the held
+  version's approval, which is the one question; a rolled-back version the
+  plan no longer offers is `failed` without a need (History). Rollback
+  failed and the OS fallback still ask with an urgent `ack`. Test
+  `test_a_rollback_is_a_fact_on_the_held_versions_approval`.
 - I7. Phases: `[Backup, Install, Reboot, Verify]` for OS, else
   `[Backup, Install, Verify]`; `usual_s` is the median of succeeded jobs of
   that kind, else 600 (core), 240 (add-on), 120 (HACS), 600 (firmware),
   900 (OS).
 - I8. Window items exist only in `act` mode; done and aborted nights are
   `quiet`; a failed night is `failed` with an urgent `ack` unless a job
-  already escalated.
+  already escalated. A night aborted by a failure asks until a later night
+  in act mode finishes `done`: that superseding success resolves it ("a later
+  night ran normally"), without an acknowledgement. Test
+  `test_a_later_good_night_resolves_an_aborted_night`.
 - I9. Proposal items: `open` is `waiting` (`apply` / `reject`, with the row's
   expiry), except a maintenance finding's change before its finding may ask,
   which is `proposed` with the same actions ([maintenance.md](maintenance.md)
@@ -161,6 +177,16 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `agent` or `you`, with a gist that says who acked it, until when and why
   ([health.md](health.md) H13a); it never enters Needs you. Tests
   `test_health_items_wait_and_clear`,
+  One item per cause: an `update:` info item is no health item (the update
+  has its own); a `repair:` item whose repair a maintenance finding carries
+  follows that finding (no need, "tracked on its maintenance item"); a
+  `backup:run_failed` item follows the failed backup's own item while that
+  one asks. A triage verdict ([health.md](health.md) H16a) puts the agent's
+  reason under The agent says: `needs_owner` keeps the item in Needs you
+  and lets the item book push it (N1); `not_affected` or `fixed` quiets a
+  warning that is not guarded to `proposed` with the reason. Tests
+  `test_a_deprecation_repair_is_one_item`,
+  `test_a_triage_verdict_anchors_the_reason_on_its_item`,
   `test_the_items_engine_asks_only_once_remote_access_stays_down`,
   `test_in_run_effects`.
 - I11. Follows: the host-reboot health item follows the OS update whose job
@@ -196,7 +222,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   entry that needs the admin becomes `waiting` with an `ack`. No entry
   posts into a conversation (0.22.0): the agent's own notes are items and
   History entries only. A config change's outcome is an event on its item. Tests `test_activity_entries_become_items_and_events`,
-  `test_a_standalone_entry_is_pushed_when_it_is_written`.
+  `test_a_standalone_entry_is_pushed_when_it_is_written`. A failed backup's
+  item stops asking when a later backup succeeds ("resolved: a later
+  backup succeeded"). Test `test_a_later_good_backup_resolves_a_failed_one`.
 - I17. Home sections (questions are on Ask and never on Home; a quiet
   item that follows another, such as a proposal folded into its finding,
   is shown on that item and not as a row of its own, unless it needs the
@@ -224,15 +252,16 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   | Update job failed (I6) | `ack` | rolled back, rollback failed, OS fallback, or a failed install nothing retries by itself (approved, no longer offered, gate off or paused, failed while verifying or in an unknown state, or the entity's second failure in 14 days) |
   | Update night (I8) | `ack` | a failure before the install that repeats until fixed, or a whole-night regression (updates paused) |
   | Config change (I9) | `approval` / `ack` | open and complete, except a maintenance fix before its finding may ask ([maintenance.md](maintenance.md) M12a); a failure that may be half applied |
-  | Maintenance finding (I19) | `ack` / `approval` | within 30 days of its deadline, or a dashboard restore that failed ([maintenance.md](maintenance.md) M12) |
-  | Health item (I10) | `ack` | warning or critical, not handled by the agent in its run, and not waiting quietly |
-  | Activity entry (I16) | `ack` | a failed backup (self-heal or Back up now) |
+  | Maintenance finding (I19) | `ack` / `approval` | within 30 days of its deadline and not checked "not affected", a `needs_owner` verdict, or a dashboard restore that failed ([maintenance.md](maintenance.md) M12, M14d) |
+  | Health item (I10) | `ack` | warning or critical, not handled by the agent in its run, not quieted by a verdict, not following another item, and not waiting quietly |
+  | Activity entry (I16) | `ack` | a failed backup (self-heal or Back up now) that no later backup has superseded |
 
   Never in Needs you: soaking updates, updates without a known release
   age (until U5a asks), an update failure the next window retries by
   itself, a skipped approved update no longer offered, a config change
   that failed and was cleanly undone or cannot be shown in full, a maintenance fix before its 30 days, a
-  finding without a deadline, a refused or restored dashboard change, a
+  finding without a deadline (unless checked `needs_owner`), a finding the agent checked "not affected", a
+  release-note breaking change without a named removal, a refused or restored dashboard change, a
   noted fact, info health items, items the agent acked, and the agent's
   own notes and messages.
 
@@ -246,16 +275,39 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 
 ## Pushes
 
-- N1. **Item pushes.** For each open item in Needs you, the push key is
-  `state:need.kind:primary.id`. After each write and on the minute tick the
-  daemon pushes when the key differs from the last pushed key, or when the
-  last delivery is at least 1 day old (resurface); a failed delivery is
-  retried after 15 minutes; a need whose `expires_at` passed, or a push
-  already pending, is skipped. Sources with `pushes=False` are marked pushed
-  silently. Leaving and re-entering Needs you pushes again. Tests
+- N1. **Item pushes: only what is time-sensitive.** For each open item in
+  Needs you, the push key is `state:need.kind:primary.id`. After each write
+  and on the minute tick the daemon decides: a new need (the key differs
+  from the last pushed key) of a **time-sensitive** item pushes on its own;
+  time-sensitive is urgent, a deadline within 7 days (`source.deadline`),
+  or an approval that gates tonight's update window (`source.push_now`: an
+  update, a reboot or a fork rebase to approve). Every other new need goes
+  into the **daily digest** (N1a). Only an urgent item is pushed again
+  while it waits (after a day, resurface); nothing else resurfaces. A
+  failed delivery is retried after 15 minutes; a need whose `expires_at`
+  passed, or a push already pending, is skipped. Sources with
+  `pushes=False` are marked pushed silently. Leaving and re-entering Needs
+  you is a new need. Tests
   `test_entering_needs_pushes_once_and_coming_back_pushes_again`,
   `test_a_push_counts_only_once_it_was_delivered`,
-  `test_a_push_decided_for_a_need_that_cleared_is_not_sent`.
+  `test_a_push_decided_for_a_need_that_cleared_is_not_sent`,
+  `test_needs_you_pushes_only_urgent_or_daily_digest`.
+- N1a. **The daily digest.** At most one digest push a local day (kv
+  `items.digest`): the first decision of a day with new needs that are not
+  time-sensitive sends one push for all of them. One item alone is that
+  item's own push (N2); several are one push titled "Ops Agent: <n> things
+  need you", the body their titles (daemon words), tag `ha-ops-digest`,
+  opening Home. Each item it covers is recorded as pushed for its need; a
+  new need later that day waits for the next day's digest. It is
+  delivered like any push (quiet hours hold it, the normal budget counts
+  it once).
+- N1b. **Withdrawn when resolved.** When an item whose push was delivered
+  leaves Needs you, the daemon withdraws it: a Companion
+  `clear_notification` with `tag` the item id (the tag its push carried),
+  sent through the same notify service, outside the budgets and quiet
+  hours; a digest is withdrawn once none of its items is in Needs you. A
+  push held for after quiet hours whose item has left Needs you is
+  dropped, not sent. Test `test_a_resolved_item_clears_its_push`.
 - N2. Item push content: title is the source's push title or the item title
   cut at 70; body `"<Word>: <gist>. Open it to <primary label>."`, with the
   need text appended when urgent, cut at 400 characters; tag is the item id;
@@ -340,14 +392,17 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 ## Maintenance items
 
 - I19. Maintenance items are written from the stored findings, their plans
-  and their dashboard plans at each change of the maintenance state (I5);
-  the composition, escalation, pushes and actions are
-  in [maintenance.md](maintenance.md) M10–M18 and the wire shape in
-  [panel.md](panel.md) N20. Only entering Needs you pushes (a deprecation
-  within 30 days of its deadline, a dashboard plan waiting for approval in
-  those 30 days, a dashboard restore that failed); every other maintenance
-  item is silent. A config change proposed for a finding follows its
-  finding's deadline (maintenance.md M12a).
+  and their dashboard plans and verdicts at each change of the maintenance
+  state or a `verdict:` record (I5); the composition, escalation, verdicts,
+  pushes and actions are in [maintenance.md](maintenance.md) M10–M18 and
+  the wire shape in [panel.md](panel.md) N20. Only entering Needs you can
+  push, and only as N1 says (a deadline within 7 days or a failed dashboard
+  restore on its own, anything else in the daily digest); every other
+  maintenance item is silent. A config change proposed for a finding
+  follows its finding's deadline (maintenance.md M12a). A Core-minor
+  finding (maintenance.md M4b) follows the pending Core update into that
+  minor while there is one: the update's item lists the notes as facts and
+  is the one item.
 
 ## Fork rebase items
 

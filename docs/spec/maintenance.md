@@ -89,17 +89,47 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 - M4. **Release posts** of the installed Core minor, the two before it and
   every newer published one, newest first and at most `MAX_STEPS` (6) posts
   per scan (far behind, the newest win): backward-incompatible items, the developer-blog
-  list and the farewell list. An item counts only when its integration is in
-  use (config entries, loaded components, YAML keys or platforms, custom
-  integrations) or a code name it gives (with a `_ . : -` separator) is used
-  in the readable YAML or as a dashboard card type. Its removal is the
-  version the text names when that is newer than the installed one, else the
-  post's release when that is not installed yet; anything else is not a
-  finding. A post without a recognised backward-incompatible section is a
-  problem, never a guess, and is never cached. Tests
+  list and the farewell list. Only items of a post that is not installed yet,
+  or that name a removal in a newer release, can be findings. An item counts
+  only when it is **relevant to this install** (M4a). A post without a
+  recognised backward-incompatible section is a problem, never a guess, and
+  is never cached. Tests
   `test_repairs_logs_and_notes_become_deprecations_with_their_removal`,
   `test_the_post_parser_keeps_headings_and_new_integrations_and_fails_closed`,
   `test_an_unrecognised_post_is_a_problem_and_never_cached`.
+- M4a. **Relevance is deterministic and precise.** An item is relevant only
+  when:
+  - its integration is **configured** here (`Inventory.configured`: an
+    enabled config entry, a top-level YAML integration key or a `platform:`
+    name, or a custom integration). Core's loaded components alone never
+    count: the entity-platform half of `<platform>.<integration>`
+    (`climate`, `event`, `group`, `sensor`, `device_tracker`, ...) is loaded
+    on every install;
+  - or a code name it gives (with a `_ . : -` separator, at least 4
+    characters) is used in the readable YAML **and** names a configured
+    integration itself (`<domain>.<x>` or `<domain>:<x>`), or the item's own
+    integration is configured;
+  - or a code name it gives is a dashboard card type in use.
+  Generic option names (`entity_id`, `unique_id`, `device_class`, `name`,
+  `friendly_name`, `unit_of_measurement`, `state_class`, `device_id`,
+  `area_id`, `value_template` and the like, `GENERIC_TERMS`) never count as
+  a reference, so a note for an integration that is not configured is never
+  a finding because `entity_id` appears in the YAML. Tests
+  `test_a_note_for_an_unconfigured_integration_is_no_finding`,
+  `test_entity_platform_domains_alone_never_make_a_finding`.
+- M4b. **Only a named removal has a deadline.** A release-notes item is a
+  removal (its own finding, `named_removal`, with a deadline, M12) only when
+  it is a farewell (`removed`) item of a release not installed yet, or its
+  text names the removal version next to the removal words and that version
+  is newer than the installed one. Every other relevant breaking change or
+  developer-blog notice of a release not installed yet is a fact on **one
+  finding per Core minor** ("Core <minor>: breaking changes for <domains>",
+  gist "changes with <minor>", never "removed in"), which has no deadline
+  and asks only on a `needs_owner` verdict (M14d). A breaking change of an
+  installed release is no finding. Tests
+  `test_a_breaking_change_without_a_named_removal_has_no_deadline`,
+  `test_a_breaking_change_gist_never_says_removed`,
+  `test_one_core_release_is_one_item`.
 - M5. **Weekly GitHub checks**, run by a scan when the last ones are at
   least 7 days old or a newer release post appears (no trigger forces
   them): a
@@ -150,7 +180,11 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   GitHub repository, entity platforms and entity count here), the frontend
   plugins (dashboard resources), every dashboard's mode (`storage` only when
   Home Assistant lists it so, else `yaml`) and card types, and
-  the installed add-ons. Test `test_the_inventory_reads_what_the_install_uses`,
+  the installed add-ons. **Configured** (`configured`, M4a; also the update
+  rule's house integrations, [updates.md](updates.md) U7) is the config-entry
+  domains, the YAML integration keys and platforms and the custom
+  integrations, never the loaded components alone. Test
+  `test_the_inventory_reads_what_the_install_uses`,
   `test_yaml_features_name_integration_keys_and_platforms`.
 - M9. **Readable files only.** The YAML read is the run copy's own list: the
   tracked readable files with git on, else `privsep.disk_files` (never
@@ -175,7 +209,8 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 - M12. **Escalation: 30 days before the deadline.** A finding's deadline
   is the first day of the month of its removal release (`deadline`; Core
   minors ship in the first week of their month), and only a deprecation
-  from a repair or the release notes with a removal version has one. Such
+  from a repair with a removal version, or a named removal of the release
+  notes (M4b), has one. Such
   a deprecation is in Needs you, with an `ack`, only from `ASK_BEFORE` (30
   days) before its deadline, or once its removal is installed, and only
   when nothing else answers it (no proposal that is open or applying, no
@@ -183,7 +218,9 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   is Coming up and silent, with `source.recheck_at` set to the day it may
   ask, so the minute tick moves it then. A finding without a deadline (a
   log line, an archived repository, a deprecation without a removal
-  version, a replacement candidate, a suggestion) never enters Needs you.
+  version, a replacement candidate, a suggestion) never enters Needs you,
+  except a repair or release-notes finding the agent's check says needs the
+  admin (M14d). A verdict decides only within these bounds (M14d).
   A dashboard restore that did not read back (`escalated`) takes
   precedence over all of these; a dashboard change that was refused or
   restored changed nothing and is a fact on the item, never a need. OK
@@ -213,20 +250,82 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   Needs you. A scan recomposes the open changes of its findings. Test
   `test_a_findings_config_change_moves_its_item`,
   `test_the_panel_applies_an_approved_dashboard_plan_end_to_end`.
-- M13. **Pushes.** A maintenance item pushes only when it enters Needs you:
-  a deprecation within 30 days of its deadline, a dashboard plan waiting
-  for approval within the same 30 days, or a dashboard restore that failed
-  (time-sensitive). Everything else is silent: deprecations further away are
-  Coming up; replacement candidates and suggestions are a separate Home
-  section, `suggestions`; all are in History.
+- M13. **Pushes.** A maintenance item can push only when it enters Needs
+  you (a deprecation within 30 days of its deadline, a `needs_owner`
+  verdict, a dashboard plan waiting for approval within the same 30 days,
+  or a dashboard restore that failed), and then only as the push policy
+  says ([items-and-pushes.md](items-and-pushes.md) N1): a deadline within 7
+  days or a failed restore pushes on its own, anything else goes into the
+  daily digest. It is never pushed again while it waits, and its push is
+  withdrawn when it leaves Needs you. Everything else is silent:
+  deprecations further away are Coming up; replacement candidates and
+  suggestions are a separate Home section, `suggestions`; all are in
+  History. Tests `test_needs_you_pushes_only_urgent_or_daily_digest`,
+  `test_a_resolved_item_clears_its_push`.
 - M14. **Resolution.** A finding the scan no longer reports is `done`
-  ("resolved"). The admin may hide a finding that does not ask ("Hide
+  ("resolved: the latest maintenance scan no longer finds it"), or with the
+  scan's own reason when it dropped the finding on purpose: "resolved:
+  <domain> is not configured here", "resolved: re-checked under the 0.23.0
+  rules: no removal is named, so it is a fact on the Core <minor> item" or
+  "resolved: re-checked under the 0.23.0 rules: nothing configured here is
+  affected" (`maintenance:gone:<finding>`). A stored release-notes finding
+  is re-checked against M4a/M4b at every scan, also when the posts cannot
+  be read (its stored domain, affected places and quote are enough), so a
+  finding an earlier version raised on an invented deadline or an
+  unconfigured integration resolves on the first scan. Test
+  `test_findings_an_earlier_version_raised_resolve_on_the_first_scan`. The
+  admin may hide a finding that does not ask ("Hide
   until it changes"; never offered while it asks): its item is `cancelled`
   until its evidence changes or it may ask (M12), when it comes back.
   Hiding only quiets the item: a hidden removal still counts for the
-  update rule (`removals`, M26). Test
-  `test_a_hidden_removal_still_holds_core_back_and_asks_near_its_deadline`. Test
-  `test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home`.
+  update rule (`removals`, M26). Hiding and plans are bound to the
+  finding's **fingerprint** (`Finding.evidence`): its variant, signal,
+  domain, removal, the change ids or repair it carries, the files and
+  dashboards affected (never line numbers) and where a fix could be
+  proposed; editing an unrelated line of a file it names changes nothing.
+  A finding hidden under 0.22's evidence hash stays hidden. Tests
+  `test_a_hidden_removal_still_holds_core_back_and_asks_near_its_deadline`,
+  `test_a_resolved_finding_is_done_and_a_hidden_one_leaves_home`,
+  `test_an_unrelated_edit_keeps_the_fingerprint`.
+- M14d. **Verdicts: the agent checks before it asks.** A repair or
+  release-notes deprecation (a verification candidate) is checked by the
+  agent before it may enter Needs you: the plan run (M16) or Plan a fix
+  ([chat.md](chat.md) T17a) answers, per finding, a verdict `not_affected`,
+  `fixable`, `needs_owner` or `unknown` with a reason and the evidence it
+  read. The daemon keeps it under the finding's cause
+  (`verdict:maint:<finding>`, `opsd.verdicts`: verdict, reason, evidence,
+  fingerprint, when, by) until the fingerprint changes; a changed
+  fingerprint is a new check. Every composer honours it:
+  - no verdict yet, while a check is still possible: the finding does not
+    ask; its gist adds "checking whether it affects this install";
+  - `not_affected`: the finding is `done`, "checked: not affected here:
+    <reason>", in History with the reason under The agent says and a
+    **Reopen** action (`reopen`: the admin's own verdict, the finding
+    behaves as without a verdict until its fingerprint changes);
+  - `needs_owner`: it asks as M12 says (a finding without a deadline asks
+    now), with the agent's reason under The agent says (daemon words in
+    the need);
+  - `fixable`: the proposal path (M17, M18); without a proposal it behaves
+    as without a verdict;
+  - `unknown`, a check that failed (AI off, capped, failed run), or no
+    answer for the finding in two runs: it behaves as without verdicts
+    (fail safe).
+  **Guards** (`verdicts.closes`, in code): a verdict never closes a critical
+  item, access hardware, a lock or the alarm (domains `lock`,
+  `alarm_control_panel` and anything `access.named_like_access` calls access
+  hardware), `core:down`, a `custom:` item, a rollback or escalation, or a
+  dashboard escalation. A repair Home Assistant still lists is only quieted
+  (`proposed`, "checked: not affected here: <reason>; Home Assistant still
+  lists the repair"), never closed; so is a finding whose deadline is within
+  14 days, unless a deterministic check agrees (its integration is not
+  configured). The removal hold on a Core update (M26) never reads a
+  verdict. Tests
+  `test_a_not_affected_plan_closes_the_finding_and_is_remembered`,
+  `test_a_changed_evidence_fingerprint_reopens_a_remembered_verdict`,
+  `test_a_verdict_never_closes_a_critical_or_access_item`,
+  `test_a_needs_owner_verdict_puts_a_core_minor_in_needs_you`,
+  `test_a_failed_check_asks_as_before`,
+  `test_the_live_case_makes_no_needs_and_no_push`.
 - M14c. **A fix settles its findings at once.** When a fork rebase job
   ends `succeeded`, or a config change proposed for a finding is
   `applied`, `MaintenanceManager.settle(domain)` reads the live repairs and
@@ -324,9 +423,14 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
 ## Plans and proposals
 
 - M16. **The plan run.** For deprecations and replacement candidates
-  that are not hidden and have no plan for their current evidence, at most
-  4 per scan, one
-  `maintenance_plan` run reads the findings as fenced evidence. Its
+  that are not hidden and have no plan for their current evidence, and for
+  verification candidates without a verdict for their fingerprint (M14d),
+  at most `MAX_PLAN_ITEMS` (8) per scan, one
+  `maintenance_plan` run reads the findings as fenced evidence: the daemon
+  matched them, and the run first checks whether each really affects this
+  install (the config in its working directory), then plans. Each answer
+  carries `verdict`, `reason` and `evidence` (what it read); an answer for
+  a finding that was not asked about is dropped. Its
   capabilities are the read `ha.core_compare` (`opsctl core-compare
   <domain> [--fork]`, [capabilities.md](capabilities.md) K14), which it
   uses for a finding about a custom integration that shadows or forks a
@@ -457,8 +561,10 @@ approvals), `opsd/selfguard.py` (`approved_dashboard_write`), the
   `test_the_scan_is_due_before_an_update_only_when_it_is_old`.
 - M26. **A Core update that removes something still in use asks.** An AUTO
   Core candidate whose target minor reaches the removal of an unresolved
-  deprecation (hidden or not) from a repair or the release notes (never a log
-  line) is held for approval with the reason naming it
+  deprecation (hidden or not, whatever its verdict) with a deadline: a
+  repair with a removal version or a named removal of the release notes
+  (never a log line, never a Core-minor finding of plain breaking changes)
+  is held for approval with the reason naming it
   (`maintenance.removal_block`, beside `repair_block` in the update rule).
   Tests `test_a_core_update_that_reaches_a_removal_asks`,
   `test_a_pending_core_update_that_removes_something_in_use_asks`.

@@ -82,7 +82,10 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
     (`reload.last`, [reload.md](reload.md) L4), the chat (above), the
     standalone entry counter (`activity.seq`), item acknowledgements
     (`item.ack:<key>`), update flags, holds, reviews and first-seen times,
-    maintenance state (S11a), backup and evidence state.
+    maintenance state (S11a), verdicts (`verdict:<cause>`,
+    [maintenance.md](maintenance.md) M14d), the daily push digest
+    (`items.digest`, [items-and-pushes.md](items-and-pushes.md) N1a),
+    backup and evidence state.
   - `update_runs`: one row per update window or manual plan (plan, review,
     backup, health before, summary). It stays a table of its own: it is
     the update pipeline's compare-and-set record (never two active runs),
@@ -147,8 +150,10 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   `test_the_copy_is_deleted_after_14_days`.
 - S11a. Maintenance state lives in `kv` under `maintenance:` (`findings`,
   `meta`, and per finding `plan:`, `dashboard:`, `result:`, `migrated:`,
-  `hidden:`); each scan blanks the plan, dashboard-plan and result records
-  of findings that are gone. Test
+  `hidden:`, `gone:` (why the scan dropped it)); each scan blanks the
+  plan, dashboard-plan and result records of findings that are gone, and
+  their `verdict:maint:` records. 0.23.0 needs no
+  schema change: verdicts and the digest are `kv` rows. Test
   `test_only_deprecations_within_two_releases_need_the_admin_and_push`.
 - S4. **Open and recover.** A corrupt file (`SQLITE_CORRUPT`, `SQLITE_NOTADB`
   or a failed quick check) is renamed to `ops.db.corrupt-<UTC stamp>` (with

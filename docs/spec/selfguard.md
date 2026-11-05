@@ -3,13 +3,12 @@
 The agent never changes itself, the Supervisor or the host, and never
 targets a lock, an alarm or a door, whatever any input says. Selfguard is
 the code-level allowlist under every Supervisor, Core REST and websocket
-call, every update job, reload, proposal path and dashboard save.
+call, every update job, reload and proposal path.
 
 Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
 (`SupervisorClient.request`), `opsd/ws.py` (`send_json`),
-`opsd/updexec.py`, `opsd/changepaths.py`, `opsd/guard.py`,
-`opsd/dashboards.py`. Tests: `tests/test_selfguard.py`,
-`tests/test_dashboards.py`.
+`opsd/updexec.py`, `opsd/changepaths.py`, `opsd/guard.py`.
+Tests: `tests/test_selfguard.py`.
 
 ## HTTP
 
@@ -21,8 +20,7 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   `test_http_self_targets_are_refused`, `test_the_client_refuses_before_any_network`.
 - G2. Allowed POSTs: `/core/update` with `{"version": <non-empty>,
   "backup": false}`; `/store/addons/<slug>/update` with `{"backup": false}`
-  and a slug that is not the agent; `/core/check`,
-  `/core/api/config/core/check_config`,
+  and a slug that is not the agent; `/core/check` (the one config check),
   `/core/api/config/config_entries/entry/<id>/reload`,
   `/core/api/services/automation/reload`,
   `/core/api/services/template/reload`,
@@ -34,7 +32,8 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   `/core/api/states/sensor.ops_agent[_x]`. Never: the agent's own add-on,
   the Supervisor, other add-ons' start/stop/install, backups and restores,
   `hassio.*` services, Core stop, a Core restart outside G9, host reboot
-  or shutdown outside G4. Tests
+  or shutdown outside G4, Core's own REST config check
+  (`/core/api/config/core/check_config`). Tests
   `test_ordinary_calls_still_pass`, `test_update_executor_calls_still_reach_the_supervisor`,
   `test_reload_and_check_config_still_reach_core`.
 - G3. **Self identity.** The slug `local_ha_ops_agent`, `self`, and any
@@ -70,10 +69,9 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   `update/release_notes`, `history/history_during_period`,
   `recorder/statistics_during_period`, `vacuum/get_segments`,
   `input_boolean/list`, `input_boolean/create` (only the AI switch's name),
-  and the dashboard reads `lovelace/config` (only a `url_path`),
-  `lovelace/dashboards/list` and `lovelace/resources` (no arguments). The
-  one write is `lovelace/config/save` under G8; every other `lovelace/...`
-  command is refused. Tests `test_ws_self_targets_are_refused`,
+  and the dashboard reads `lovelace/config` (at most a `url_path`)
+  and `lovelace/dashboards/list` (no arguments). Every
+  `lovelace/...` write is refused (G8). Tests `test_ws_self_targets_are_refused`,
   `test_every_websocket_send_path_refuses_before_writing`,
   `test_the_agents_own_subscriptions_and_switch_pass`.
 
@@ -89,30 +87,19 @@ Implementation: `opsd/selfguard.py`; enforced in `opsd/supervisor.py`
   `test_the_house_profile_is_never_a_proposal_path`,
   `test_a_profile_cannot_make_secrets_or_the_agent_readable`.
 - G7. Reloads can never target a platform or vendor on the never-list
-  ([reload.md](reload.md)); approval requests for the agent or the
-  Supervisor are refused. A fork rebase is never proposed, approved or
+  ([reload.md](reload.md)); no update job ever targets the agent or the
+  Supervisor (G3). A fork rebase is never proposed, approved or
   executed for a domain on the never-reload list or the profile's
   `rebase.deny`, nor for one that provides access hardware (locks, the
   alarm, garage doors, gates; [updates.md](updates.md) U32). Tests `test_reload_can_never_target_the_platform`,
-  `test_update_approval_requests_for_the_agent_are_refused`.
+  `test_update_jobs_never_target_the_agent_or_the_supervisor`.
 
 ## Dashboards
 
-- G8. **Approved dashboard write.** `lovelace/config/save` passes only
-  inside `approved_dashboard_write(url_path, generated=...)`, with exactly
-  `{url_path, config}` (`config` a mapping) and that scope's url_path. The
-  scope is a context variable like G4: single use, closed when the block
-  ends, and admits one save. It is never opened for the default dashboard
-  (no url_path), a url_path longer than 100 characters or not lower case
-  with a hyphen (`[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+`), or one listed in the
-  profile's `dashboards.generated`; refusal raises `SelfTargetError`. Only
-  `dashboards.DashboardWriter` enters it, after consuming the admin's
-  dashboard approval, or to restore the backup after a failed save of that
-  plan ([maintenance.md](maintenance.md) M21–M23). Tests
-  `test_the_save_is_refused_outside_an_approved_scope`,
-  `test_the_scope_lets_exactly_one_save_of_its_own_dashboard_through`,
-  `test_the_scope_is_never_opened_for_the_default_a_generated_or_a_malformed_dashboard`,
-  `test_a_generated_dashboard_is_refused_even_with_a_forged_approval`.
+- G8. **Dashboards are never written.** `lovelace/config/save` and every
+  other `lovelace/...` write (dashboards, resources, configs) is refused;
+  the agent only reads dashboards (G5). Tests `test_ws_self_targets_are_refused`,
+  `test_every_websocket_send_path_refuses_before_writing`.
 
 ## Core restarts
 

@@ -77,7 +77,7 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   this install still uses, named by a repair or the release notes (never a
   log line) (`maintenance.removal_block`; a maintenance scan
   older than 26 hours runs first, [maintenance.md](maintenance.md)
-  M25–M26). Tests
+  M19–M20). Tests
   `test_a_repair_that_breaks_in_the_target_core_version_asks`,
   `test_a_core_update_that_reaches_a_removal_asks`,
   `test_a_core_breaking_change_for_an_integration_the_house_uses_asks`,
@@ -91,7 +91,7 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   a manual plan runs none. The prompt holds each candidate's release notes
   fenced (4000 characters, redacted); the profile has no capabilities and a
   10-minute wait. Schema: `assessments[<=20]{entity_id, risk, hold, reason,
-  fix?}`, `summary`. A candidate with a `<needs_change>` block (U23) is
+  fix?}`. A candidate with a `<needs_change>` block (U23) is
   reviewed in a second run of its own, whose prompt holds only Home
   Assistant's own Core notes and that block; `fix` is read only from that
   run's answer, never from the run that holds third-party notes. Test
@@ -103,10 +103,12 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   `test_review_can_only_hold_updates_back`, `test_apply_review_never_lowers`.
 - U9a. **The one release: a checked notes-only hold.** A Core candidate held
   only by Home Assistant's own notes (`_core_breaks` with notes it could
-  read; never a repair, a removal (M26), a held version, unreadable notes
+  read; never a repair, a removal (M20), a held version, unreadable notes
   or a gate) goes to the second, isolated run of U8 (with git off too; `fix`
   is still read only with git on). Its assessment may carry `verdict`
-  (`not_affected`, `fixable`, `needs_owner`, `unknown`) with its `reason`.
+  (`not_affected`, `fixable`, `needs_owner`, `unknown`) with its `reason`
+  (and for `needs_owner` its `owner_action`, else it is kept as `unknown`,
+  maintenance.md M13d).
   `not_affected` is kept under `verdict:core:<target minor>` for the
   fingerprint of the notes that hold it (their kinds, domains and titles)
   and releases that hold: the candidate is AUTO again with its own reason
@@ -152,8 +154,8 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   add-on; otherwise the run aborts before any install and the failure is an
   item. Tests `test_backups_must_be_encrypted_and_complete`,
   `test_no_code_reads_the_backup_config`, `test_backup_failure_aborts_before_any_install`.
-- U15. **Baseline.** A pre-run probe (core state, states, registry, config
-  entries, repairs, watched entities) must have no errors with Core running;
+- U15. **Baseline.** A pre-run probe (states, registry, config entries,
+  repairs, watched entities) must have no errors with Core's API answering;
   an unreadable health fails closed. Test `test_unreadable_health_fails_closed`.
 - U16. **Pre-check per job.** The gate again, the job's budget against the
   deadline (core 30, add-on and HACS 15, firmware 20, OS 40 minutes), quiet,
@@ -181,9 +183,10 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   `test_an_unknown_outcome_is_verified_not_retried`,
   `test_config_check_failure_after_a_hacs_install_rolls_back`.
 - U18. **Verify.** Settle at least 2 and at most 10 minutes, then compare
-  with the pre-run probe. A regression is: probe errors; Core not running or
-  API down; a custom integration gone, more failed entries, more unavailable
-  or all entities gone; a new failed config entry; one or more newly
+  with the pre-run probe. A regression is: probe errors; Core not running
+  (its API does not answer with the states, test
+  `test_core_is_running_when_its_api_answers`); a custom integration gone,
+  more failed entries, more unavailable or all entities gone; a new failed config entry; one or more newly
   unavailable entities in lock, alarm_control_panel, climate, cover, fan,
   light, switch, water_heater, valve or siren, or 5 or more elsewhere; a new
   error or critical repair (HACS `restart_required` ignored); a watched
@@ -251,7 +254,7 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   files, opens each file without following a link, and reads only a
   regular file of at most 1 MiB; anything else refuses the macro change.
   The same rules apply to a maintenance YAML migration
-  ([maintenance.md](maintenance.md) M17). Tests
+  ([maintenance.md](maintenance.md) M16). Tests
   `test_an_updates_configuration_change_is_checked_like_a_proposal`,
   `test_a_macro_changes_only_when_no_file_picks_an_action_with_a_template`,
   `test_a_macro_change_counts_any_templated_file_that_does_more`,
@@ -269,15 +272,15 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   executor, verifier and 40-minute wait as U14; `updates.auto_install` does
   not gate them and the admin's request works in `observe` mode. It is
   refused while one runs, after 3 standalone starts in a day, when a
-  complete backup is under 3 hours old, or within 1 hour of the last start.
+  complete backup is under 3 hours old.
   Success is not pushed; failure is a Needs-you item. Tests
   `test_back_up_now_works_in_observe_mode_and_is_verified`,
   `test_at_most_three_standalone_backups_a_day`.
 - U25. Self-heal: in `act` mode only, when Core has an automatic schedule,
   the newest complete backup is older than 26 hours (or none), not tried in
-  the last 24 hours and under the daily cap. Chat can only ask for a backup.
+  the last 24 hours and under the daily cap. Chat never starts a backup.
   Tests `test_self_heal_is_due_only_when_everything_says_so`,
-  `test_observe_mode_never_heals`, `test_chat_can_ask_for_a_backup_but_never_runs_one`.
+  `test_observe_mode_never_heals`.
 
 ## Fork rebases
 
@@ -291,7 +294,7 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
 `tests/test_forkrebase.py`.
 
 - U26. **When.** An approved fork rebase ([approvals.md](approvals.md)
-  A18) runs in the update window after the night's plan and installs and
+  A17) runs in the update window after the night's plan and installs and
   before an approved reboot, or at once when the admin chose "now" (the
   `approved` trigger). It needs the same gate as installs (U11: valid
   options, act mode, `updates.auto_install: on`, not paused, no failed
@@ -312,18 +315,13 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   the proposal replaces (bytes, mode and owner, root-only under
   `/data/fork-rebase/<id>/old/`), then writes the approved bytes (each
   checked against its recorded SHA-256). Every read and write of the
-  fork goes through one descriptor of `custom_components/<domain>`,
-  reached from the config directory by opening `custom_components` and
-  then `<domain>`, each with `O_DIRECTORY | O_NOFOLLOW`: a link at either
-  level is refused, and a directory swapped for a link after it was
-  opened does not redirect anything (the writes land in the directory
-  that was opened). Inside it, each target must be a regular file
-  (`stat` without following links); the bytes go to a new temporary file
-  with a random name (`.ops-<16 hex>.tmp`, `O_CREAT | O_EXCL | O_NOFOLLOW`
-  relative to the descriptor), written in full, given the old file's mode
-  and owner, fsynced and renamed over the old file relative to the same
-  descriptor, then the directory is fsynced; a failed write removes its
-  temporary file, and a leftover temporary file never blocks a write.
+  fork goes through one descriptor of `custom_components/<domain>` reached
+  without following a link at any level (a link for either level is
+  refused, and a directory swapped for a link after it was opened
+  redirects nothing); each target must be a regular file, and each write
+  is atomic (`opsd.safefs`: a fresh temporary file, the old mode and owner,
+  fsynced, renamed, the directory fsynced; a failed write leaves no
+  temporary file behind).
   Then Core's config check (`POST /core/check`); a failure puts the old
   files back (Core has not loaded the new ones) and the job `failed`. Then
   one Core restart inside `approved_core_restart(<job>)`
@@ -355,7 +353,7 @@ and `_fork_step` in `opsd/updates.py`, `Executors.fork_apply`,
   `Repo.push` pushes the exact commit it checked and then moves
   `refs/remotes/origin/main` to it (compare-and-set on the fetched value).
   When the job has succeeded, maintenance reads that domain's findings again
-  as a task of its own, not inside the job (M14c). Tests
+  as a task of its own, not inside the job (M13c). Tests
   `test_a_commit_a_later_push_carried_is_shown_as_pushed`,
   `test_a_change_left_not_pushed_is_shown_pushed_once_origin_holds_its_commit`,
   `test_a_failing_applied_hook_never_raises_into_the_apply`,

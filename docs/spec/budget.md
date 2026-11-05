@@ -12,16 +12,19 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
 ## Caps
 
 - B1. Daily run caps per profile: triage 6, chat 20, followup 3,
-  investigate 6, summary 6, update_review 2 (others 3); refusal
+  investigate 6, summary 6, update_review 2, maintenance_plan 3 (the scan's
+  own check; any other profile 3); refusal
   `run_cap_reached:<profile>`, whose card names the actual limit ("Today's
   limit for investigations and Plan a fix is reached (6 runs a day, the
   last 2 kept for your Plan a fix taps)"). Of the investigate cap, 2 runs
   are kept for the admin's own Plan a fix taps (`OWNER_RESERVED_RUNS`):
   other investigations stop at 4, a Plan a fix run may use all 6, so the
   agent's runs never starve what the admin asked for and the cap, the
-  run-time budgets and the cost cap are unchanged. Chat messages are
-  separately capped at 30 a day. Tests `test_usage.py:99-143`,
+  run-time budgets and the cost cap are unchanged. These are the only
+  daily caps on AI runs: a chat message, a follow-up and a Plan a fix tap
+  have no separate daily count. Tests `test_each_cap_refuses`,
   `test_chat_flood_is_capped`,
+  `test_the_maintenance_check_has_its_own_visible_daily_cap`,
   `test_the_agents_investigations_never_use_the_runs_kept_for_plan_a_fix`.
 - B2. Per-run turn and cost caps come from the profile table in
   [ai-runner.md](ai-runner.md); the cost cap is passed to the provider on
@@ -57,13 +60,14 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
   more when `run_max_usd` is raised. Test
   `test_the_daily_cost_cap_trims_each_run_and_refuses_when_spent`.
 - B4. Plan tiers: `claude.plan` `pro` 40, `max5` 140, `max20` 240 hours
-  a week (low-end estimates); `auto` is `pro` (the provider reports no
-  tier in its output). Tests `test_usage.py:56-61`.
+  a week (low-end estimates); any other value (the legacy `auto`) is read
+  as `pro`, the default. Tests `test_share_option_scales_run_time_and_is_clamped`,
+  `test_a_legacy_auto_plan_loads_as_pro`.
 - B5. User-class runs (chat, investigate, summary) stop at half of each
   window's stop line (40 % of the budget; refusal `share_reserve:<window>`,
   and their reserved time is trimmed to that line), so agent-class runs
   (triage, followup, update review, maintenance plan) always keep at least
-  the other half of the stop line. Tests `test_full_chat.py:489-515`,
+  the other half of the stop line. Tests `test_chat_leaves_half_the_share_to_monitoring`,
   `test_chat_at_its_cap_leaves_triage_half_the_stop_line_on_the_default_plan`.
 
 ## Measurement
@@ -89,10 +93,11 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
   turns and seconds before the provider starts; `finish_run` replaces them
   with actuals; an aborted run with no tokens keeps a quarter of the
   reservation; a run the daemon lost (crash) is closed as `interrupted` at
-  its full reservation. The `runs` columns `reserved_share`, `share_5h`,
-  `share_7d` and `share_estimated` are kept unused (no schema change). A
+  its full reservation. A run reserves no tokens. A
   finished run's reported cost is added to the day's cost counter (B3a).
-  Tests `test_usage.py:84-96,146-151`,
+  Tests `test_reservation_replaced_by_actuals`,
+  `test_concurrent_reservations_cannot_both_take_the_last_slot`,
+  `test_crashed_runs_keep_their_reservation`,
   `test_failed_run_charges_its_reservation_and_one_slot`.
 - B8. Exposure: `sensor.ops_agent_ai` (state `enabled`, `ai_disabled` or
   `usage_limited`; attributes `run_time_5h_s`, `run_time_5h_cap_s`,
@@ -113,23 +118,29 @@ Implementation: `opsd/budget.py`, `opsd/usage.py`, `opsd/aicontrol.py`,
   review holds the AUTO candidates when `updates.hold_if_unreviewed` is on.
 - B10. After `usage_limited` the daemon backs off 1 hour, doubling to 24, or
   until the provider's reset time if within 24 hours; a successful run
-  resets the level. No push. Tests `test_usage.py:240-252,317-321`.
+  resets the level. No push. Tests `test_kill_switch_and_backoff`,
+  `test_usage_limit_backs_off_without_a_push`.
 
 ## The kill switch
 
 - B11. The helper `input_boolean.ops_agent_ai_enabled` is created over the
   websocket if missing (on at first creation; a recreated one starts off
   with a notice) and watched through the daemon's one event stream. Tests
-  `test_usage.py:366-392,484-527`.
+  `test_kill_switch_events_and_sync`,
+  `test_a_deleted_helper_is_off_at_once_and_recreated`,
+  `test_one_websocket_carries_taps_and_the_switch`.
 - B12. Off, from anyone, or the helper unknown, unavailable or missing once
   it exists, kills the running AI (the whole process group; status
   `killed`, charged the floor) and refuses new runs (`ai_disabled`). On by
   anyone but the verified admin or the daemon is reverted: killed, turned
   off again, audited, one notice a day. `POST api/ai {on: false}` turns it
   off at once; `{on: true}` is an admin-only panel action. Tests
-  `test_usage.py:224-238,375-411,417-451`, `test_panel_resume_is_the_admins_act`,
+  `test_kill_switch_and_backoff`,
+  `test_kill_switch_stops_a_running_triage_but_not_the_safety_push`,
+  `test_panel_resume_is_the_admins_act`,
   `test_no_admin_known_means_no_one_can_enable`.
 - B13. Switch state, creation, backoff level and deadline persist in the
   store's `kv`; every change is audited on channel `ai-control`.
   Deterministic health checks, liveness and safety pushes never consult the
-  switch. Test `test_usage.py:441`.
+  switch. Test
+  `test_kill_switch_stops_a_running_triage_but_not_the_safety_push`.

@@ -22,7 +22,7 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   on `main` refuses every proposal (`git: main has no commit`). Pushing is
   gated by `limits.git_push` (default on). The deploy key
   (`/data/ssh/github_deploy`) is generated at start when git is on.
-- C2. **safegit.** Every git call runs with `--no-pager`, an empty
+- C2. **safegit.** Every git call (`safegit.run`) runs with `--no-pager`, an empty
   attribute source, `-C <repo>`, `safe.directory`, and `-c` configuration
   (which wins over the repository's) that neutralises fsmonitor, hooks,
   pagers, editors, askpass, credential helpers, attribute files, external
@@ -84,7 +84,8 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   `known_devices.yaml`) and every selfguard self-path are refused; new
   directories only below `automations/`. `configuration.yaml` and
   `custom_templates` are reachable only by the update fix
-  ([updates.md](updates.md) U23). Tests `test_changes.py:161-192`.
+  ([updates.md](updates.md) U23). Tests `test_allowed_paths`,
+  `test_everything_else_is_refused`.
 
 ## Drafting and creation
 
@@ -92,7 +93,8 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   directory; the guard allows a write only to an allowed path directly
   under it, at most 64 KB. The daemon reads each draft without following
   symlinks (regular file, one link, owned by `ops`, 64 KB) and deletes it
-  after the attempt. Tests `test_changes.py:179-200,612-648`.
+  after the attempt. Tests `test_guard_write_rules`,
+  `test_drafts_are_read_without_following_links`.
 - C5. `change.propose` (3 per run, 10 a day; chat and investigate only)
   needs a Conventional Commits subject, at most 3 files of 64 KB, a
   non-empty `why`, at most 5 open and 5 created per day (refusals recorded,
@@ -118,7 +120,13 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   events, scenes or blueprints, or carries YAML tags is never changed by a
   proposal, and an existing alert is never removed and keeps its
   `entity_id`, `state`, `repeat`, `skip_first`, `can_acknowledge` and
-  notifiers (its name, message, title and push data may change). Tests `test_changes.py:280-424`,
+  notifiers (its name, message, title and push data may change). Tests
+  `test_bypasses_are_refused`,
+  `test_garage_covers_without_garage_in_the_name_and_blueprints_are_refused`,
+  `test_registry_unavailable_refuses_targets`,
+  `test_allowed_happy_paths_and_their_summary`, `test_content_hygiene`,
+  `test_proposal_limits_and_refusals`,
+  `test_symlinks_and_submodules_in_git_are_refused`, `test_daily_limit`,
   `test_setpoints_outside_the_band_or_templated_are_refused`,
   `test_templates_cannot_point_a_browser_anywhere`,
   `test_a_file_that_already_does_more_is_never_rewritten`,
@@ -155,16 +163,20 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   `test_a_change_not_shown_in_full_cannot_be_approved`,
   `test_the_review_shows_what_the_change_adds_and_removes`. The binding (id, action, commit, base,
   per-file hashes, creation time) is recomputed from the git objects and
-  hashed into the approval ([approvals.md](approvals.md) A15). Tests
-  `test_changes.py:426-585`.
+  hashed into the approval ([approvals.md](approvals.md) A14). Tests
+  `test_tampering_voids_the_approval`,
+  `test_a_binding_change_after_the_tap_stops_the_apply`.
 - C8. **Apply** is one admin request in the panel (no second factor): it
-  creates the change approval, confirms it as the same user, and the daemon
+  grants the change approval ([approvals.md](approvals.md) A14) and the daemon
   executes under the git lock: policy (APPROVE tier); `observe` mode
   refuses every proposal, the facts document included; preconditions (on `main`, clean tree,
   files unchanged since the base, live files equal to git; else the
   proposal is `stale` and its ref dropped); the approval is consumed
-  single-use; files are written atomically keeping owner and mode; a Core
-  config check runs (skipped for document-only changes); `automation.reload`
+  single-use; files are written atomically keeping owner and mode, never
+  through a link, leaving no temporary file when a write fails; Core's
+  config check (the Supervisor's `POST /core/check`, the same one as the
+  health check and the update pipeline) runs (skipped for document-only
+  changes); `automation.reload`
   or `template.reload` by top directory, with `reload_custom_templates`
   first for macros; alerts and `configuration.yaml` take effect at the next
   restart, which the agent never performs; `commit_files` commits exactly
@@ -172,7 +184,15 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   when `origin/main` is ahead, then pushes `HEAD:refs/heads/main`. Any
   failure restores the previous bytes, reloads again and escalates with a
   push. Revert is the same pipeline with the base contents. Recovery after
-  a restart finishes an interrupted apply. Tests `test_changes.py:426-585,868-901`,
+  a restart finishes an interrupted apply. Tests
+  `test_apply_writes_checks_reloads_commits_and_pushes`,
+  `test_stale_and_dirty_trees_are_refused`,
+  `test_a_failed_config_check_restores_exactly`,
+  `test_a_failed_reload_restores_reloads_again_and_escalates`,
+  `test_revert_writes_back_what_the_change_replaced`,
+  `test_restart_mid_apply_is_recovered`,
+  `test_a_failed_live_write_leaves_no_temporary_file_and_the_old_file`,
+  `test_approve_in_the_panel_applies_with_no_push`,
   `test_git_push_refuses_when_remote_ahead`.
 - C9. `reject` moves an open proposal to `rejected`, deletes the ref and
   voids its approval; expiry after 7 days does the same.
@@ -185,7 +205,11 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   computes them (C2); paths `[A-Za-z0-9_@+][A-Za-z0-9._@+/-]{0,200}` without `..`
   and within the readable set; diff and show output limited to readable
   paths, others counted as withheld; log at most 50 entries; 30-second
-  timeout. Tests `test_githistory.py:51-150`.
+  timeout. Tests `test_log_and_status`, `test_diff_withholds_secret_paths`,
+  `test_show_commit_and_file`, `test_show_refuses_blob_and_secret_paths`,
+  `test_diff_rejects_option_like_and_odd_revisions`,
+  `test_paths_are_validated`, `test_literal_pathspec_does_not_glob`,
+  `test_log_count_is_clamped`.
 
 ## Fork rebases
 
@@ -196,14 +220,14 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   installed Core version. The AI names only the domain, the reason and
   which of the fork's own changes to keep: hunk ids `<file>#<n>` from
   `opsctl core-compare <domain> --fork` ([capabilities.md](capabilities.md)
-  K14), or `none`. No argument carries file content. The domain must be a
+  K13), or `none`. No argument carries file content. The domain must be a
   custom integration on this install, never the agent (`self_path`), never
   on the never-reload list or `rebase.deny` and never one that provides
   access hardware ([updates.md](updates.md) U32), and
   Core must have an integration of that name at the installed version.
   Implementation `opsd/forkrebase.py`; tests `tests/test_forkrebase.py`.
 - C12. **The build** (daemon only). Base: Core's files for the installed
-  version, each checked against GitHub's blob SHA for that tag (K14; a
+  version, each checked against GitHub's blob SHA for that tag (K13; a
   consistency check between GitHub's hosts, not a supply-chain control).
   The fork's origin: the newest tag among the installed one and the `.0`
   releases of the last 6 months whose files differ least from the fork's
@@ -228,7 +252,7 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   protect the house. A result identical to the fork is refused ("already
   matches").
 - C14. **The record.** A proposal is a store key-value record
-  (`fork:proposal:<16 hex>`, no schema change) plus its result's bytes
+  (`fork:proposal:<16 hex>`) plus its result's bytes
   under `/data/fork-rebase/<id>/new/` (directories 0700, files 0600):
   domain, Core version, origin tag, kept hunk ids, the reason (shown only
   as the agent's text), each file's SHA-256 before and after, the result
@@ -239,6 +263,6 @@ Implementation: `opsd/changes.py` (`ChangeManager`), `opsd/changepaths.py`,
   `stale`; the newest 20 are kept, and a finished one beyond them is
   deleted with its files. It never writes the fork; applying is the update
   pipeline's ([updates.md](updates.md) U26–U31), after the admin's
-  approval ([approvals.md](approvals.md) A18). Reject moves an open one to
+  approval ([approvals.md](approvals.md) A17). Reject moves an open one to
   `rejected` and voids its approval.
 

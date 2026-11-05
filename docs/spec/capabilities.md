@@ -16,30 +16,35 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   resolving to `opsd...:function`, typed arguments named `[a-z]{1,20}`
   (booleans never positional), `requires` within `git`, `vacuums`,
   `localpatches`, `suppress`, allowed origins, effects, a tier, a quota
-  `(per_run, per_day)` and `enabled`. The argparse tree, the guard's verb
+  `(per_run, per_day)` and, for every AI-reachable row, the fixed `step`
+  label the panel shows while a run uses it (reads may add a `source`
+  name for a reply's Sources footer). The argparse tree, the guard's verb
   set and the RPC schema are generated from it. Tests
   `test_every_reference_resolves`, `test_guard_parser_and_schema_are_generated`,
-  `test_registry_rejects_bad_rows`, `test_disabled_capability_is_not_offered_anywhere`.
-- K2. Verbs on the socket (0.22.0): `status`, `baseline`, `health
+  `test_registry_rejects_bad_rows`.
+- K2. Verbs on the socket: `status`, `baseline`, `health
   [--diff]`, `repairs`, `entities`, `integrations`, `entries`, `updates`,
   `backups`, `logs <core|supervisor|host|addon>`, `history <entity>`,
   `system`, `core-compare <domain>` (3/12, refund on refusal), `update-plan`, `git-status`, `git-log`, `git-diff`, `git-show`
   (git), `vacuum-rooms` (overlay), `remind` (`task.create`, 5/30), `tasks`,
-  `cancel` (10/30), `ack` (`baseline.ack`, agent-self only, 100/400),
+  `cancel` (10/30),
   `notify` (`notify.admin`, agent-self only, 1/9), `investigate`
-  (`task.investigate`, admin origins, 1/4), `request-approval <update.x|backup>`
-  (`approval.request`, admin origins, 2/6), `propose-change` (3/10, git),
+  (`task.investigate`, admin origins, 1/4), `propose-change` (3/10, git),
   `propose-fact` (2/5, git), `propose-suppression` (1/3, git and overlay),
   `propose-rebase <domain>` (`fork.propose`, 1/3, refund on refusal),
   `integration-reload <domain>` (2/6, refund on refusal).
 - K3. Internal capabilities never reachable from the socket, the CLI, the
   guard or the prompt: `change.apply`, `change.revert` (tier APPROVE),
-  `dashboard.save` (tier APPROVE), `fork.apply` (tier APPROVE, effect
+  `fork.apply` (tier APPROVE, effect
   `{MUTATE_HA}`: writes an approved fork rebase and restarts Core, only as
   an update job, [updates.md](updates.md) U26–U31), `backup.create`,
   `update.install` (tier from the update rule), `update.rollback`
-  (AUTO_NOTIFY; also restores a fork rebase's snapshot). Test
-  `test_only_the_export_and_the_drafts_are_allowed` and the registry tests.
+  (AUTO_NOTIFY; also restores a fork rebase's snapshot). An internal row
+  has no executor reference (the daemon calls its own code); the registry
+  requires an executor exactly for the reachable rows. Tests
+  `test_only_the_export_and_the_drafts_are_allowed`,
+  `test_internal_capabilities_are_never_on_the_socket`,
+  `test_rpc_parse_clamps_and_defaults`.
 
 - K4. "Read" capabilities (effects exactly `{READ}`): `health.snapshot`,
   `ha.entities`, `ha.entries`, `ha.logs`, `ha.history`, `ha.core_compare`,
@@ -59,7 +64,11 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   `capabilities.never` (NEVER). Only AUTO and AUTO_NOTIFY execute. In
   `observe` mode (or with invalid options) an executable request with a
   RELOAD, MUTATE_HA or MUTATE_GIT effect becomes report-only. Options never
-  loosen. Tests `test_policy.py:178-236`, `test_act_mode_executes_observe_mode_only_reports`,
+  loosen. Tests `test_default_tiers`, `test_origin_not_accepted_is_never`,
+  `test_observe_mode_reports_external_effects_only`,
+  `test_tightening_and_resolver_cannot_loosen`,
+  `test_chat_origin_only_reads_schedules_and_notifies`,
+  `test_act_mode_executes_observe_mode_only_reports`,
   `test_origins_outside_the_row_and_the_admin_switch_are_refused`.
 - K6. The run's grant is its profile's capability list
   ([ai-runner.md](ai-runner.md)); a capability whose `requires` group the
@@ -75,7 +84,7 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
 - K8. Wire: one newline-terminated JSON object `{"verb", "args"}` of at
   most 8192 bytes, read with a 10-second timeout; the reply is `{"ok":
   true, "output"}` or `{"ok": false, "error"}`. Parsing accepts only `verb`
-  and `args`, an enabled non-internal verb, known arguments, strict
+  and `args`, a non-internal verb, known arguments, strict
   booleans, integers clamped to their range, strings checked against
   choices or pattern. Tests `test_rpc_schema_rejects`,
   `test_rpc_parse_clamps_and_defaults`, `test_rpc_limits`.
@@ -83,7 +92,10 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   in the allowed set (the `ops` uid in production), and the pid MUST descend
   from the bound run's root process; outside a run, mutating verbs are
   refused. At most 8 connections. Tests `test_rpc_rejects_unexpected_peer`,
-  `test_socket_denies_unknown_peer_and_overload`, `test_rpc_effects.py:110-142`.
+  `test_socket_denies_unknown_peer_and_overload`,
+  `test_effects_refused_outside_a_run`,
+  `test_strict_binding_by_uid_and_process_tree`,
+  `test_run_not_attached_to_a_process_refuses_ops`.
 - K10. **Pipeline per request:** bind the peer; the run's request budget of
   200; parse; the profile grant; `requires`; mutating verbs need a run; the
   validator; `policy.decide`; a non-executable verdict is refused with
@@ -96,10 +108,8 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   sync ones in a thread under a 2-slot semaphore. Output is redacted and
   cut at 40 000 characters. Rejections are audited at most 60 per minute.
   Tests `test_rpc_effects.py`, `test_output_secrets_and_cap`.
-- K11. **Effects.** `baseline.ack` only records an ack (key must be in the
-  run's hand-off, days 1..30, a critical item can be snoozed at most 3 days
-  and never accepted, a warning at most 7); the daemon applies it after the
-  run. `notify.admin` needs a message of at most 900 characters, `urgent`
+- K11. **Effects.** The AI never acks a health item: triage gives verdicts
+  and the daemon snoozes ([health.md](health.md) H16a). `notify.admin` needs a message of at most 900 characters, `urgent`
   only when the hand-off has a critical item, and is sent with the run's
   budget class. It needs a `reason`: a class from `PUSH_REASONS`
   (`needs_action`, `physical_task`, `security`: the admin must act or
@@ -111,29 +121,52 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   the task's reminder or follow-up result is pushed when due
   ([chat.md](chat.md) T16). The deterministic critical push
   ([health.md](health.md) H17) is unaffected. Tests
-  `test_rpc_effects.py:177-242`, `test_a_push_needs_a_reason_class_and_a_note_takes_no_push_quota`,
+  `test_notify_one_per_run_and_urgent_only_with_critical`,
+  `test_a_push_needs_a_reason_class_and_a_note_takes_no_push_quota`,
   `test_an_agent_push_for_information_goes_to_history_and_the_critical_push_still_goes`,
-  `test_daemon.py:498-538`.
-- K12. **`dashboard.save`** (verb `dashboard-save`, executor
-  `opsd.dashboards:exec_internal`, which always refuses) is daemon-internal:
-  tier APPROVE, effect `{MUTATE_HA}`, origin agent-self only, in no run
-  profile's grant. The daemon saves one storage dashboard only through
-  `dashboards.DashboardWriter.execute`, applying only the narrow edit of
-  [maintenance.md](maintenance.md) M18, and only to core display-only
-  cards with no tap actions (any other card gets a text-only plan; a
-  display card that names, matches or could select access hardware is
-  refused too), on a dashboard Home Assistant lists in `storage` mode at
-  the request and at execution, after consuming the admin's
-  dashboard approval, in act mode, and refuses when `capabilities.never`
-  names `dashboard.save`; `capabilities.require_approval` cannot loosen
-  it. The save itself passes the self-guard only inside its approved scope
-  ([selfguard.md](selfguard.md) G8). See [maintenance.md](maintenance.md)
-  M20–M23. Test `test_dashboard_save_is_an_approval_only_daemon_capability`.
-- K13. **`logs host --identifier`** names one journal identifier,
+  `test_in_run_effects`.
+- K12. **`logs host --identifier`** names one journal identifier,
   `[A-Za-z0-9_.@-]+`, never containing `..` and never only dots; it is
   percent-encoded as one segment of `/host/logs/identifiers/<id>`.
   Test `test_logs_literal_grep_and_redaction`.
-- K14. **`ha.core_compare`** (verb `core-compare <domain>`, executor
+- K12a. **`ha.entries` settings.** Each config entry row (id, domain,
+  title, state, reason, disabled_by, source) adds `settings`: the entry's
+  `data` and `options` for an **allowlist** of non-sensitive keys only,
+  read by the daemon from `.storage/core.config_entries` (the AI never
+  reads that file, [privsep.md](privsep.md) V7) and filtered by
+  `privacy.entry_settings`, failing closed. The list is the one constant
+  `privacy.ENTRY_SETTING_KEYS`: `country`, `province`, `region`,
+  `subdiv`, `state` (only a short code of at most 8 letters, digits, `_`
+  or `-`), `language`, `workdays`, `excludes`, `add_holidays`,
+  `remove_holidays`, `days_offset`, `unit_system`, `temperature_unit`,
+  `time_zone`, `mode`, `scan_interval`, `update_interval`. Adding a key
+  widens what the AI reads and needs a review. Every other key is
+  withheld. A second guard drops a value on an allowed key unless it is a
+  bool, a number of magnitude at most 100 000 with at most 3 decimals, a
+  string of `[A-Za-z0-9 _.,:/+-]` of at most 64 characters that also fits
+  its key's shape (`privacy.ENTRY_VALUE_SHAPES`: `country`, `province`,
+  `subdiv`, `language`, `unit_system`, `temperature_unit` at most 16
+  letters, `_` or `-`; `time_zone` an area name with up to two `/`
+  segments; `mode` and `region` at most 32 letters, spaces, `_` or `-`;
+  an item of `workdays`, `excludes`, `add_holidays`, `remove_holidays` a
+  weekday name, `holiday`, an ISO date or at most 40 letters and spaces:
+  no digits, `:`, `=` or `/` where none belong, so a short password, host
+  or address on a generic key is withheld), or a list of
+  at most 10 such (any bad item drops the list; objects are dropped); a
+  string is dropped when it looks like a URL, an IP or MAC address, an
+  e-mail, a JWT, a UUID, 16 or more hex digits, 20 or more base64-ish
+  characters mixing letters and digits, a phone or other number of 9 or
+  more digits, a coordinate, or when the redactor would change it. No
+  settings for `mobile_app` or a domain named like access hardware. At
+  most 20 settings and 800 characters an entry, 16 000 characters a
+  call (later entries get none). `withheld` counts what was dropped
+  (never its keys or values). An unreadable or malformed file gives no
+  settings (`settings_unavailable: true`), never an error. The output is
+  redacted as always (K10). Tests
+  `test_entry_settings_never_reveal_secrets`,
+  `test_entry_settings_keep_allowed_choices`,
+  `test_entries_answer_with_settings_and_fail_closed`.
+- K13. **`ha.core_compare`** (verb `core-compare <domain>`, executor
   `opsd.coresource:cmd_core_compare`, validator
   `opsd.coresource:validate_compare`) compares a custom integration with
   Home Assistant Core's integration of the same domain, read-only, with no
@@ -201,14 +234,14 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
     40 000-character cap and is never cut by it. When Core has no such integration the answer
     says it is a pure custom integration. The answer is redacted.
   Tests `tests/test_coresource.py`.
-- K15. **`fork.propose`** (verb `propose-rebase <domain> --keep <ids|none>
+- K14. **`fork.propose`** (verb `propose-rebase <domain> --keep <ids|none>
   --reason <text>`, executor `opsd.forkrebase:exec_propose`, validator
   `opsd.forkrebase:validate_propose`): effects `{PROPOSE}`, origins admin,
   admin-chat and agent-self, quota 1 per run and 3 per day, a validator or
   build refusal gives the daily unit back. Granted to `chat`,
   `investigate` and `maintenance_plan`, never `triage` or `followup`; in a
   `maintenance_plan` run only for a domain with a repair or release-notes
-  finding ([maintenance.md](maintenance.md) M16). It
+  finding ([maintenance.md](maintenance.md) M15). It
   records a proposal and writes nothing else; see
   [proposals.md](proposals.md) C11–C14. Tests `tests/test_forkrebase.py`.
 

@@ -40,7 +40,7 @@ implements each one and the tests that enforce it.
 | [panel.md](panel.md) | The panel transport, security, the item record and every route. |
 | [chat.md](chat.md) | Conversations on items and questions, push replies, reminders, follow-ups, investigations. |
 | [proposals.md](proposals.md) | Config changes as git proposals. |
-| [maintenance.md](maintenance.md) | Proactive maintenance: deprecation signals, the inventory, findings, plans, dashboard migrations and the `dashboard.save` capability. |
+| [maintenance.md](maintenance.md) | Proactive maintenance: deprecation signals, the inventory, findings and plans (dashboards are only read). |
 | [ai-runner.md](ai-runner.md) | Run profiles, preflight, the run copy, the tool guard, and the AI provider. |
 | [capabilities.md](capabilities.md) | The capability registry, policy tiers, the opsctl socket and pipeline. |
 | [reload.md](reload.md) | Integration reloads: allowlist, never-list, live checks, rate. |

@@ -21,13 +21,18 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 - C3. A bad value keeps its default and records one problem that never echoes
   the value. A list keeps its valid entries and drops the invalid ones, with
   one problem. Tests `test_problems_never_echo_values`,
-  `test_tighten_only_lists_keep_their_valid_entries`.
+  `test_tighten_only_lists_keep_their_valid_entries`. Keys of removed
+  options (the Supervisor drops them with a warning) are ignored, so an
+  upgraded install's saved options stay valid (the removed `llm.provider`:
+  the AI switch is the one off switch). Tests
+  `test_removed_options_and_capabilities_in_saved_options_are_ignored`,
+  `test_a_removed_llm_provider_option_still_loads`.
 - C4. **Fail closed.** With any problem (options, profile, or a runtime
   problem), `Options.valid` is false and: `acting` is false whatever
   `agent.mode` says, `auto_updates_on` is false whatever
   `updates.auto_install` says, the AI preflight refuses every run
   (`options_invalid`), and the daily check raises a warning item
-  `options:invalid`. `agent.mode` and `llm.provider` themselves are not
+  `options:invalid`. `agent.mode` itself is not
   rewritten. Tests `test_bad_values_fail_closed`,
   `test_invalid_options_raise_a_health_item`,
   `test_a_health_check_with_invalid_options_reports_them_without_ai`,
@@ -42,14 +47,13 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 | Key | Default | Check | Effect |
 | --- | --- | --- | --- |
 | `agent.mode` | `observe` | `observe` / `act` | `observe` reports only; `act` lets the daemon install updates (with `updates.auto_install`), make backups and reload allowed integrations. |
-| `llm.provider` | `claude` | `claude` / `none` | `none`: no AI runs; deterministic checks, pushes and the update rule continue, but with `updates.hold_if_unreviewed` on (the default) every AUTO candidate is held for approval because nothing reviewed it. |
 | `claude.token` | empty | secret, not pattern-checked | Provider credential: a setup token or an API key; see [ai-runner.md](ai-runner.md) AP1. Falls back to `/data/secrets/claude_oauth_token`. No token: AI runs are refused (`no_token`) and the deterministic fallback is used. |
-| `claude.plan` | `auto` | `auto` / `pro` / `max5` / `max20` | Subscription tier whose weekly hours size the run-time budget ([budget.md](budget.md) B3, B4); `auto` is `pro`. Ignored with an API key. |
+| `claude.plan` | `pro` | `pro` / `max5` / `max20` (`auto` accepted from earlier versions) | Subscription tier whose weekly hours size the run-time budget ([budget.md](budget.md) B3, B4); any value without hours (the legacy `auto`) is read as `pro`. Ignored with an API key. |
 | `claude.model_standard` | `claude-sonnet-5-5` | `[a-z0-9][a-z0-9.-]{1,63}` | Model for every run profile except summaries. |
 | `claude.model_fast` | empty | same pattern or empty | Model for the summary profile; empty means `model_standard`. |
 | `chat.activity_days` | 7 | 1..30 | Chat activity retention. |
 | `notify.service` | empty | `(mobile_app_[a-z0-9_]+)?` | Push target; empty means the profile's `notify_service`. |
-| `notify.max_pushes_per_day` | 3 | 0..20 | Daily cap for the normal push bucket only (see [items-and-pushes.md](items-and-pushes.md)). |
+| `notify.max_pushes_per_day` | 3 | 0..20 | Daily cap for the `agent` push bucket only (see [items-and-pushes.md](items-and-pushes.md)). |
 | `notify.quiet_start`, `notify.quiet_end` | `22:30`, `07:00` | `HH:MM` or empty | Quiet hours; see C6. |
 | `health.check_time` | `05:30` | `HH:MM` | Daily health check time (house time zone). |
 | `health.expected_unavailable` | `[]` | entity ids | Entities that are normally unavailable and are not news, in the daily check, `opsctl health --diff` and the update health compares. Locks, alarm panels, covers that are not positively a blind, shade, curtain, awning or shutter, and anything named like access hardware are never silenced ([health.md](health.md) H11a). |
@@ -59,7 +63,7 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 | `updates.review` | `true` | bool | The AI reads AUTO candidates' release notes and may hold one back, never promote. |
 | `updates.hold_if_unreviewed` | `true` | bool | An AUTO candidate the AI could not review is held, also when `updates.review` is false. |
 | `updates.need_approval`, `updates.never` | `[]` | `update.[a-z0-9_]{1,128}` | Always ask / never install (still reported). |
-| `capabilities.require_approval`, `capabilities.never` | `[]` | `[a-z][a-z0-9_]{0,40}.[a-z0-9_.]{1,60}` | Tighten a capability's tier by name; never loosens. `never: [dashboard.save]` refuses even an approved dashboard plan. |
+| `capabilities.require_approval`, `capabilities.never` | `[]` | `[a-z][a-z0-9_]{0,40}.[a-z0-9_.]{1,60}` | Tighten a capability's tier by name; never loosens. |
 | `capabilities.reloadable_domains` | empty | up to 40 comma-separated `[a-z0-9_]{1,64}` | Reload allowlist; empty means the profile's `reload.domains`. |
 | `usage.max_share_percent` | 5.0 | 0.5..25 | The run-time budget: this percent of the plan's weekly hours per 7 days, a fifth of it per 5 hours (clamped again in the budget, [budget.md](budget.md) B3). |
 | `limits.run_max_turns` | 30 | 5..100 | Turn cap of the triage profile. |
@@ -67,11 +71,6 @@ Implementation: `opsd/config.py` (`Options`, `Paths`, `RuntimeProblems`),
 | `limits.daily_max_usd` | unset (0) | 0..1000 | The most the day's runs may cost, as the provider reports it; 0 or unset is no daily cap ([budget.md](budget.md) B3a, which gives the worst case without it). |
 | `limits.log_level` | `info` | `debug` / `info` / `warning` / `error` | Daemon log level. |
 | `limits.git_push` | `true` | bool | `false`: applied proposals are committed but not pushed. |
-
-Which storage dashboards the agent must never edit is the house profile's
-`dashboards.generated` ([profile.md](profile.md)); there is no option for
-it. Dashboard changes need `agent.mode: act` and an approval
-([maintenance.md](maintenance.md) M22).
 
 ## Quiet hours
 
@@ -87,5 +86,5 @@ it. Dashboard changes need `agent.mode: act` and an approval
 
 `Paths` fixes the add-on's file layout: the config mount `/mnt/ha/config`,
 the backup mount `/mnt/ha/backup`, `/data` (options, the store, secrets, runs,
-snapshots and the dashboard backups under `maintenance/dashboards`), the run copy and drafts under `/run`, and the opsctl socket.
+snapshots), the run copy and drafts under `/run`, and the opsctl socket.
 See [privsep.md](privsep.md) and [storage.md](storage.md).

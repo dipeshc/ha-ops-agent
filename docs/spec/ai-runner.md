@@ -4,7 +4,7 @@ The AI is a bounded advisor: it reads a secret-free copy of the
 configuration, asks the daemon for named actions through `opsctl`, and
 returns a schema-checked result. The daemon decides whether to act on any
 of it. This document has two parts: the provider-independent run model, and
-the one provider the 0.22.0 code implements.
+the one provider the code implements.
 
 Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 `opsd/runctx.py`, `opsd/guard.py` and `bin/guard-hook` (the tool guard),
@@ -16,10 +16,10 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 
 | Profile | Prompt | Schema | Capabilities | Class | Turns | Cost cap (USD) | Drafts |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `triage` | `profiles/triage.md` | `triage-result` | reads + `task.create`, `task.list`, `baseline.ack`, `notify.admin`, `suppress.propose`, `integration.reload` | AGENT | `limits.run_max_turns` (30) | `limits.run_max_usd` (1.5) | no |
-| `chat` | `profiles/chat.md` | `reply-result` | reads + `ha.core_compare`, `fork.propose`, `task.create/list/cancel`, `task.investigate`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 15 | min(0.5, run_max_usd) | yes |
-| `followup` | `profiles/followup.md` | `reply-result` | reads + `task.create/list/cancel`, `approval.request` | AGENT | 15 | min(0.5, run_max_usd) | no |
-| `investigate` | `profiles/investigate.md` | `investigate-result` | reads + `ha.core_compare`, `fork.propose`, `task.list`, `approval.request`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 25 | min(1.0, run_max_usd) | yes |
+| `triage` | `profiles/triage.md` | `triage-result` | reads + `task.create`, `task.list`, `notify.admin`, `suppress.propose`, `integration.reload` | AGENT | `limits.run_max_turns` (30) | `limits.run_max_usd` (1.5) | no |
+| `chat` | `profiles/chat.md` | `reply-result` | reads + `ha.core_compare`, `fork.propose`, `task.create/list/cancel`, `task.investigate`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 15 | min(0.5, run_max_usd) | yes |
+| `followup` | `profiles/followup.md` | `reply-result` | reads + `task.create/list/cancel` | AGENT | 15 | min(0.5, run_max_usd) | no |
+| `investigate` | `profiles/investigate.md` | `investigate-result` | reads + `ha.core_compare`, `fork.propose`, `task.list`, `change.propose`, `facts.propose`, `suppress.propose`, `integration.reload` | USER | 25 | min(1.0, run_max_usd) | yes |
 | `summary` | `profiles/summary.md` | `reply-result` | none | USER | 5 | min(0.2, run_max_usd) | no |
 | `update_review` | `profiles/update_review.md` | `update-review` | none | AGENT | 6 | min(0.5, run_max_usd) | no |
 | `maintenance_plan` | `profiles/maintenance_plan.md` | `maintenance-plan` | reads + `ha.core_compare`, `fork.propose` | AGENT | 16 | min(0.5, run_max_usd) | no |
@@ -27,7 +27,7 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 - R1. "Reads" are the capabilities whose only effect is READ
   ([capabilities.md](capabilities.md)), except `ha.core_compare`, the one
   read that makes the daemon fetch from the internet (Home Assistant
-  Core's source on GitHub, [capabilities.md](capabilities.md) K14): only
+  Core's source on GitHub, [capabilities.md](capabilities.md) K13): only
   `chat`, `investigate` and `maintenance_plan` name it, never `triage`.
   The prompts tell the model to use it whenever a custom integration
   shadows or forks a Core one, and to report what it shows as facts,
@@ -46,7 +46,7 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
   validated again by the daemon (`triage` `{result, summary<=600}`; reply
   `{reply: null|<=1500, summary<=300}`; investigate adds `next: null|<=600`;
   update review as in [updates.md](updates.md) U8; maintenance plan as in
-  [maintenance.md](maintenance.md) M16–M18).
+  [maintenance.md](maintenance.md) M15–M16).
 - R3. Run time is not per profile: `min(20 minutes, reservation)` where the
   reservation is the smaller of the profile's reserve (triage 600 s, chat
   180, followup 180, investigate 420, summary 90, others 180) and what the
@@ -56,13 +56,14 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 ## Preflight and life cycle
 
 - R4. Preflight order, each a refusal status: options valid
-  (`options_invalid`), provider not `none` (`no_provider`), a token
+  (`options_invalid`), a token
   (`no_token`), a store (`store_unavailable`), the kill switch and backoff
   (`ai_disabled`, `usage_limited`), at least 1200 MB of available memory
-  (`skipped_low_memory`), the user-class reserve, isolation
+  (`skipped_low_memory`), isolation
   (`isolation_failed`: the unprivileged account exists, no sensitive path is
   reachable by it, the last self-test passed), the daily run cap and the
-  run-time and cost reservation ([budget.md](budget.md) B3, B3a), the export (`export_failed`), the prompt files
+  run-time and cost reservation, with the user-class reserve
+  ([budget.md](budget.md) B1, B3, B3a, B5), the export (`export_failed`), the prompt files
   (`setup_failed`), the kill switch again, the drafts directory. Tests
   `test_preflight_refusals_never_start_claude`,
   `test_isolation_failure_blocks_claude`.
@@ -79,7 +80,8 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
   available memory under 400 MB kills the process group
   (`aborted_memory_guard`). A timeout sends SIGTERM, waits 15 seconds, then
   SIGKILL; pipes are drained for at most 30 seconds. Tests
-  `test_claude_runner.py:74-171`.
+  `test_tree_rss`, `test_memory_guard_kills_run`, `test_timeout`,
+  `test_timeout_kills_whole_process_group`.
 - R8. Every output line is redacted and gzip-written to
   `/data/runs/<stamp>-<profile>/transcript.jsonl.gz`, beside `prompt.txt`,
   `system-prompt.md` and, for triage, `result.json`. Run directories are
@@ -142,12 +144,13 @@ Implementation: `opsd/runner.py` (profiles, preflight, run life cycle),
 
 ## The AI provider
 
-The 0.22.0 code has one provider, selected by `llm.provider: claude`;
-`none` turns the AI off (deterministic checks, pushes and updates continue;
-AUTO updates are then held unless `updates.hold_if_unreviewed` is off). The
-runner calls `claude_runner.run_claude` directly; adding a provider means
-adding a module with the same `RunConfig -> RunResult` contract and a
-dispatch on `llm.provider`.
+The code has one provider, Claude Code. The AI switch
+([budget.md](budget.md)) is the one way to turn the AI off (deterministic
+checks, pushes and updates continue; AUTO updates are then held unless
+`updates.hold_if_unreviewed` is off). The runner calls
+`claude_runner.run_claude` directly; adding a provider means adding a
+module with the same `RunConfig -> RunResult` contract and an option to
+choose it.
 
 - AP1. **Credential.** `claude.token`, else the file
   `/data/secrets/claude_oauth_token`, holds either a Claude Code setup
@@ -217,4 +220,6 @@ dispatch on `llm.provider`.
   the reset time. The output names no subscription tier, so nothing
   detects one. Without a result
   event the last 20 stderr lines decide between error and usage limit.
-  Tests `test_claude_runner.py:58-72`, `test_usage.py:165-218`.
+  Tests `test_parse_final_json`, `test_parse_final_json_bad`,
+  `test_interpret_result`, `test_tokens_duration_and_usage_limit_from_result`,
+  `test_stream_rate_limit_events`.

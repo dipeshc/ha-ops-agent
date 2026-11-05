@@ -5,7 +5,7 @@ a reload of an allowlisted integration. It is bounded in code: never
 anything that opens the house, once per domain per 10 minutes, a few a day.
 
 Implementation: `opsd/reload.py`, `opsd/access.py` (the access-word
-classification it shares with the health check and dashboard edits),
+classification it shares with the health check),
 `opsd/policy.py` `NEVER_RELOAD_DOMAINS`,
 the `integration.reload` row in `opsd/capabilities.py`. Tests:
 `tests/test_reload.py`, `tests/test_profile.py` (never-list),

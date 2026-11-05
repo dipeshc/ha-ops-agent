@@ -15,7 +15,8 @@ Implementation: `opsd/updates.py` (`_await_os_install`, `_reboot`,
   and posts `POST /os/update {version}` only inside `approved_os_flow`.
 - O2. After the install the daemon reads `/os/info` (version,
   `version_pending`, boot slot), `/host/info` (boot timestamp) and
-  `/resolution/info` (`reboot_required`). A pending version moves the job to
+  `/resolution/info` (`reboot_required`). Installed and pending means
+  `version_pending` is the target. A pending version moves the job to
   `rebooting` with 12 lines of Supervisor log evidence; the new version
   already active moves it to verifying; the old version with nothing pending
   is a failure. Test `test_os_phase_reads_the_supervisor_as_it_reports`.
@@ -38,8 +39,8 @@ Implementation: `opsd/updates.py` (`_await_os_install`, `_reboot`,
   `test_coming_back_on_the_old_version_is_a_real_failure_and_escalates`.
 - O5. **Reboot pending.** The item is `waiting` with the single primary
   action `reboot_window` ("Reboot tonight at HH:MM"); it is never `failed`.
-  The action creates a reboot approval bound to the job id, entity,
-  versions, state and finish time; confirming it is the requester's act.
+  The action grants a reboot approval bound to the job id, entity,
+  versions, state and finish time ([approvals.md](approvals.md) A15).
   After the next nightly run, `_approved_reboots` creates a one-job run with
   a fresh probe, consumes the approval and reboots as in O3. Test
   `test_an_approved_reboot_runs_last_in_a_run_of_its_own`.

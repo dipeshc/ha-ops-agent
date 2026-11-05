@@ -61,12 +61,12 @@ list holds at most 50 entries and MUST NOT repeat an entry.
 | `docs.runbook` | a path ending `.md` that passes the readable-entry rules. |
 | `docs.facts` | as `runbook`, and additionally `docs/[a-z0-9][a-z0-9_-]{0,63}.md`. |
 | `docs.readable` | list of readable entries: a `.md` file path, or a top-level directory name with no `/` and no `.`. |
-| `dashboards.generated` | list of storage-dashboard url_paths (`[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+`: lower case, with a hyphen) that something else writes; default empty. The agent never plans or saves a change to one ([maintenance.md](maintenance.md) M18, M23–M24). |
 
 Tests: `test_the_schema_is_strict`, `test_a_fragile_piece_can_only_hold_back`,
 `test_self_slug_must_name_the_agent`, `test_git_author_cannot_inject_options`,
 `test_proposal_kinds_are_the_three_the_config_check_knows`,
-`test_profile_key_dashboards_generated_is_strict`, `test_rebase_deny_is_its_own_strict_key`.
+`test_rebase_deny_is_its_own_strict_key`. A profile that still has the
+removed `dashboards.generated` key is refused like any unknown key.
 
 ## Readable entries
 
@@ -93,29 +93,25 @@ Tests: `test_the_schema_is_strict`, `test_a_fragile_piece_can_only_hold_back`,
   never-reload domain. Tests `test_reload_deny_only_adds`,
   `test_a_profile_listing_a_never_reload_domain_is_refused`,
   `test_lock_alarm_and_garage_vendors_are_never_reloaded`.
-- P17. `rebase.deny` only adds to what is never rebased (the never-reload
+- P11. `rebase.deny` only adds to what is never rebased (the never-reload
   list in code and live access hardware); nothing in the profile can make
   one of those rebasable. `reload.deny` is about autonomous reloads and
   does not block an approved rebase. Test
   `test_reload_deny_never_blocks_a_rebase_but_rebase_deny_does`.
-- P16. `dashboards.generated` only narrows: it adds dashboards the
-  self-guard never opens a save scope for, and no profile key makes a
-  YAML-mode or the default dashboard writable. Test
-  `test_a_generated_dashboard_is_refused_even_with_a_forged_approval`.
-- P11. `house_notes`, the runbook and the facts document are data for the AI
+- P12. `house_notes`, the runbook and the facts document are data for the AI
   (fenced, size-capped); they grant no capability. Proposal rules derived from
   the profile are empty unless git is enabled and never reach the AI as
   instructions. Test `test_proposal_rules_never_reach_the_agent_or_config`.
 
 ## Merging with options
 
-- P12. Push target: the `notify.service` option, else the profile's
+- P13. Push target: the `notify.service` option, else the profile's
   `notify_service`, else no push target.
-- P13. Reload allowlist: the `capabilities.reloadable_domains` option when
+- P14. Reload allowlist: the `capabilities.reloadable_domains` option when
   non-empty, else `reload.domains`, else none. Never-lists apply in every case.
-- P14. `updates.need_approval` is the union of the option and the profile.
+- P15. `updates.need_approval` is the union of the option and the profile.
   Test `test_the_house_profile_only_adds_need_approval`.
-- P15. Available capability groups are the enabled overlays plus `git` when
+- P16. Available capability groups are the enabled overlays plus `git` when
   `git.enabled` is true; a capability whose group is unavailable is refused
   and not offered to the AI. Tests
   `test_without_git_proposals_and_overlays_are_refused`,

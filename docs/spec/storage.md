@@ -1,10 +1,10 @@
 # Storage and migrations
 
 Implementation: `opsd/store.py` (SQLite), `opsd/jsonstore.py`,
-`opsd/state.py`, `opsd/lock.py`, `opsd/logs.py`, `bin/ops-backup-pre`.
+`opsd/state.py`, `opsd/logs.py`, `bin/ops-backup-pre`.
 Tests: `tests/test_store.py`, `tests/test_store_upgrade.py` (the upgrade from
-schema 18 on a fixture database built with the frozen 0.18 migrations in
-`tests/fixtures/schema_v18.py`), `tests/test_infra.py`, `tests/test_usage.py`
+schema 19 on `tests/fixtures/schema_v19.sql`, a store 0.23.0's own code
+wrote, dumped once and frozen), `tests/test_infra.py`, `tests/test_usage.py`
 (pruning), `tests/test_chat_retention.py`.
 
 ## The store
@@ -23,23 +23,24 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   `test_migrated_private_and_reopenable`,
   `test_store_file_created_private_even_with_open_umask`.
 - S2. **Schema versions.** The schema version is tracked in `PRAGMA
-  user_version`; this version's is 19. An empty file gets the whole schema
-  in one transaction. A store at 18 (add-on 0.18) is upgraded by one
-  migration in one transaction (S11); a failure anywhere in it rolls the
-  file back to 18 untouched. A store at any other version below 19, or a
+  user_version`; this version's is 20. An empty file gets the whole schema
+  in one transaction. A store at 19 (add-ons 0.19 to 0.23) is upgraded by
+  one migration in one transaction (S11); a failure anywhere in it rolls the
+  file back to 19 untouched. A store at any other version below 20, or a
   file with tables but no version, MUST be refused (`StoreError`, "older than
-  this agent upgrades": install 0.18 first) and a store newer than 19 MUST be
+  this agent upgrades": install 0.23 first) and a store newer than 20 MUST be
   refused ("newer": the add-on was downgraded); neither is ever quarantined
-  or changed. Tests `test_newer_schema_is_refused`,
+  or changed. **One upgrade only:** each release carries the upgrade from
+  the previous schema alone, and the next schema change deletes it with its
+  fixture and tests. Tests `test_newer_schema_is_refused`,
   `test_newer_schema_is_never_quarantined`, `test_failed_migration_rolls_back`,
-  `test_a_store_older_than_18_refuses_to_open`,
+  `test_a_store_at_any_other_version_is_refused_untouched`,
   `test_tables_without_a_schema_version_refuse_to_open`,
-  `test_a_failure_midway_leaves_the_store_at_18_untouched`.
+  `test_a_failure_midway_leaves_the_store_at_19_untouched`.
 - S3. **Tables** (ten; the upgrade makes exactly the schema a fresh install
   makes: every statement with its CHECKs, defaults and generated column,
-  the columns, foreign keys and index columns; tests
-  `test_the_upgrade_makes_the_same_schema_as_a_fresh_install`,
-  `test_a_store_from_schema_1_ends_with_exactly_a_fresh_installs_schema`):
+  the columns, foreign keys and index columns; test
+  `test_the_upgrade_makes_the_same_schema_as_a_fresh_install`):
   - `audit`: every capability request and decision.
   - `tasks`: the scheduler. Kinds `reminder`, `followup` (investigations
     are follow-ups), `recurring` (system tasks) and `retry` (chat retries);
@@ -50,11 +51,9 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   - `approvals`: one record for every approval and proposal, keyed by
     `(kind, id)`, with a `subject`, a `state`, a JSON `payload` and the
     decision columns. Kinds: `approval` (the admin's consent bound to one
-    action: update, reboot, change apply or revert, dashboard; id 32 hex,
+    action: update, reboot, change apply or revert, fork rebase; id 32 hex,
     `plan_hash`, `requested_by`, `run_when`, `used_by`; states as
-    [approvals.md](approvals.md) A5), `request` (a chat asked the admin to
-    approve an update, [chat.md](chat.md) T9; `open`, `done`, `void`,
-    `expired`), `change` (a config change proposal,
+    [approvals.md](approvals.md) A4), `change` (a config change proposal,
     [proposals.md](proposals.md); the payload holds the variant `change` or
     `facts`, why, effect, files with their blobs and SHA-256s, summary,
     diff, base and commit SHAs, ref, applied and reverted SHAs; states
@@ -62,28 +61,24 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
     `failed`, `stale`, `rejected`, `expired`) and `fact` (a house fact;
     `pending`, `applied`, `rejected`). A CHECK limits each kind to its own
     states. Every approval read and decision names `kind = 'approval'`, so
-    no request, change or fact can ever be read as a pending or approved
-    approval. Numbered kinds count up per kind.
+    no change or fact can ever be read as an approval. Numbered kinds count up per kind.
   - `turns`: the conversations' turns. A turn's thread is `meta.thread`
     (`item:<item id>` or `ask:<item id>`, [chat.md](chat.md) T1), written
     by the store alone and never moved by a meta update; a thread exists
-    only while its item is stored. The turns without one are the earlier
-    one chat's, whose id, start time and read mark are in `kv`
-    (`chat.main_thread`, `chat.created_at`, `chat.read`); a conversation's
-    read mark is `chat.read:<thread>`. Any other thread id reads as
-    missing. 0.22.0 needed no schema change: the thread lives in the
-    existing `meta` column, and a question item is stored under the kind
-    `investigation` ([items-and-pushes.md](items-and-pushes.md) I1).
-  - `runs`: the usage ledger, one row per AI run with its reservation and
-    actuals ([budget.md](budget.md) B7); it records no cost.
+    only while its item is stored. A conversation's read mark is
+    `chat.read:<thread>`. Any other thread id reads as
+    missing.
+  - `runs`: the usage ledger, one row per AI run with its reservation
+    (turns and run time) and actuals ([budget.md](budget.md) B7); it
+    records no cost.
   - `kv`: small state, one key each. Daily counters (`count:<day>:<name>`),
     quiet-hours holds (`push.held:<n>`, [items-and-pushes.md](items-and-pushes.md)
     N8), push action ids (`push.action:<id>`, N10), the reload times
-    (`reload.last`, [reload.md](reload.md) L4), the chat (above), the
+    (`reload.last`, [reload.md](reload.md) L4), the read marks (above), the
     standalone entry counter (`activity.seq`), item acknowledgements
     (`item.ack:<key>`), update flags, holds, reviews and first-seen times,
-    maintenance state (S11a), verdicts (`verdict:<cause>`,
-    [maintenance.md](maintenance.md) M14d), the daily push digest
+    maintenance state (S4), verdicts (`verdict:<cause>`,
+    [maintenance.md](maintenance.md) M13d), the daily push digest
     (`items.digest`, [items-and-pushes.md](items-and-pushes.md) N1a),
     backup and evidence state.
   - `update_runs`: one row per update window or manual plan (plan, review,
@@ -93,69 +88,13 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   - `update_jobs`: one row per update with its compare-and-set state machine.
   - `items` (with the generated `needs` column and its CHECK) and
     `item_events`: [items-and-pushes.md](items-and-pushes.md).
-- S11. **The upgrade from 18.** One transaction: the five tables whose shape
-  changes (`tasks`, `approvals`, `turns`, `runs`, `items`) are renamed
-  aside and created anew; every row is copied; 18's other tables are
-  dropped; the indexes are created. It copies: every task of a kind this
-  version runs (the never-used `condition` and `expires_at` columns go; the
-  never-run state `waiting_approval` becomes `pending`; a task of a kind no
-  version ran, `watch`, `window` or `intent`, is dropped and an item shown
-  for it is resolved `cancelled` "not run by this version (an unused task
-  kind)" with an event); every approval, approval
-  proposal, change proposal and fact proposal into `approvals` (approvals
-  with their plan, hash, state, decider and the job that used them,
-  unchanged); the main chat's turns (a store without a recorded main chat
-  has no reachable turns) with its start time and read mark; every run (the
-  cost columns go); every item (the unused `confirm` and `derived` columns
-  go) and every item event; counters, held pushes and issued push actions
-  into `kv`; the highest activity number, of the log and of the
-  standalone items, into `activity.seq`. A change row whose files or
-  summary is not valid JSON is copied with an empty list. The activity
-  log and the unused `spend` table are dropped: every activity entry
-  already was an item or an item event, and an entry an older version never
-  made an item for becomes a resolved standalone item (`done`, or `failed`
-  when its title says so; never in Needs you) with one event, as migration
-  17 did. `kv` keeps every key except the
-  item backfill marker and panel confirmations (`confirm:*`), which nothing
-  reads. 0.18's `/data/reloads.json` is copied verbatim into `reload.last`
-  in the same transaction and deleted after it commits. Tests in
-  `tests/test_store_upgrade.py` (an open approval stays bound and usable
-  once; a pending request, change and fact stay actionable; a running job
-  and its night carry on; held pushes, push actions, reminders, retries,
-  the chat, the ledger, counters, kv, items, events, the audit log and the
-  reload times survive), and `tests/test_store_history.py`, which replays
-  a store from schema 1 through every frozen migration with rows written in
-  each version's shape and upgrades it (nothing open is lost, no legacy row
-  fails the upgrade).
-- S12. **The copy before the upgrade.** Before the upgrade from 18 starts,
-  the store is copied with SQLite's backup API (a consistent snapshot of
-  the live WAL database, never a raw file copy) to `/data/ops.db.v18.bak`:
-  created 0600 before anything is written to it, written as a temporary
-  file, checked to have the store's mode and owner, fsynced, renamed into
-  place and its directory fsynced. One `store copied aside before the upgrade` line is logged. If the
-  copy cannot be made, the upgrade MUST NOT start: `StoreUnavailable`, the
-  store untouched, the daemon degraded. The copy is deleted 14 days after
-  it was made, at a start or the daily prune. The self-test checks it like
-  the store (root, 0600) and the AI's account can never reach it
-  ([privsep.md](privsep.md) V4, V7). **Manual rollback** (for the admin;
-  nothing downgrades by itself), in this order: (1) stop the add-on; (2)
-  delete `/data/ops.db-wal` and `/data/ops.db-shm`, because a WAL left by
-  0.19.0 applied to the restored file makes it "database disk image is
-  malformed"; (3) copy, never move, `/data/ops.db.v18.bak` to
-  `/data/ops.db`, so the copy survives a failed attempt; (4) install
-  0.18.x and start it. What happened after the upgrade is not in the copy.
-  Tests `test_the_documented_rollback_gives_a_healthy_0_18_store`,
-  `test_the_store_is_copied_aside_before_the_upgrade`,
-  `test_a_copy_that_cannot_be_made_refuses_the_upgrade`,
-  `test_the_copy_is_deleted_after_14_days`.
-- S11a. Maintenance state lives in `kv` under `maintenance:` (`findings`,
-  `meta`, and per finding `plan:`, `dashboard:`, `result:`, `migrated:`,
-  `hidden:`, `gone:` (why the scan dropped it)); each scan blanks the
-  plan, dashboard-plan and result records of findings that are gone, and
-  their `verdict:maint:` records. 0.23.0 needs no
-  schema change: verdicts and the digest are `kv` rows. Test
-  `test_only_deprecations_within_two_releases_need_the_admin_and_push`.
-- S4. **Open and recover.** A corrupt file (`SQLITE_CORRUPT`, `SQLITE_NOTADB`
+- S4. Maintenance state lives in `kv` under `maintenance:` (`findings`,
+  `meta`, and per finding `plan:`, `hidden:`, `gone:` (why the scan dropped
+  it)); each scan blanks the plan and gone records of findings that are
+  gone, and
+  their `verdict:maint:` records. Verdicts and the digest are `kv` rows. Test
+  `test_only_deprecations_within_30_days_of_their_deadline_need_the_admin_and_push`.
+- S5. **Open and recover.** A corrupt file (`SQLITE_CORRUPT`, `SQLITE_NOTADB`
   or a failed quick check) is renamed to `ops.db.corrupt-<UTC stamp>` (with
   its WAL and SHM) and a new store is created; the daemon audits
   `store.recovered`. Busy or locked is retried with delays 0.5, 1, 2, 4
@@ -163,51 +102,51 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   schema version it does not use) raises `StoreUnavailable` and the daemon
   runs degraded. Tests `test_corrupt_file_is_quarantined_and_recreated`,
   `test_disk_and_io_errors_never_recreate`, `test_busy_is_retried_with_backoff`.
-- S5. **Degraded mode** (no store): a degraded-store push, the health check
+- S6. **Degraded mode** (no store): a degraded-store push, the health check
   still runs on its JSON files, no AI runs (`store_unavailable`), no chat.
+  Everything that needs the store (the scheduler, usage guard, evidence
+  cache, updates, backups, changes, chat, activity, maintenance and the
+  item book) is made together once the store opened and is absent as a
+  whole while degraded (`daemon.StoreServices`). Test
+  `test_degraded_without_store`.
 
 ## Retention
 
-- S6. `prune` (daily, after each health check; `keep` default 90 days, never
+- S7. `prune` (daily, after each health check; `keep` default 90 days, never
   under 8): expired push actions, and used ones after 7 days; decided facts
-  and requests after 90 days; resolved items not in Needs you and orphan
+  after 90 days; resolved items not in Needs you and orphan
   events after 90 days; settled held pushes after 7 days;
-  investigation-cancel keys after 7 days; runs and counters older than the
+  investigation-cancel keys after 7 days; evidence cache entries
+  (`evidence:`) not written for 30 days; runs and counters older than the
   cutoff; finished update runs after 180 days only when their backup is
   gone; review and seen keys after 180 days; finished non-system and retry
   tasks older than the cutoff. Audit rows older than 90 days and beyond
   50 000 are pruned. A conversation's turns older than 90 days go once
-  their item is gone (resolved items after 90 days); the earlier one chat's
-  item and turns are never pruned. Approvals and changes are never pruned.
+  their item is gone (resolved items after 90 days). Approvals and changes are never pruned.
   Run directories under `/data/runs` older than 60 days are deleted. Tests
   `test_prune_bounds_the_store`, `test_prune_keeps_the_rolling_week`,
   `test_audit_roundtrip_and_prune`, `test_a_conversation_goes_with_its_item`.
 
-## JSON files and locks
+## JSON files and logs
 
-- S7. `write_json_atomic` writes to a temporary file in the same directory,
+- S8. `write_json_atomic` writes to a temporary file in the same directory,
   fsyncs, sets 0600 and renames; `append_jsonl` fsyncs each line;
   `read_jsonl` skips bad lines. Files are what the health check and pushes
-  need without the store (S5): `/data/state.json` (`AgentState`, unknown
+  need without the store (S6): `/data/state.json` (`AgentState`, unknown
   keys ignored), `baseline.json`, `history.jsonl` (the last 100 lines are
-  read), `notify.json` (the push budgets, N4), `open-items.json`; and
-  `selftest.json` (the self-test's result, written only), `ops.db.v18.bak`
-  (S12, for 14 days after the upgrade), `secrets/push.json`
+  read), `notify.json` (the push budgets, N4), `open-items.json` (the
+  last check's open items and its time; acks are the baseline's, H13a),
+  `secrets/push.json`
   (the cached relay URL), `secrets/claude_oauth_token`. Up to 30 snapshots
-  live under `/data/snapshots`. Dashboard backups taken before a dashboard
-  save live under `/data/maintenance/dashboards/<url_path>/` (directories
-  0700, files 0600 written with `O_EXCL | O_NOFOLLOW`, the last 10 per
-  dashboard kept; [maintenance.md](maintenance.md) M22). Home Assistant
+  live under `/data/snapshots`. Home Assistant
   Core's source for `core-compare` and fork rebases lives under
   `/data/core-source/` (listings by tag, files by blob SHA;
-  [capabilities.md](capabilities.md) K14), and each fork rebase proposal's
+  [capabilities.md](capabilities.md) K13), and each fork rebase proposal's
   rebased files and the snapshot of the files it replaced under
   `/data/fork-rebase/<id>/` (`new/`, `old/`; [proposals.md](proposals.md)
   C14); both root-only, directories 0700 and files 0600. Proposals
-  themselves are key-value records (`fork:proposal:<id>`); the store
-  schema is unchanged. Test `test_jsonstore`.
-- S8. `/data/run.lock` is an exclusive non-blocking `flock` (0600, holds
-  the pid), released by the kernel on a crash. Test `test_run_lock`.
+  themselves are key-value records (`fork:proposal:<id>`). Test
+  `test_jsonstore`.
 - S9. Logs are one JSON object per line on stderr (`ts`, `level`, `logger`,
   `msg`, extra fields, `exc`), and every line passes the redactor built from
   `secrets.yaml` values, the provider token and the Supervisor token.
@@ -220,3 +159,54 @@ schema 18 on a fixture database built with the frozen 0.18 migrations in
   0 so a busy or broken store never fails the backup. `runs/*` and
   `snapshots/*` are excluded. Tests `test_checkpoint_main`,
   `test_checkpoint_never_fails_the_backup`.
+
+## The upgrade from schema 19
+
+- S11. **The upgrade from 19.** One transaction: `approvals`, `runs` and
+  `items` (a CHECK or the columns changed) are renamed aside, created anew,
+  their rows copied and the old tables dropped; then the indexes are
+  created. Every row is kept as it was except:
+  - `approvals`: the chat approval requests (kind `request`) and every
+    approval of a dashboard change are dropped (0.24.0 has neither); an
+    approval still `pending` (never confirmed) is `void`, "never confirmed
+    (0.24.0 has no confirmation step)", never granted.
+  - `runs`: the unused columns `week`, `month`, `reserved_tokens`,
+    `reserved_share`, `share_5h`, `share_7d`, `share_estimated` go.
+  - `items`: a question (key `ask:`) gets the kind `question`; the earlier
+    one chat's item (`chat:earlier`) goes with its events. An item push
+    0.23.0 held for quiet hours (`push.held:*` whose push's tag is the
+    item's id) is dropped and the item's `push` cleared, so the item book
+    decides it again ([items-and-pushes.md](items-and-pushes.md) N8); the
+    daemon's own held pushes stay.
+  - `turns`: the earlier one chat's turns (no `meta.thread`) go; its
+    pending retry tasks are cancelled; the `status.refresh` system task
+    goes (nothing runs it).
+  - `kv`: `chat.main_thread`, `chat.created_at`, `chat.read`,
+    `maintenance:dashboard:*`, `maintenance:result:*`,
+    `maintenance:migrated:*` and the counters `chat_turns`,
+    `chat_cap_notice`, `followup_runs`, `cap:plan_fix`,
+    `cap:approval.request`, `cap:dashboard.save`, `cap:baseline.ack` go;
+    `maintenance:meta` loses `trigger`, `problems` and `inventory`; stored
+    maintenance findings of the removed `suggestion` variant
+    (`marketplace` signal) go with their plan and hiding; a hiding or plan
+    recorded under 0.22's evidence hash is rewritten to the finding's own
+    fingerprint (it stays hidden, its plan reused); a stored finding the
+    upgrade cannot read (a Python error over it, not a database error) goes
+    with its plan and hiding, logged, so that it can never wedge the start
+    (the next scan raises it again if it still applies). Audit rows are
+    history and are all kept.
+  After it commits, the files 0.23.0 left beside the store that nothing
+  reads are deleted: `ops.db.v18.bak` (the 0.19 upgrade copy), `run.lock`
+  and `selftest.json`; `/data/maintenance/dashboards/` (backups of
+  dashboards 0.23.0 changed) is left for the admin. No copy is taken
+  before the upgrade: the add-on's own backup before an update is the way
+  back. Tests in `tests/test_store_upgrade.py`:
+  `test_every_kept_row_is_unchanged_and_only_what_s11_names_changed`,
+  `test_the_dropped_rows_columns_and_keys_are_gone`,
+  `test_a_finding_hidden_or_planned_under_the_0_22_hash_stays_hidden_and_planned`,
+  `test_a_held_item_push_goes_back_to_the_item_book_and_daemon_pushes_stay_held`,
+  `test_open_records_still_work_through_the_current_api` (an approved
+  change and update still bind and are used once; the running job, the
+  reminder, facts, conversations, the ledger and push actions carry on),
+  `test_a_second_open_changes_nothing`,
+  `test_the_files_0_23_0_left_beside_the_store_are_deleted`.

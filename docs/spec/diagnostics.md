@@ -20,8 +20,8 @@ Implementation: `opsd/diagnostics.py`. Tests: `tests/test_diagnostics.py`.
   count, failed runs of the last 7 days (at most 20: time, profile, status),
   audit errors of the last 7 days (at most 20, detail redacted); or
   `{available: false, error}`. Test `test_a_missing_store_is_reported_not_raised`.
-- D5. `health`: last check time and result, run status, Core down since and
-  state, snapshot time, source errors (at most 20), open items as totals by
+- D5. `health`: last check time and result, run status, Core down since,
+  snapshot time, source errors (at most 20), open items as totals by
   severity and kind, self-test, inbound state, AI state, the credential
   kind (`ai_credential`: `setup_token`, `api_key` or null), updates option,
   paused and effective.

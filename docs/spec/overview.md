@@ -17,16 +17,16 @@ harm.
 | Updates and the OS flow | [updates.md](updates.md), [os-update.md](os-update.md) | `policy.py`, `updates.py`, `updexec.py`, `updiff.py`, `updatefix.py`, `backups.py` |
 | Approvals, items, pushes | [approvals.md](approvals.md), [items-and-pushes.md](items-and-pushes.md) | `approvals.py`, `items.py`, `activity.py`, `notify.py`, `channels.py`, `quiet.py` |
 | Panel and API | [panel.md](panel.md) | `panel.py`, `panelapi.py`, `live.py`, `panel/` |
-| Conversations, inbound, tasks | [chat.md](chat.md) | `assistant.py`, `conversation.py`, `inbound.py`, `tasks.py`, `proposals.py`, `chatcards.py` |
-| Proactive maintenance | [maintenance.md](maintenance.md) | `maintenance.py`, `inventory.py`, `dashboards.py` (with `evidence.py`) |
+| Conversations, inbound, tasks | [chat.md](chat.md) | `assistant.py`, `conversation.py`, `inbound.py`, `tasks.py`, `chatcards.py` |
+| Proactive maintenance | [maintenance.md](maintenance.md) | `maintenance.py`, `inventory.py` (with `evidence.py`) |
 | Git proposals | [proposals.md](proposals.md) | `changes.py`, `changepaths.py`, `gitops.py`, `safegit.py`, `githistory.py`, `configcheck.py` |
 | AI runner and provider | [ai-runner.md](ai-runner.md) | `runner.py`, `runctx.py`, `claude_runner.py`, `guard.py`, `prompts/` |
 | Capabilities and opsctl | [capabilities.md](capabilities.md) | `capabilities.py`, `policy.py`, `rpc.py`, `opsctl.py`, `effects.py` |
 | Integration reloads | [reload.md](reload.md) | `reload.py` |
-| Selfguard | [selfguard.md](selfguard.md) | `selfguard.py`, `access.py` (what opens the house, shared by health, reloads and dashboard edits) |
+| Selfguard | [selfguard.md](selfguard.md) | `selfguard.py`, `access.py` (what opens the house, shared by health and reloads) |
 | Privilege separation | [privsep.md](privsep.md) | `privsep.py`, `selftest.py`, `init-ops.sh` |
 | Usage budget and kill switch | [budget.md](budget.md) | `budget.py`, `usage.py`, `aicontrol.py` |
-| Storage | [storage.md](storage.md) | `store.py`, `jsonstore.py`, `state.py`, `lock.py`, `logs.py` |
+| Storage | [storage.md](storage.md) | `store.py`, `jsonstore.py`, `state.py`, `logs.py` |
 | Diagnostics | [diagnostics.md](diagnostics.md) | `diagnostics.py` |
 
 ## Invariants
@@ -96,15 +96,15 @@ These hold at every stage; each has tests named in the owning document.
 - D1. Start: clear stale Core-down state, open the opsctl socket, resolve
   the time zone (Supervisor info, else `TZ`, else UTC), run the self-test,
   open the panel on port 8099, wait the startup delay (default 600 s). With
-  a store: recover running tasks, conversations and changes, and keep the
-  earlier one chat as one read-only History item ([chat.md](chat.md) T1a); schedule `health.check`
+  a store: recover running tasks, conversations and changes; schedule
+  `health.check`
   daily at `health.check_time` (with a catch-up when the last check is over
-  24 hours old), `update.window` daily at `updates.window` (no catch-up)
-  and `status.refresh` every 10 minutes; resume an interrupted update run;
+  24 hours old) and `update.window` daily at `updates.window` (no
+  catch-up); resume an interrupted update run;
   close stale AI runs; ensure the AI switch helper; then run the scheduler,
   the event dispatcher, the liveness loop, the admin-identity loop, the
   websocket event stream and the assistant worker. Without a store: a
-  degraded push and a reduced schedule ([storage.md](storage.md) S5).
+  degraded push and a reduced schedule ([storage.md](storage.md) S6).
 - D2. The liveness loop runs every 60 seconds: flush held pushes, check
   Core (`GET /core/api/`), raise the Core-down alert after 5 minutes (20
   while Core is starting or inside the update window, 45 while Supervisor
@@ -112,8 +112,11 @@ These hold at every stage; each has tests named in the owning document.
   recovery, request an overdue check after 26 hours, and tick the items
   (the rechecks and the pushes time made due,
   [items-and-pushes.md](items-and-pushes.md) I5b, N1). The tick runs on its
-  own even when an earlier step of that minute failed. Test
-  `test_the_item_tick_survives_a_failed_minute`.
+  own even when an earlier step of that minute failed. Every 10th pass
+  (10 minutes) it also refreshes the status: re-asserts the status sensor,
+  expires changes and settles commits left "not pushed yet". Tests
+  `test_the_item_tick_survives_a_failed_minute`,
+  `test_the_status_refresh_runs_every_tenth_liveness_pass`.
 - D3. The watchdog target is `/healthz` on the panel port. SIGTERM cancels
   the main task and drains in-flight pushes for at most 2.5 seconds; s6
   restarts the daemon on a non-zero exit.
@@ -124,7 +127,10 @@ These hold at every stage; each has tests named in the owning document.
   the same token, limits messages to 64 MiB, and the event stream pings
   every 50 seconds, replaces a connection silent for 130 seconds, drops
   events beyond 30 per minute and reconnects with a backoff from 1 to 60
-  seconds. Tests `test_ws_accept_key_and_frames`, `test_inbound.py:300-363`.
+  seconds. Tests `test_ws_accept_key_and_frames`,
+  `test_event_stream_subscribes_filters_limits_and_reconnects`,
+  `test_event_stream_connect_failure_backs_off`,
+  `test_event_stream_survives_a_crashing_callback`.
 - D5. The add-on image is built on the user's machine from a per-architecture
   pinned base image (`aarch64`, `amd64`), pinned Alpine packages and the
   pinned AI provider package; a rotated upstream package fails the build
@@ -142,6 +148,5 @@ These hold at every stage; each has tests named in the owning document.
 
 The spec says "the agent" for the add-on as a whole, "the daemon" for the
 code that acts, and "the AI" or "the model" for the language model. A
-provider or product is named only in [ai-runner.md](ai-runner.md), the
-`llm.provider` option values, and the `claude.*` option group, which are
-provider-specific by nature.
+provider or product is named only in [ai-runner.md](ai-runner.md) and the
+`claude.*` option group, which are provider-specific by nature.

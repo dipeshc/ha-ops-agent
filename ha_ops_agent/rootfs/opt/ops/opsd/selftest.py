@@ -1,26 +1,8 @@
-"""Live self-test of the privilege boundary, run by the daemon (as root).
+"""Live self-test of the privilege boundary, run by the daemon as root (spec privsep.md V6, V7).
 
-The SSH add-on cannot exec into this container, so the daemon proves the
-boundary itself at startup and on demand (panel button), logs the result and
-publishes it as the `selftest` attribute of `sensor.ops_agent`.
-
-Checks:
-- as `ops` (with no_new_privs): secrets, the HA config, .storage, the s6
-  environment and the daemon's /proc environ are unreadable, while a
-  deliberately exposed probe file IS readable (positive control);
-- the permission self-check flags that deliberate exposure;
-- no setuid/setgid binaries on the root filesystem;
-- the config and backup mounts sit under /mnt/ha, nothing at the default
-  add-on paths;
-- files under /data (other than claude-ops/) are private to root;
-- the PreToolUse hook denies `cat /etc/passwd` when run as ops;
-- `claude --version` works as ops, the uid is the ops uid, NoNewPrivs is 1;
-- the store (SQLite) is a root-owned 0600 file that ops cannot read;
-- the opsctl socket refuses a uid outside the ops group at connect time, and
-  refuses a mutating request from ops while no agent run is bound to it;
-- the capability registry is consistent: every executor, validator and
-  resolver resolves, the guard's verb list and the opsctl parser are
-  generated from it, and every profile names only enabled capabilities.
+The daemon proves the boundary itself at start and on demand: what `ops` can and cannot read, no setuid binaries,
+private /data, the guard hook, the store's mode, the socket's peer check and a consistent capability registry. The
+AI never runs unless the last result passed.
 """
 
 import contextlib
@@ -90,7 +72,7 @@ print(json.dumps(out))
 """
 # A uid that is neither root nor in the ops group (Alpine's `nobody`).
 OUTSIDER = Account(uid=65534, gid=65534, groups=frozenset({65534}))
-UNBOUND_REQUEST = json.dumps({"verb": "ack", "args": {"key": "selftest", "days": 1, "reason": "must be refused"}})
+UNBOUND_REQUEST = json.dumps({"verb": "notify", "args": {"message": "must be refused", "reason": "needs_action"}})
 
 RunAsOps = Callable[[list[str], str | None], subprocess.CompletedProcess[str]]
 
@@ -151,7 +133,6 @@ def secret_targets(paths: Paths, daemon_pid: int) -> list[str]:
         str(paths.push_cache_file),
         str(paths.state_file),
         str(paths.store_file),
-        str(paths.store_copy),
         "/mnt/ha",
         str(paths.ha_config),
         str(paths.ha_config / "secrets.yaml"),
@@ -299,7 +280,7 @@ def check_registry() -> Check:
     if parser_verbs - {"help"} != set(cli_verbs()):
         problems.append("opsctl parser and registry disagree")
     for profile in PROFILES.values():
-        missing = [n for n in profile.capabilities if n not in CAPABILITIES or not CAPABILITIES[n].enabled]
+        missing = [n for n in profile.capabilities if n not in CAPABILITIES]
         if missing:
             problems.append(f"profile {profile.name}: {missing}")
     return Check(not problems, "; ".join(problems) or f"{len(CAPABILITIES)} capabilities consistent")
@@ -374,10 +355,6 @@ def run_selftest(
         version.stdout.strip()[:80] or version.stderr.strip()[:200],
     )
     result.checks["store_private"] = check_store(paths.store_file, expected_owner=expected_store_owner)
-    if paths.store_copy.exists():
-        # The copy taken before the upgrade holds the same records: private the same way.
-        copy = check_store(paths.store_copy, expected_owner=expected_store_owner)
-        result.checks["store_copy_private"] = copy
     result.checks["socket_boundary"] = check_socket(
         run, run_outsider or runner_for(OUTSIDER, Path("/")), paths.socket_path
     )

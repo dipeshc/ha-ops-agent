@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 from opsd import store as store_mod
-from opsd.store import SCHEMA_VERSION, Store, StoreError, checkpoint_main
+from opsd.store import ACTION_KEY, SCHEMA_VERSION, Store, StoreError, checkpoint_main
+from tests.conftest import system_task
 
 T0 = datetime(2026, 1, 26, 12, 0, tzinfo=UTC)
 
@@ -86,7 +87,7 @@ def test_a_write_inside_another_joins_its_transaction(db: Store) -> None:
             db.kv_set("k", "v", now=T0)
             db.issue_action(action, kind="DONE", tag="t", thread_id=None, now=T0, expires_at=T0)
             db.issue_action(action, kind="DONE", tag="t", thread_id=None, now=T0, expires_at=T0)
-    assert db.count("d", "x") == 1 and db.kv_get("k") == "" and db.issued_action(action) is None
+    assert db.count("d", "x") == 1 and db.kv_get("k") == "" and db.kv_get(f"{ACTION_KEY}{action}") == ""
 
 
 def test_closed_store_fails_closed(db: Store) -> None:
@@ -96,7 +97,7 @@ def test_closed_store_fails_closed(db: Store) -> None:
 
 
 def test_audit_roundtrip_and_prune(db: Store) -> None:
-    row = db.audit(at=T0, run_id="r1", principal="agent-self", channel="opsctl", capability="baseline.ack",
+    row = db.audit(at=T0, run_id="r1", principal="agent-self", channel="opsctl", capability="notify.admin",
                    args={"key": "k"}, tier="auto", decision="execute", outcome="ok", detail="d" * 900)  # fmt: skip
     rows = db.audit_rows(run_id="r1")
     assert rows[0]["id"] == row and rows[0]["outcome"] == "ok" and len(rows[0]["detail"]) == 500
@@ -144,7 +145,7 @@ def test_tasks_claim_once_and_resume_after_restart(tmp_path: Path) -> None:
         assert b.next_due_at() == later
         again = a.ensure_system_task("health.check", title="t2", schedule={}, next_fire_at=T0, payload={}, now=T0)
         assert again.id == task.id and again.title == "t2"
-        assert a.system_task("health.check") is not None and a.system_task("nope") is None
+        assert system_task(a, "health.check") is not None and system_task(a, "nope") is None
         assert a.claim_due(T0)[0].id == task.id
         assert a.finish_task(task.id, "done", now=T0)
         got = a.get_task(task.id)

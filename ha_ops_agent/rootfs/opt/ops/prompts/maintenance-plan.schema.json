@@ -2,8 +2,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "plans",
-    "summary"
+    "plans"
   ],
   "properties": {
     "plans": {
@@ -56,50 +55,6 @@
               }
             }
           },
-          "dashboard": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "url_path",
-              "card_type"
-            ],
-            "properties": {
-              "url_path": {
-                "type": "string",
-                "maxLength": 100
-              },
-              "card_type": {
-                "type": "string",
-                "maxLength": 87
-              },
-              "new_type": {
-                "type": "string",
-                "maxLength": 87
-              },
-              "renames": {
-                "type": "array",
-                "maxItems": 8,
-                "items": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "old",
-                    "new"
-                  ],
-                  "properties": {
-                    "old": {
-                      "type": "string",
-                      "maxLength": 41
-                    },
-                    "new": {
-                      "type": "string",
-                      "maxLength": 41
-                    }
-                  }
-                }
-              }
-            }
-          },
           "verdict": {
             "enum": [
               "not_affected",
@@ -119,13 +74,20 @@
               "type": "string",
               "maxLength": 120
             }
+          },
+          "owner_action": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "maxLength": 160
+              }
+            ]
           }
         }
       }
-    },
-    "summary": {
-      "type": "string",
-      "maxLength": 300
     }
   }
 }

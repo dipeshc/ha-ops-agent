@@ -1,7 +1,6 @@
 """The registry is the single declaration: schema, CLI, guard verbs and prompt table."""
 
 import json
-import re
 
 import pytest
 
@@ -37,24 +36,18 @@ def test_every_reference_resolves() -> None:
 
 def test_guard_parser_and_schema_are_generated() -> None:
     sub = next(a for a in build_parser()._actions if a.dest == "verb")
-    assert (
-        set(sub.choices) - {"help"}
-        == cli_verbs()
-        == {c.verb for c in CAPABILITIES.values() if c.enabled and not c.internal}
-    )  # type: ignore[arg-type]
+    assert set(sub.choices) - {"help"} == cli_verbs() == {c.verb for c in CAPABILITIES.values() if not c.internal}  # type: ignore[arg-type]
     assert cli_verbs() | {"--help", "-h", "help"} == guard.OPSCTL_VERBS
-    assert {"ack", "notify"} <= cli_verbs()
+    assert {"notify", "remind"} <= cli_verbs()
 
 
-def test_disabled_capability_is_not_offered_anywhere() -> None:
-    off = Capability("x.secret", "secret", "s", "opsd.queries:cmd_status", enabled=False)
-    registry = {**CAPABILITIES, off.name: off}
-    assert "secret" not in cli_verbs(registry)
-    with pytest.raises(RequestError, match="unknown verb"):
-        parse_request(b'{"verb": "secret"}', registry)
-    assert "secret" not in capability_table(["x.secret"], registry)
-    with pytest.raises(SystemExit):
-        build_parser(registry).parse_args(["secret"])
+def test_every_reachable_capability_has_its_labels() -> None:
+    reachable = [c for c in CAPABILITIES.values() if not c.internal]
+    assert all(c.step and c.step != "Working" for c in reachable)
+    assert CAPABILITIES["fork.propose"].step and CAPABILITIES["suppress.propose"].step
+    assert all(not c.source or c.read_only for c in CAPABILITIES.values())
+    with pytest.raises(ValueError, match="no step label"):
+        capabilities._check_registry([Capability("a.b", "v", "s", "opsd.queries:cmd_status")])
 
 
 @pytest.mark.parametrize(
@@ -89,18 +82,12 @@ def test_resolve_ref_refuses_outside_opsd() -> None:
 def test_effect_arguments() -> None:
     _, args = parse_request(json.dumps({"verb": "notify", "args": {"title": "t", "message": "m"}}).encode())
     assert args.flag("urgent") is False
-    _, args = parse_request(
-        json.dumps({"verb": "ack", "args": {"key": "update:update.x@2026.10.4", "days": 99}}).encode()
-    )
-    assert args.number("days") == 30 and args.flag("accept") is False
 
 
 @pytest.mark.parametrize(
     "request_obj",
     [
-        {"verb": "ack", "args": {"key": "a b"}},
-        {"verb": "ack", "args": {"key": "x" * 201}},
-        {"verb": "ack", "args": {"key": "k", "accept": "true"}},
+        {"verb": "notify", "args": {"title": "t", "message": "m", "urgent": "true"}},
         {"verb": "notify", "args": {"title": "x" * 61, "message": "m"}},
         {"verb": "notify", "args": {"title": "t", "message": "a\x1bb"}},
         {"verb": "notify", "args": {"title": "t\nx", "message": "m"}},
@@ -125,7 +112,7 @@ def test_args_accessors() -> None:
 
 
 def test_request_verb_is_safe_to_log() -> None:
-    assert request_verb(b'{"verb": "ack"}') == "ack"
+    assert request_verb(b'{"verb": "notify"}') == "notify"
     for raw in (b"[]", b"nope", b'{"verb": "rm -rf /"}', b'{"verb": 3}', b"\xff"):
         assert request_verb(raw) == "?"
 
@@ -142,12 +129,11 @@ def test_parser_shapes_match_v01() -> None:
     assert (args.source, args.lines) == ("core", 5)
     assert parser.parse_args(["git-log", "-n", "3"]).n == 3
     assert parser.parse_args(["health", "--diff"]).diff is True
-    assert parser.parse_args(["ack", "--key", "k", "--accept"]).accept is True
+    assert parser.parse_args(["notify", "--title", "t", "--message", "m", "--urgent"]).urgent is True
     with pytest.raises(SystemExit):
         parser.parse_args(["logs", "kernel"])
 
 
 def test_read_only_flag() -> None:
     assert all(c.read_only for c in CAPABILITIES.values() if Effect.READ in c.effects)
-    assert not CAPABILITIES["baseline.ack"].read_only
-    assert re.fullmatch(r"[a-z0-9_.]+", "baseline.ack")
+    assert not CAPABILITIES["notify.admin"].read_only

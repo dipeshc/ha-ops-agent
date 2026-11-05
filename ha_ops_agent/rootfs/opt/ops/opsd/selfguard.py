@@ -1,34 +1,8 @@
-"""The agent never modifies itself, by an allowlist.
+"""The agent never modifies itself, by an allowlist under every Home Assistant call (spec selfguard.md G1-G9).
 
-Stdlib only: `changepaths` and the guard hook import it.
-
-A change to the ops agent that goes wrong can leave the house without its maintainer and with no
-way back, so the agent never makes one; the admin does, by updating the add-on. Every Home
-Assistant call passes through:
-
-- `check_http` in `SupervisorClient.request`. GET (and HEAD) are reads. Any other call must be one
-  of the shapes in `_POST` below, by exact path (no query, no other spelling) and body: the update
-  pipeline (Core, add-on and HACS installs, Core's config check), config entry and
-  automation/template reloads, the agent's own status sensors, its AI switch and the push to the
-  admin. Nothing else: not the agent's add-on, the Supervisor, other add-ons, backups or restores,
-  the `hassio` services, Core's stop or restart services, or any other state.
-- A Core restart: `POST /core/restart {}` only inside `approved_core_restart(<job>)`, which
-  `updexec.Executors` enters for one update job (a HACS integration it installed or rolled back, or an approved
-  fork rebase and its restore); single use, closed when the block ends. Never anywhere else.
-- The approved HAOS-update flow: `POST /os/update {"version"}` and `POST /host/reboot {}`
-  (never `force`), each only inside `approved_os_flow(<that path>)`, which `updexec.Executors`
-  enters after it verified the approval of that OS job; single use, closed when the block ends.
-- `check_ws` in `HAWebSocket`: only the commands in `WS_COMMANDS`, with the two subscriptions and
-  the AI switch helper pinned to their exact arguments. The dashboard reads (`lovelace/config`, the
-  dashboard list and the frontend resources) are reads.
-- One dashboard write: `lovelace/config/save` with exactly `{url_path, config}`, only inside
-  `approved_dashboard_write(<url_path>, generated=...)`, which `dashboards.DashboardWriter` enters after
-  it consumed the admin's approval of that dashboard's plan (or, to restore it, after a failed save of
-  that approved plan). Single use, for that one url_path, closed when the block ends; never the default
-  dashboard, a malformed url_path or one the house profile marks as generated.
-
-Proposals (the only path that writes the config repository) are checked by `self_path`, and update
-jobs by `check_update`.
+Stdlib only: `changepaths` and the guard hook import it. `check_http` and `check_ws` admit only the calls the
+agent makes; the few writes that need an approval pass once inside a single-use scope (`_SingleUse`) that
+`updexec.Executors` opens after proving it.
 """
 
 import contextlib
@@ -74,23 +48,23 @@ class SelfTargetError(Exception):
     """A call would change the agent itself (or the platform it runs on), or is not one the agent makes."""
 
 
-class _OsFlowScope:
-    """One approved OS-flow call: single use, and closed when its `with` block ends.
+class _SingleUse:
+    """One approved call for one key: single use, and closed when its `with` block ends.
 
     The context variable holds this object by reference. `asyncio.to_thread` (the call itself) and
     any task created inside the block inherit the reference, so closing it or using it up ends the
     scope for all of them at once; code running anywhere else sees the default, which allows nothing.
     """
 
-    def __init__(self, path: str) -> None:
-        self.path = path
+    def __init__(self, key: object) -> None:
+        self.key = key
         self._lock = threading.Lock()
         self._open = True
 
-    def take(self, path: str) -> bool:
-        """True once, for this scope's own path, while the block is open; then it is used up."""
+    def take(self, key: object) -> bool:
+        """True once, for this scope's own key, while the block is open; then it is used up."""
         with self._lock:
-            if not self._open or path != self.path:
+            if not self._open or key != self.key:
                 return False
             self._open = False
             return True
@@ -100,7 +74,18 @@ class _OsFlowScope:
             self._open = False
 
 
-_OS_FLOW: ContextVar[_OsFlowScope | None] = ContextVar("opsd_selfguard_os_flow", default=None)
+@contextlib.contextmanager
+def _single_use(var: ContextVar[_SingleUse | None], key: object) -> Iterator[None]:
+    scope = _SingleUse(key)
+    token = var.set(scope)
+    try:
+        yield
+    finally:
+        scope.close()
+        var.reset(token)
+
+
+_OS_FLOW: ContextVar[_SingleUse | None] = ContextVar("opsd_selfguard_os_flow", default=None)
 
 
 @contextlib.contextmanager
@@ -111,39 +96,14 @@ def approved_os_flow(path: str) -> Iterator[None]:
     """
     if path not in OS_FLOW_PATHS:
         raise ValueError(f"not an approved OS-flow path: {path!r}")
-    scope = _OsFlowScope(path)
-    token = _OS_FLOW.set(scope)
-    try:
+    with _single_use(_OS_FLOW, path):
         yield
-    finally:
-        scope.close()
-        _OS_FLOW.reset(token)
 
 
 CORE_RESTART_PATH = "/core/restart"
 
 
-class _RestartScope:
-    """One Core restart for one update job: single use, closed when its `with` block ends (like `_OsFlowScope`)."""
-
-    def __init__(self, job: int) -> None:
-        self.job = job
-        self._lock = threading.Lock()
-        self._open = True
-
-    def take(self) -> bool:
-        with self._lock:
-            if not self._open:
-                return False
-            self._open = False
-            return True
-
-    def close(self) -> None:
-        with self._lock:
-            self._open = False
-
-
-_RESTART: ContextVar[_RestartScope | None] = ContextVar("opsd_selfguard_core_restart", default=None)
+_RESTART: ContextVar[_SingleUse | None] = ContextVar("opsd_selfguard_core_restart", default=None)
 
 
 @contextlib.contextmanager
@@ -156,85 +116,14 @@ def approved_core_restart(job: int) -> Iterator[None]:
     """
     if not isinstance(job, int) or isinstance(job, bool) or job <= 0:
         raise ValueError("a Core restart needs the update job it is for")
-    scope = _RestartScope(job)
-    token = _RESTART.set(scope)
-    try:
+    with _single_use(_RESTART, job):
         yield
-    finally:
-        scope.close()
-        _RESTART.reset(token)
 
 
 def _restart_allows(path: str, body: Any) -> bool:
     scope = _RESTART.get()
     plain = body is None or (isinstance(body, Mapping) and not body)
-    return scope is not None and path == CORE_RESTART_PATH and plain and scope.take()
-
-
-# Home Assistant's rule for a storage dashboard's url_path: lower case, with a hyphen. The default dashboard
-# has none and is never written.
-DASHBOARD_PATH_RE = re.compile(r"[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+")
-LOVELACE_SAVE = "lovelace/config/save"
-
-
-class _DashboardScope:
-    """One approved dashboard save: single use, for one url_path, closed when its `with` block ends."""
-
-    def __init__(self, url_path: str) -> None:
-        self.url_path = url_path
-        self._lock = threading.Lock()
-        self._open = True
-
-    def take(self, url_path: Any) -> bool:
-        with self._lock:
-            if not self._open or url_path != self.url_path:
-                return False
-            self._open = False
-            return True
-
-    def close(self) -> None:
-        with self._lock:
-            self._open = False
-
-
-_DASHBOARD: ContextVar[_DashboardScope | None] = ContextVar("opsd_selfguard_dashboard", default=None)
-
-
-def dashboard_unwritable(url_path: Any, generated: frozenset[str]) -> str | None:
-    """Why the agent may never write this dashboard (the default one, a malformed path, a generated one), or None."""
-    if not isinstance(url_path, str) or not url_path:
-        return "the default dashboard is never written by the agent"
-    if len(url_path) > 100 or not DASHBOARD_PATH_RE.fullmatch(url_path):
-        return f"{url_path[:60]!r} is not a dashboard url_path"
-    if url_path in generated:
-        return f"{url_path} is generated (dashboards.generated in the house profile): change what writes it instead"
-    return None
-
-
-@contextlib.contextmanager
-def approved_dashboard_write(url_path: str, *, generated: frozenset[str]) -> Iterator[None]:
-    """Let exactly one `lovelace/config/save` for `url_path` through, for the calls made inside.
-
-    Only `dashboards.DashboardWriter` enters it, after it consumed the admin's approval of that dashboard's plan.
-    """
-    problem = dashboard_unwritable(url_path, generated)
-    if problem is not None:
-        raise SelfTargetError(problem)
-    scope = _DashboardScope(url_path)
-    token = _DASHBOARD.set(scope)
-    try:
-        yield
-    finally:
-        scope.close()
-        _DASHBOARD.reset(token)
-
-
-def _dashboard_save_allows(data: Mapping[str, Any]) -> bool:
-    """True once for the save the current approved scope names, with exactly a url_path and a config mapping."""
-    scope = _DASHBOARD.get()
-    if scope is None or set(data) != {"url_path", "config"} or not isinstance(data.get("config"), Mapping):
-        return False
-    return scope.take(data.get("url_path"))
+    return scope is not None and path == CORE_RESTART_PATH and plain and scope.take(scope.key)
 
 
 def _os_flow_allows(path: str, body: Any) -> bool:
@@ -309,7 +198,6 @@ _POST: tuple[tuple[re.Pattern[str], Callable[[re.Match[str], Any], bool]], ...] 
         (r"/core/update", _core_update),
         (r"/store/addons/([a-z0-9_]{1,64})/update", _addon_update),
         (r"/core/check", _empty),
-        (r"/core/api/config/core/check_config", _empty),
         (r"/core/api/config/config_entries/entry/[A-Za-z0-9_-]{1,64}/reload", _empty),
         (r"/core/api/services/update/install", _one_update),
         (r"/core/api/services/(?:automation|template)/reload", _empty),
@@ -347,7 +235,7 @@ WS_COMMANDS = frozenset({
     "config/auth/list", "repairs/list_issues", "system_log/list", "homeassistant/expose_entity/list",
     "hacs/repository/info", "update/release_notes", "history/history_during_period",
     "recorder/statistics_during_period", "vacuum/get_segments", "input_boolean/list", "input_boolean/create",
-    "lovelace/config", "lovelace/dashboards/list", "lovelace/resources",
+    "lovelace/config", "lovelace/dashboards/list",
 })  # fmt: skip
 
 
@@ -356,17 +244,12 @@ def check_ws(msg_type: str, fields: Mapping[str, Any] | None = None) -> None:
     kind = str(msg_type)
     # `id` numbers the message on the connection; it is not an argument.
     data = {k: v for k, v in (fields or {}).items() if k != "id"}
-    if kind == LOVELACE_SAVE:
-        if not _dashboard_save_allows(data):
-            raise SelfTargetError(f"websocket {kind}: refused (only the approved dashboard plan's one save)")
-        return
     if kind not in WS_COMMANDS:
         raise SelfTargetError(f"websocket {kind[:60]!r}: refused (not a command the agent sends)")
     pinned = {
         "subscribe_events": {"event_type": INBOUND_EVENT},
         "subscribe_trigger": {"trigger": {"platform": "state", "entity_id": AI_SWITCH_ENTITY}},
         "lovelace/dashboards/list": {},
-        "lovelace/resources": {},
     }.get(kind)
     if pinned is not None and data != pinned:
         raise SelfTargetError(f"websocket {kind}: refused (only the agent's own subscription)")

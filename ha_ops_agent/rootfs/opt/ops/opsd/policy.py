@@ -1,35 +1,19 @@
-"""Policy: the generic tier engine (`decide`) and the update rule (`classify`).
+"""Policy: the update rule (`classify`, spec updates.md U1-U7) and the generic tier engine (`decide`, spec
+capabilities.md K5).
 
-The update rule decides every pending update deterministically:
-
-- AUTO: a patch or a minor of Core, an add-on or a HACS integration, once it has soaked
-  (`updates.min_age_days`, never below 7, for a patch; twice that for a minor), by its release date
-  where known (GitHub for Core and HACS), else how long the agent has seen it pending. The update
-  pipeline then still asks when a repair, a Core breaking change or a held version touches what
-  this house uses (`opsd.updates`), and the release-note review may hold it back.
-- Soaking: the same candidate before that (or with its age unknown) waits quietly (`waits`): it is
-  APPROVE, so the admin may approve it early, but it does not ask.
-- APPROVE (asks): Core majors, HAOS, device firmware, any major add-on or HACS change, HACS frontend
-  plugins and themes, anything in `updates.need_approval`, the house profile's fragile pieces
-  (`opsd.profile`, tier approve), an unknown version scheme, and anything the agent could not roll
-  back precisely (an add-on whose slug is unknown, a HACS repository without specific-version
-  installs or of an unknown category).
-- NEVER (notify only): Core `.0` and `updates.never`; PINNED: a fragile piece the profile pins.
-- MANUAL (never offered): the agent itself, the Supervisor, a version the admin skipped, nothing newer.
-
-Options can only tighten these (see `decide`).
+`classify` decides every pending update deterministically and every branch can only hold an update back; `decide`
+takes the strictest of the capability's default, its resolver, the origin and the options, which only tighten.
 """
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntFlag, StrEnum
+from typing import Protocol
 
-from opsd.selfguard import is_self_slug
+from opsd.selfguard import SELF_TITLE, SELF_UPDATE_ENTITY, is_self_slug
 
 CORE_PATCH_MIN_AGE_DAYS = 7.0
-SELF_UPDATE_ENTITY = "update.ha_ops_agent_update"
-SELF_TITLE = "ha ops agent"
 
 _HASSIO_SPECIAL = {
     "update.home_assistant_core_update": "core",
@@ -331,12 +315,10 @@ class Origin(StrEnum):
 
 class Effect(StrEnum):
     READ = "read"
-    # The agent's own bookkeeping (baseline acks).
-    AGENT_STATE = "agent-state"
     NOTIFY = "notify"
     SCHEDULE = "schedule"
     # A suggestion the admin acts on elsewhere (an update to approve in the panel). It
-    # grants nothing: the approval itself still needs the panel request and the phone tap.
+    # grants nothing: the approval itself is the admin's action in the panel.
     PROPOSE = "propose"
     # Reload one integration's config entries (opsd.reload). It changes no config and is
     # limited in code (denylist, 10 minutes per domain, daily quota). It is allowed for the
@@ -346,8 +328,7 @@ class Effect(StrEnum):
     MUTATE_GIT = "mutate-git"
 
 
-# `observe` mode turns these into "report only". Pushes and acks stay live in
-# observe mode.
+# `observe` mode turns these into "report only". Pushes stay live in observe mode.
 OBSERVE_BLOCKED_EFFECTS = frozenset({Effect.RELOAD, Effect.MUTATE_HA, Effect.MUTATE_GIT})
 
 # What a possibly-forged chat may cause: reads, reminders/follow-ups for the
@@ -477,3 +458,44 @@ _UPDATE_TIERS: dict[Tier, PolicyTier] = {
 def resolve_update(decision: Decision) -> Resolution:
     """`classify` as a tier resolver: MANUAL is never offered."""
     return Resolution(_UPDATE_TIERS[decision.tier], decision.reason)
+
+
+class _Capability(Protocol):
+    @property
+    def name(self) -> str: ...
+    @property
+    def tier(self) -> PolicyTier: ...
+    @property
+    def effects(self) -> frozenset[Effect]: ...
+    @property
+    def origins(self) -> frozenset[Origin]: ...
+
+
+class _Tightening(Protocol):
+    @property
+    def require_approval(self) -> Iterable[str]: ...
+    @property
+    def never(self) -> Iterable[str]: ...
+
+
+def decide_for(
+    cap: _Capability,
+    tightening: _Tightening,
+    *,
+    origin: Origin,
+    acting: bool,
+    resolution: Resolution | None = None,
+) -> Verdict:
+    """`decide` for a registered capability, with the add-on options' tightening (`capabilities.*`)."""
+    tighten = {n: PolicyTier.APPROVE for n in tightening.require_approval}
+    tighten.update({n: PolicyTier.NEVER for n in tightening.never})
+    return decide(
+        capability=cap.name,
+        default_tier=cap.tier,
+        effects=cap.effects,
+        origin=origin,
+        allowed_origins=cap.origins,
+        acting=acting,
+        resolution=resolution,
+        tighten=tighten,
+    )

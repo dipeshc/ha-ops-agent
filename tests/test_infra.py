@@ -12,7 +12,6 @@ from opsd import ws
 from opsd.config import Options, Paths, claude_token
 from opsd.gitops import GitBusyError, GitError, Repo
 from opsd.jsonstore import append_jsonl, read_json, read_jsonl, write_json_atomic
-from opsd.lock import LockBusyError, run_lock
 from tests.conftest import ADDON_ROOT, OPT
 
 
@@ -40,14 +39,6 @@ def test_jsonstore(tmp_path: Path) -> None:
     (tmp_path / "h.jsonl").open("a").write("garbage\n")
     append_jsonl(tmp_path / "h.jsonl", {"a": 2})
     assert [r["a"] for r in read_jsonl(tmp_path / "h.jsonl")] == [1, 2]
-
-
-def test_run_lock(tmp_path: Path) -> None:
-    lock = tmp_path / "run.lock"
-    with run_lock(lock), pytest.raises(LockBusyError), run_lock(lock):
-        pass
-    with run_lock(lock):
-        pass
 
 
 def git(cwd: Path, *args: str) -> str:

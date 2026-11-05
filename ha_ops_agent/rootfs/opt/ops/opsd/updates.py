@@ -1,70 +1,8 @@
-"""The nightly update pipeline.
+"""The nightly update pipeline: plan, hold, back up, install one at a time, verify, roll back or escalate, and the
+approved OS reboots and fork rebases (spec updates.md U1-U33, os-update.md O1-O7).
 
-At the update window (default 04:00 local) the daemon:
-
-1. plans: every pending update with its tier and reason from the one update
-   rule (`policy.classify`: a patch or minor that has soaked is AUTO). An
-   AUTO candidate still asks when a version of it was held, when a repair
-   names it (Core: one that breaks in the target version), or when Home
-   Assistant's own notes list a breaking change for an integration configured
-   here (`opsd.evidence`, read-only; unreadable notes ask too; a change that
-   names no integration never asks alone), or
-   when its version reaches the removal of something this install still uses,
-   named by a repair or the release notes (`maintenance.removal_block`; the maintenance scan runs first when its
-   last one is older than a day). A hold by the notes alone is checked by the
-   isolated review run: a `not_affected` verdict for those exact notes
-   releases it (`opsd.verdicts`). A candidate whose release age is unknown
-   waits (the soak-unknown hold, checked again every night) and asks only
-   after `UNKNOWN_AGE_ASK_DAYS`, or when one of these checks touches it. A
-   capability-free AI `update_review` run then reads the candidates'
-   release notes as fenced, untrusted data and can only hold an update back.
-   For a Core update held by its notes or a repair, the same run may write
-   the config change it needs: the daemon records it as a one-tap proposal
-   for that update (`opsd.updatefix`), the update waits for it quietly, and
-   once the admin applied it the update installs in the next window;
-2. in report mode (`observe`, `auto_updates: off`, paused in the panel, or a
-   report-only plan) stops there: the plan's updates are items on
-   Home (AUTO candidates Proposed with the reason they wait, never pushed;
-   updates to approve in Needs you, pushed once by the item book);
-3. in act mode with AUTO candidates: waits until no Supervisor job or backup
-   is running, has Core make a backup with the admin's automatic settings
-   (encrypted with the admin's key, which the agent never sees) and checks
-   it holds Home Assistant, its database and every add-on, probes health,
-   then installs the AUTO updates one at a time. Each one is re-checked
-   against the plan first (same versions, still pending), installed through
-   the native mechanism, waited for, and compared with the health before it
-   (`updiff.compare`). A regression rolls a HACS or Core update back by
-   version (Core only if the recorder schema did not change); an add-on
-   regression or an unsafe Core downgrade is escalated to the admin. Every
-   rolled-back or escalated version is held until the admin approves it again, and
-   an escalation, failed rollback or whole-night regression pauses
-   automatic updates until the admin resumes them in the panel. At
-   the end the night is compared with the health before the first update,
-   then a summary on the night's item (no push). APPROVE-tier updates wait
-   for the admin's approval (`opsd.approvals`).
-
-State is durable (`update_runs`, `update_jobs` in the store). After a
-restart an active run resumes: a job caught mid-install is never installed
-again. Its version decides: the new one means "verify", the old one with no
-Supervisor job running means "failed, not retried". A rollback is started at
-most once per job. Nothing here depends on the AI being on; the review is
-skipped when AI is off and only ever adds caution.
-
-An approved HAOS update has two steps. Since Supervisor 2026.07.0
-(supervisor#6982) `/os/update` only installs: `/os/info` then reports the
-old `version` with the new one as `version_pending`, and the Supervisor
-raises `reboot_required`. That is "installed, reboot pending", never a
-failure. The job moves to `rebooting` and, still inside the approved run and
-window, the daemon reboots the host once (`Executors.reboot_for_os`). The
-reboot ends this process; the add-on starts again, the run resumes, and the
-job is confirmed by the host's new boot and `version == target`, then
-verified against the health before it (both locks and the alarm included),
-summarised on its item (a good outcome is not pushed). Coming back on the
-old version is a RAUC boot fallback: failed, escalated, held and updates
-paused. If the agent may not reboot (window over, paused, refused) the job
-ends `reboot_pending`; `reconcile` settles it once the host runs the new
-version. After a run, at start and when the installed versions change, a
-silent report-only plan (`refresh`) replaces the panel's plan snapshot.
+State is durable (`update_runs`, `update_jobs`): an interrupted run resumes and never installs a job twice.
+Nothing here depends on the AI; the review only ever adds caution.
 """
 
 import asyncio
@@ -73,17 +11,16 @@ import json
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
 
-from opsd import forkrebase, proposals, updatefix, verdicts
-from opsd.approvals import ApprovalError, Approvals, approvable, is_fork, is_reboot
+from opsd import forkrebase, updatefix, verdicts
+from opsd.approvals import ApprovalError, Approvals, approvable, is_fork, is_reboot, reboot_binding, reboot_subject
 from opsd.backups import wait_for_backup
 from opsd.baseline import honoured_expected
 from opsd.capabilities import Args
 from opsd.changes import ChangeRefused
-from opsd.channels import Message
 from opsd.claude_runner import RunResult
 from opsd.config import Options
 from opsd.conversation import clean_text, fence
@@ -396,27 +333,17 @@ class OsState:
     boot: str | None
     boot_timestamp: Any
     reboot_required: bool
-    # A slot other than the booted one holds this version (Supervisors without `version_pending`).
-    staged: tuple[str, ...] = ()
 
     @classmethod
     def read(cls, info: Mapping[str, Any], host: Mapping[str, Any], resolution: Mapping[str, Any]) -> OsState:
-        slots = info.get("boot_slots")
-        boot = str(info["boot"]) if info.get("boot") else None
-        staged = tuple(
-            str(v.get("version"))
-            for name, v in (slots.items() if isinstance(slots, dict) else [])
-            if isinstance(v, dict) and v.get("version") and name != boot
-        )
         issues = resolution.get("issues") if isinstance(resolution, Mapping) else None
         reboot = any(isinstance(i, Mapping) and i.get("type") == "reboot_required" for i in issues or [])
         return cls(
             version=str(info["version"]) if info.get("version") else None,
             pending=str(info["version_pending"]) if info.get("version_pending") else None,
-            boot=boot,
+            boot=str(info["boot"]) if info.get("boot") else None,
             boot_timestamp=host.get("boot_timestamp"),
             reboot_required=reboot,
-            staged=staged,
         )
 
 
@@ -427,13 +354,6 @@ def os_phase(state: OsState, job: UpdateJob) -> str:
     version as `version` too (supervisor api/os.py), and that is still "pending", not "active".
     """
     if same_version(state.pending, job.to_version):
-        return "pending"
-    if (
-        state.pending is None
-        and state.reboot_required
-        and same_version(state.version, job.from_version)
-        and any(same_version(v, job.to_version) for v in state.staged)
-    ):
         return "pending"
     if same_version(state.version, job.to_version):
         return "active"
@@ -468,10 +388,8 @@ class RunCtx:
     deadline: datetime
     plan: dict[str, dict[str, Any]]
     backup: dict[str, Any]
-    resumed: bool = False
     stop: str | None = None
     window_regressed: str = ""
-    pushes: list[str] = field(default_factory=list)
 
 
 # (plan item, the integrations it is for, why, the edits) -> the proposal row (opsd.updatefix.propose).
@@ -487,7 +405,6 @@ class UpdateManager:
         options: Options,
         snapshot: Callable[[], Awaitable[Snapshot]],
         custom_domains: Callable[[], list[str]],
-        send: Callable[[Message], Awaitable[str]],
         review: Callable[[str], Awaitable[RunResult]] | None,
         redactor: Callable[[], Redactor],
         tz: Callable[[], tzinfo],
@@ -516,7 +433,6 @@ class UpdateManager:
         self.options = options
         self._snapshot = snapshot
         self._custom_domains = custom_domains
-        self._send = send
         self._review = review
         self._redactor = redactor
         self._tz = tz
@@ -1097,8 +1013,10 @@ class UpdateManager:
                 out.append(item)
                 continue
             reason = clean_text(str((answer or {}).get("reason") or ""), 300) or "no reason given"
-            verdicts.record(self.store, str(check["cause"]), fingerprint=str(check.get("fingerprint") or ""),
-                            verdict=str(verdict), reason=reason, by="update_review", now=now)  # fmt: skip
+            kept = verdicts.record(self.store, str(check["cause"]), fingerprint=str(check.get("fingerprint") or ""),
+                                   verdict=str(verdict), reason=reason, by="update_review", now=now,
+                                   owner_action=str((answer or {}).get("owner_action") or ""))  # fmt: skip
+            verdict = kept.verdict
             self._audit("update.verdict", outcome=str(verdict), entity=entity, version=item.get("latest"))
             if verdict != "not_affected" or item.get("fix"):
                 out.append(item)
@@ -1119,15 +1037,10 @@ class UpdateManager:
             return {}
         return parse_review({"assessments": [stored | {"entity_id": item["entity_id"]}]}, {str(item["entity_id"])})
 
-    def _report_summary(
-        self, plan: list[dict[str, Any]], gate: str | None, approved: Mapping[str, str] | None = None
-    ) -> str:
-        """`approved`: subject (`entity@version`) -> when it runs (`window` or `now`), for approvals given since."""
+    def _report_summary(self, plan: list[dict[str, Any]], gate: str | None) -> str:
         autos = auto_items(plan)
-        marks = dict(approved or {})
-        for item in plan:
-            if item.get("approval_state") == "approved":
-                marks.setdefault(subject_of(item), str(item.get("run_when") or "window"))
+        marks = {subject_of(i): str(i.get("run_when") or "window") for i in plan
+                 if i.get("approval_state") == "approved"}  # fmt: skip
         approve = [i for i in plan if i.get("tier") == Tier.APPROVE]
         given = [i for i in approve if subject_of(i) in marks]
         asks = [i for i in approve if subject_of(i) not in marks and not waits_quietly(i)]
@@ -1153,50 +1066,41 @@ class UpdateManager:
 
     # ------------------------------------------------------------ approvals
 
-    async def confirm_approval(self, approval_id: str, user: str) -> str:
-        """The admin approved in the panel (and on the phone, if asked): re-check the live update, then approve."""
-        found = self.store.approval(approval_id)
-        if found is None:
-            return "unknown"
+    async def approve(self, item: Mapping[str, Any], *, plan_run: int, user: str, when: str) -> dict[str, Any]:
+        """The admin approved this plan item in the panel: approved once the live update still offers exactly it
+        (ApprovalError with the reason otherwise). Either way the outcome is on the update's item."""
+        entity, to = str(item.get("entity_id")), str(item.get("latest"))
+        title = clean_text(str(item.get("title") or entity), 80)
+        what = f"{title} {item.get('installed')} → {to}"
         try:
-            current = await self.ops.entity_state(str(found["plan"].get("entity_id")))
+            current = await self.ops.entity_state(entity)
         except ApiError, OSError, ValueError:
             current = None
-        state = self.approvals.confirm(approval_id, user=user, current=current)
-        title, detail = await self._approval_note(found, state)
-        plan = found.get("plan") or {}
-        self._note(title, detail, kind="approval", item=item_key(str(plan.get("entity_id")), str(plan.get("to"))))
+        try:
+            found = self.approvals.grant_update(item, plan_run=plan_run, user=user, when=when, current=current)
+        except ApprovalError as err:
+            title_, detail = await self._not_needed(item, what) or (f"Approval not used: {what}", f"{err}.")
+            self._note(title_, detail, kind="approval", item=item_key(entity, to))
+            self._publish()
+            raise
+        self._note(f"Update approved: {what}", f"It installs {self._when(when)}.", kind="approval",
+                   item=item_key(entity, to))  # fmt: skip
         self._publish()
-        if state == "approved" and found["run_when"] == "now":
-            return "now"
-        return state
+        return found
 
-    async def _approval_note(self, found: Mapping[str, Any], state: str) -> tuple[str, str]:
-        """The activity entry for an approval decision, in plain words, with the reason."""
-        plan = found.get("plan") or {}
-        title = clean_text(str(plan.get("title") or plan.get("entity_id")), 80)
-        what = f"{title} {plan.get('from')} → {plan.get('to')}"
-        fresh = self.store.approval(str(found["id"])) or found
-        reason = str(fresh.get("detail") or "")
-        match state:
-            case "approved":
-                return f"Update approved: {what}", f"It installs {self._when(str(found.get('run_when')))}."
-            case "expired":
-                return f"Approval expired: {what}", "It was not confirmed within 72 hours. Approve it again if needed."
-            case "void":
-                if plan.get("kind") == "os":
-                    os_state = await self._os_state()
-                    if os_state is not None and same_version(os_state.pending, plan.get("to")):
-                        return (f"Approval not needed: {what}",
-                                f"{plan.get('to')} is already installed and waits for a reboot to activate. Reboot "
-                                f"the host ({REBOOT_HELP}); the agent confirms it afterwards.")  # fmt: skip
-                    if os_state is not None and same_version(os_state.version, plan.get("to")):
-                        return f"Approval not needed: {what}", f"The host already runs {plan.get('to')}."
-                return f"Approval not used: {what}", f"{reason[:1].upper()}{reason[1:]}." if reason else ""
-            case "refused":
-                return f"Approval refused: {what}", reason or "It was already decided or asked by someone else."
-            case _:
-                return f"Approval {state}: {what}", reason
+    async def _not_needed(self, item: Mapping[str, Any], what: str) -> tuple[str, str] | None:
+        """An OS update the host already runs, or one installed and waiting for its reboot: nothing to approve."""
+        if item.get("kind") != "os":
+            return None
+        os_state = await self._os_state()
+        to = item.get("latest")
+        if os_state is not None and same_version(os_state.pending, to):
+            return (f"Approval not needed: {what}",
+                    f"{to} is already installed and waits for a reboot to activate. Reboot the host ({REBOOT_HELP});"
+                    " the agent confirms it afterwards.")  # fmt: skip
+        if os_state is not None and same_version(os_state.version, to):
+            return f"Approval not needed: {what}", f"The host already runs {to}."
+        return None
 
     # ----------------------------------------------- the reboot of an OS update
 
@@ -1204,31 +1108,19 @@ class UpdateManager:
     def waits_for_reboot(job: UpdateJob | None) -> bool:
         return job is not None and job.kind == "os" and job.state == "reboot_pending"
 
-    def request_reboot(self, job_id: int, *, user: str) -> dict[str, Any]:
-        """A pending approval to reboot for this installed OS update in the next window (the panel's action)."""
+    def approve_reboot(self, job_id: int, *, user: str) -> dict[str, Any]:
+        """The admin approved the reboot for this installed OS update in the next window (the panel's action)."""
         job = self.store.update_job(job_id)
         if job is None or not self.waits_for_reboot(job):
             raise ApprovalError("nothing waits for a reboot")
-        return self.approvals.request_reboot(job, user=user)
-
-    async def confirm_reboot(self, approval_id: str, user: str) -> str:
-        """The admin approved the reboot (and confirmed it on the phone, if asked): re-checked against the job now."""
-        found = self.store.approval(approval_id)
-        if found is None or not is_reboot(found):
-            return "unknown"
-        binding = found["plan"].get("binding") or {}
-        job = self.store.update_job(int(binding.get("job") or 0))
-        state = self.approvals.confirm_reboot(approval_id, user=user, job=job if self.waits_for_reboot(job) else None)
-        what = f"{clean_text(str(binding.get('entity_id')), 80)} {binding.get('to')}"
-        title = {"approved": f"Reboot approved: {what}"}.get(state, f"Reboot approval {state}: {what}")
-        detail = (
-            f"The host reboots in the update window at {self.options.updates.window}."
-            if state == "approved"
-            else str((self.store.approval(approval_id) or {}).get("detail") or "")
-        )
-        self._note(title, detail, kind="approval", item=item_key(str(binding.get("entity_id")), str(binding.get("to"))))
+        found = self.approvals.grant("reboot", reboot_binding(job), subject_=reboot_subject(job.entity_id,
+                                     job.to_version), title=f"Reboot to activate {job.title} {job.to_version}",
+                                     user=user, when="window")  # fmt: skip
+        self._note(f"Reboot approved: {clean_text(job.entity_id, 80)} {job.to_version}",
+                   f"The host reboots in the update window at {self.options.updates.window}.", kind="approval",
+                   item=item_key(job.entity_id, job.to_version))  # fmt: skip
         self._publish()
-        return state
+        return found
 
     async def _approved_reboots(self) -> None:
         """In the window, after the night's run: each installed OS update whose reboot the admin approved gets a
@@ -1245,7 +1137,7 @@ class UpdateManager:
                 continue
             binding = found["plan"].get("binding") or {}
             job = self.store.update_job(int(binding.get("job") or 0))
-            if job is None or not self.waits_for_reboot(job) or not self.approvals.reboot_bound(found, job):
+            if job is None or not self.waits_for_reboot(job) or not self.approvals.bound(found, reboot_binding(job)):
                 self.store.decide_approval(found["id"], expect=("approved",), to="void", now=self._clock(),
                                            detail="the update changed since the reboot was approved")  # fmt: skip
                 continue
@@ -1257,7 +1149,7 @@ class UpdateManager:
                             entity=job.entity_id, version=job.to_version)  # fmt: skip
                 continue
             before = await self.ops.probe(self._custom_domains())
-            if before.errors or before.core_state != "running" or not before.api_up:
+            if before.errors or not before.api_up:
                 self._audit("update.reboot", outcome="waiting", detail="health could not be read before the reboot",
                             entity=job.entity_id, version=job.to_version)  # fmt: skip
                 continue
@@ -1265,7 +1157,7 @@ class UpdateManager:
             plan = [i for i in old.get("plan") or [] if isinstance(i, dict) and i.get("entity_id") == job.entity_id]
             run_id = self.store.start_update_run(window_day=day, trigger="reboot", mode="act", plan=plan,
                                                  now=self._clock())  # fmt: skip
-            if run_id is None or not self.approvals.consume_reboot(found["id"], job):
+            if run_id is None or not self.approvals.consume(found["id"], "reboot", reboot_binding(job)):
                 continue
             self.store.set_update_run(run_id, now=self._clock(), state="installing", expect=("planned",),
                                       before=before.to_json(), before_first=before.to_json(),
@@ -1331,7 +1223,7 @@ class UpdateManager:
             approval = job.target.get("approval")
             if job.state != "pending" or not isinstance(approval, str):
                 continue
-            if not self.approvals.consume(approval, job.id):
+            if not self.approvals.consume_update(approval, job.id):
                 self.store.transition_job(job.id, expect=("pending",), to="skipped", now=self._clock(),
                                           detail="the approval is no longer valid")  # fmt: skip
 
@@ -1371,7 +1263,7 @@ class UpdateManager:
 
     async def _baseline(self, ctx: RunCtx) -> bool:
         before = await self.ops.probe(self._custom_domains())
-        if before.errors or before.core_state != "running" or not before.api_up:
+        if before.errors or not before.api_up:
             await self._abort(ctx, "health could not be read before updating", failure=True)
             return False
         return self.store.set_update_run(ctx.run_id, now=self._clock(), state="installing", expect=("backing_up",),
@@ -1483,7 +1375,8 @@ class UpdateManager:
             ctx.stop = ctx.stop or why
             return why
         item = ctx.plan.get(job.entity_id)
-        approved = isinstance(job.target.get("approval"), str) and self.approvals.proves(job.target["approval"], job)
+        approval = job.target.get("approval")
+        approved = isinstance(approval, str) and self.approvals.proves_update(approval, job)
         if item is None or (decision_of(item).tier is not Tier.AUTO and not approved):
             return "no longer automatic in the plan, and not approved"
         try:
@@ -1803,6 +1696,10 @@ class UpdateManager:
             await self._sleep(POLL_S)
         return False
 
+    def _before(self, ctx: RunCtx) -> HealthPoint:
+        """The health a job is compared with: the check before it (or after the job before it)."""
+        return HealthPoint.from_json((self.store.update_run(ctx.run_id) or {}).get("before") or {})
+
     async def _settle(self, job: UpdateJob | None, before: HealthPoint) -> tuple[Comparison, HealthPoint | None]:
         """Poll health until it matches `before` (after a minimum settle time) or the settle time runs out."""
         await self._wait_core_up()
@@ -1830,8 +1727,7 @@ class UpdateManager:
                 # Installed and waiting for its reboot: never a failure.
                 self._move(job, "rebooting", f"installed {job.to_version}; it activates when the host reboots")
                 return
-        run = self.store.update_run(ctx.run_id) or {}
-        before = HealthPoint.from_json(run.get("before") or {})
+        before = self._before(ctx)
         result, after = await self._settle(job, before)
         version, _ = await self._version(job)
         if not result.healthy:
@@ -2046,7 +1942,7 @@ class UpdateManager:
                 "target": {"proposal": proposal, "domain": record["domain"], "approval": found["id"]}}  # fmt: skip
         [job] = self.store.add_update_jobs(run_id, [spec], now=self._clock())
         ctx = RunCtx(run_id=run_id, day=day, deadline=deadline, plan={}, backup={})
-        if not self.approvals.consume_fork(str(found["id"]), job.id, await self.fork_binding(proposal)):
+        if not self.approvals.consume(str(found["id"]), "fork_rebase", await self.fork_binding(proposal), job=job.id):
             self._move(job, "skipped", "the approval no longer matches the fork, Core or the proposal")
             forkrebase.move(self.store, proposal, expect=("open",), to="stale", now=self._clock(),
                             detail="the fork, Core or the proposal changed since it was approved")  # fmt: skip
@@ -2091,14 +1987,16 @@ class UpdateManager:
         if forks is None or not isinstance(approval, str):
             return False
         if not written:
-            return self.approvals.proves_fork(approval, job, await self.fork_binding(str(record["id"])))
+            return self.approvals.proves(approval, "fork_rebase", job, await self.fork_binding(str(record["id"])))
         found = self.store.approval(approval) or {}
         bound = dict((found.get("plan") or {}).get("binding") or {})
+        if bound.get("proposal") != job.target.get("proposal"):
+            return False
         on_disk = await asyncio.to_thread(forkrebase.current_files, forks.custom, record)
         if on_disk is None:
             return False
         # The approval as it was given (its own hash checks it was not edited), and on disk exactly its result.
-        return self.approvals.proves_fork(approval, job, bound) and bound.get("result") == record[
+        return self.approvals.proves(approval, "fork_rebase", job, bound) and bound.get("result") == record[
             "result"
         ] == forkrebase.files_hash(on_disk)
 
@@ -2153,8 +2051,7 @@ class UpdateManager:
         self._move(job, "verifying", "rebased files written; Core restarted")
 
     async def _fork_verify(self, ctx: RunCtx, job: UpdateJob, record: Mapping[str, Any]) -> None:
-        run = self.store.update_run(ctx.run_id) or {}
-        before = HealthPoint.from_json(run.get("before") or {})
+        before = self._before(ctx)
         result, after = await self._settle(job, before)
         regressions = list(result.regressions)
         domain = str(record["domain"])
@@ -2187,8 +2084,7 @@ class UpdateManager:
         forks = self._forks
         if forks is None:
             return
-        run = self.store.update_run(ctx.run_id) or {}
-        before = HealthPoint.from_json(run.get("before") or {})
+        before = self._before(ctx)
         if job.rollback_attempts == 0 and not self.store.transition_job(
             job.id, expect=("rolling_back",), to="rolling_back", now=self._clock(), count_rollback=True
         ):
@@ -2409,7 +2305,7 @@ class UpdateManager:
         start = self._window_start(created) if run["trigger"] == "window" else created
         ctx = RunCtx(run_id=int(run["id"]), day=str(run["window_day"]), deadline=await self._deadline(start),
                      plan={str(i["entity_id"]): i for i in run["plan"] if isinstance(i, dict)},
-                     backup=dict(run.get("backup") or {}), resumed=True)  # fmt: skip
+                     backup=dict(run.get("backup") or {}))  # fmt: skip
         if run["state"] == "backing_up":
             existing = ctx.backup.get("existing")
             if not isinstance(existing, list):
@@ -2460,7 +2356,6 @@ def cmd_plan(ctx: ExecContext, _: Args) -> Any:
     if not runs:
         return {"plan": None, "note": f"no update window has run yet (window {ctx.options.updates.window})"}
     latest = runs[0]
-    now = datetime.now(UTC)
     last_act = next((r for r in store.recent_update_runs(limit=20) if r["mode"] == "act"), None)
     approved = {a["subject"] for a in store.approvals(states=("approved",), limit=50)}
     return {
@@ -2497,10 +2392,6 @@ def cmd_plan(ctx: ExecContext, _: Args) -> Any:
         "approvals": [
             {k: a[k] for k in ("subject", "state", "run_when", "created_at", "expires_at", "decided_at", "detail")}
             for a in store.approvals(limit=15)
-        ],
-        "your_approval_requests": [
-            {k: p[k] for k in ("entity_id", "title", "from_version", "to_version", "expires_at")}
-            for p in proposals.refresh(store, now=now)
         ],
         "holds": _holds(store),
         "rollbacks": store.rollback_history(limit=5),

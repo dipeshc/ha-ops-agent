@@ -81,7 +81,7 @@ function system() {
            u.account_7d_percent != null ? kv("Account, 7 days", `${u.account_7d_percent} %`) : null]),
       u.daily_max_usd ? kv("Cost today", `$${(u.cost_today_usd || 0).toFixed(2)} of $${Number(u.daily_max_usd).toFixed(2)}`) : null,
       kv("Runs today", `${today.runs || 0}`),
-      kv("Chat messages today", `${(st.chat || {}).used || 0} of ${(st.chat || {}).cap || "–"}`),
+      kv("Chat runs today", `${(st.chat || {}).used || 0} of ${(st.chat || {}).cap || "–"}`),
       kv("Tokens today", P.fmtN(today.tokens)),
     ]),
     section("Backups", null, [
@@ -180,9 +180,8 @@ const CARD = {
   ai_disabled: ["AI is off", "power"], share_cap: ["Run-time budget used for this window", "clock"],
   run_cap_reached: ["Run limit reached", "clock"], usage_limited: ["AI usage limit", "clock"],
   account_busy: ["Subscription busy", "clock"], skipped_busy: ["Agent busy", "clock"],
-  chat_cap: ["Message limit reached", "clock"], busy: ["Not sent", "alert"], interrupted: ["Interrupted", "alert"], error: ["Run failed", "alert"],
-  investigation: ["Investigation", "search"], share_reserve: ["Saving budget for monitoring", "clock"], cost_cap: ["Daily cost cap reached", "clock"],
-  proposal: ["Back up now?", "alert"],
+  busy: ["Not sent", "alert"], interrupted: ["Interrupted", "alert"], error: ["Run failed", "alert"],
+  investigation: ["Investigation", "search"], share_reserve: ["Saving budget for monitoring", "clock"], cost_cap: ["Daily cost cap reached", "clock"]
 };
 function convo(t) {
   const c = S.conv, q = t.kind === "question";
@@ -200,8 +199,7 @@ function convo(t) {
   return h("section", { class: "thread", "aria-label": q ? "Conversation" : "About this item" },
     has ? h("h3", { text: q ? "Conversation" : "About this item" }) : null, has ? log : null,
     c.failed ? h("p", { class: "ro", role: "alert", text: "The conversation could not be loaded; retrying when the daemon answers." }) : null,
-    c.readOnly ? h("p", { class: "ro", text: "The one chat of earlier versions, kept read only. Ask something new on Ask." })
-      : h("div", { class: "dock" }, composer(t)));
+    h("div", { class: "dock" }, composer(t)));
 }
 async function remember(turn) {
   S.menuFor = null;
@@ -216,7 +214,7 @@ function turnMenu(turn) {
   return [h("button", { "aria-label": "Message options", "aria-expanded": String(open), onclick: () => { S.menuFor = open ? null : turn.id; P.render(); } }, "···"),
     open ? h("div", { class: `btns meta ${turn.role === "admin" ? "r" : "l"}` },
       btn("Copy", () => copy(turn.text), "text"),
-      typeof turn.id === "number" && !(S.conv || {}).readOnly ? btn("Remember this", () => remember(turn), "text") : null,
+      typeof turn.id === "number" ? btn("Remember this", () => remember(turn), "text") : null,
       turn.run_id ? h("span", { text: `Run ${turn.run_id}` }) : null) : null];
 }
 function turnEls(turn) {
@@ -258,14 +256,10 @@ function link(turn) {
 function card(turn) {
   const m = turn.meta || {}, [title, ic] = CARD[turn.status] || ["Notice", "alert"];
   const err = ["error", "busy", "interrupted"].includes(turn.status);
-  const acts = m.resolved || (S.conv || {}).readOnly ? [] : (m.actions || []);
+  const acts = m.resolved ? [] : (m.actions || []);
   const btns = [];
   const ref = turn.reply_to;
   if (acts.includes("turn_on_retry")) btns.push(btn("Turn AI on & retry", () => turnOnAndRetry(ref), "fill"));
-  if (acts.includes("backup")) btns.push(btn("Back up now", async () => {
-    const r = await api("POST", "api/backups/now", {});
-    toast(r.status === 200 ? "Backing up… The result appears on Home." : r.data.message || "Not possible now.");
-  }, "fill"));
   if (acts.includes("cancel")) btns.push(btn("Stop", () => api("POST", P.itemUrl(S.conv.item, "/cancel"), { task_id: m.task }), "danger"));
   if (acts.includes("retry")) btns.push(h("button", { class: `btn ${acts.includes("turn_on_retry") ? "" : "fill"}`, onclick: () => retry(ref) }, "Retry now"));
   let auto = null;
@@ -340,7 +334,7 @@ async function askNew(ta) {
   S.drafts.ask = ""; P.saveDrafts(); ta.value = "";
   const it = r.data.item;
   P.put(it);
-  S.conv = { item: it.id, thread: r.data.turn ? r.data.turn.thread : null, turns: r.data.turn ? [r.data.turn] : [], more: false, loaded: true, readOnly: false, info: null,
+  S.conv = { item: it.id, thread: r.data.turn ? r.data.turn.thread : null, turns: r.data.turn ? [r.data.turn] : [], more: false, loaded: true, info: null,
     inflight: r.status === 202 ? { turn_id: r.data.turn.id, state: "queued", position: r.data.position, steps: [], started_at: new Date().toISOString() } : null };
   S.asks = [it, ...(S.asks || []).filter((x) => x.id !== it.id)];
   S.from = "ask";
@@ -348,7 +342,7 @@ async function askNew(ta) {
 }
 async function submit(ta, key) {
   const text = ta.value.trim(), c = S.conv;
-  if (!text || text.length > MAX || !c || c.readOnly) return;
+  if (!text || text.length > MAX || !c) return;
   const turn = { id: null, client_id: clientId(), thread: c.thread, role: "admin", text, status: "sending", at: new Date().toISOString(), meta: {} };
   S.drafts[key] = ""; P.saveDrafts(); ta.value = "";
   c.turns.push(turn); els.scrollDown = true; P.render();

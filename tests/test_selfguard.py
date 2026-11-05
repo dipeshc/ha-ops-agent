@@ -1,7 +1,6 @@
 """The agent never modifies itself: every path to the add-on, the Supervisor or the host is refused."""
 
 import asyncio
-import json
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -10,15 +9,14 @@ import pytest
 
 from opsd import reload as reload_mod
 from opsd import selfguard
-from opsd.capabilities import CAPABILITIES, CapabilityError, parse_request
+from opsd.capabilities import CAPABILITIES
 from opsd.changepaths import allowed_path, fix_path
 from opsd.changes import ChangeRefused, check_paths
-from opsd.config import Paths
 from opsd.store import UpdateJob
 from opsd.supervisor import ApiError, SupervisorClient
 from opsd.updexec import ExecutorRefused, Executors
 from opsd.ws import CommandError, HAWebSocket
-from tests.conftest import SAMPLE_PROFILE, make_options
+from tests.conftest import SAMPLE_PROFILE
 
 SELF_HTTP = [
     ("POST", "/addons/local_ha_ops_agent/options", {"options": {}}),
@@ -136,7 +134,6 @@ ALLOWED_HTTP = [
     ("POST", "/core/api/services/update/install", {"entity_id": "update.hue_bridge_firmware"}),
     ("POST", "/core/api/config/config_entries/entry/abc/reload", {}),
     ("POST", "/core/api/config/config_entries/entry/01JD8KZQ3M5N6P7R8S9T0V1W2X/reload", {}),
-    ("POST", "/core/api/config/core/check_config", None),
     ("POST", "/core/api/services/automation/reload", {}),
     ("POST", "/core/api/services/template/reload", {}),
     ("POST", "/core/api/services/homeassistant/reload_custom_templates", {}),
@@ -315,6 +312,15 @@ SELF_WS = [
     ("subscribe_trigger", {"trigger": {"platform": "state", "entity_id": "lock.front_door"}}),
     ("input_boolean/create", {"name": "Guest mode"}),
     ("Backup/info", {}),
+    # Dashboards are read, never written.
+    ("lovelace/config/save", {"url_path": "example-energy", "config": {}}),
+    ("lovelace/config/delete", {"url_path": "example-energy"}),
+    ("lovelace/dashboards/create", {"url_path": "example-energy"}),
+    ("lovelace/dashboards/update", {"url_path": "example-energy"}),
+    ("lovelace/dashboards/delete", {"url_path": "example-energy"}),
+    ("lovelace/resources/create", {"url": "/local/x.js"}),
+    ("lovelace/resources/delete", {"resource_id": "x"}),
+    ("lovelace/config", {"url_path": "example-energy", "force": True}),
 ]
 
 
@@ -432,22 +438,6 @@ def job(entity_id: str, kind: str, slug: str | None = None) -> UpdateJob:
 def test_update_jobs_never_target_the_agent_or_the_supervisor(bad: UpdateJob) -> None:
     with pytest.raises(ExecutorRefused):
         Executors._check_job(bad)
-
-
-def test_update_approval_requests_for_the_agent_are_refused(paths: Paths) -> None:
-    from opsd.proposals import validate_request
-    from opsd.runctx import ExecContext, ExecEnv
-
-    cap = CAPABILITIES["approval.request"]
-    _, args = parse_request(json.dumps({"verb": cap.verb, "args": {"entity": "update.ha_ops_agent_update"}}).encode())
-    env = ExecEnv(paths=paths, options=make_options(), client=None, redactor=lambda: None)  # type: ignore[arg-type]
-
-    class Run:
-        profile = "chat"
-
-    ctx = ExecContext(env=env, capability=cap, run=Run())  # type: ignore[arg-type]
-    with pytest.raises(CapabilityError, match="never updates itself"):
-        validate_request(ctx, args)
 
 
 def test_a_renamed_agent_update_entity_is_refused() -> None:
@@ -584,9 +574,13 @@ def test_reload_and_check_config_still_reach_core(net: Recorder) -> None:
 
     client = SupervisorClient("token")
     asyncio.run(LiveAPI(client).core_post("/config/config_entries/entry/01JD8KZQ3M5N6P7R8S9T0V1W2X/reload"))
-    client.core("/config/core/check_config", "POST", None)
+    client.supervisor("/core/check", "POST", {})
     client.call_service("automation", "reload", {})
     client.call_service("notify", "mobile_app_admin_phone", {"message": "x"})
+    assert len(net.calls) == 4
+    # Core's own REST check is not a call the agent makes: the Supervisor's check is the one config check.
+    with pytest.raises(ApiError, match="refused"):
+        client.core("/config/core/check_config", "POST", None)
     assert len(net.calls) == 4
 
 
@@ -611,17 +605,15 @@ def test_no_capability_argument_can_carry_a_self_slug_into_a_url(tmp_path: Path)
     reviewed = {
         "integration.reload",  # domain only; DENY_DOMAINS + the HTTP guard
         "change.propose", "facts.propose", "suppress.propose",  # changepaths.allowed_path + self_path
-        "approval.request",  # validate_request + Executors._check_job
         "task.create", "task.cancel", "task.investigate",  # schedule only
-        "baseline.ack", "notify.admin",  # agent state, pushes
+        "notify.admin",  # pushes
         "fork.propose",  # a custom integration's domain (self_path refused); writes only through fork.apply
     }  # fmt: skip
-    reachable = {c.name for c in CAPABILITIES.values() if c.enabled and not c.internal and not c.read_only}
+    reachable = {c.name for c in CAPABILITIES.values() if not c.internal and not c.read_only}
     assert reachable <= reviewed, f"new mutating capability needs a self-target review: {reachable - reviewed}"
-    internal = {c.name for c in CAPABILITIES.values() if c.enabled and c.internal}
+    internal = {c.name for c in CAPABILITIES.values() if c.internal}
     # change.autofix: paths through changepaths.allowed_path (self_path) or configuration.yaml only.
-    # dashboard.save: one lovelace/config/save inside selfguard.approved_dashboard_write (a dashboard, never the agent).
     # fork.apply: files under custom_components/<domain>/ (self_path refused) and one Core restart inside
     # selfguard.approved_core_restart for its job.
     assert internal <= {"change.apply", "change.revert", "change.autofix", "backup.create",
-                        "update.install", "update.rollback", "dashboard.save", "fork.apply"}  # fmt: skip
+                        "update.install", "update.rollback", "fork.apply"}  # fmt: skip

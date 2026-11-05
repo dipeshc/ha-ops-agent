@@ -85,7 +85,7 @@ def test_what_is_never_held() -> None:
 def test_messages_round_trip_through_the_store_format() -> None:
     message = Message("Reminder: x", "body", tag="ha-ops-agent-task-1", thread_id="a" * 16,
                       actions=(Action(ActionKind.DONE, "Done"), Action(ActionKind.REPLY, "Reply", text_input=True)),
-                      budget_class=BudgetClass.USER, url="/t/x", action_ttl=timedelta(hours=2))  # fmt: skip
+                      budget_class=BudgetClass.USER, url="/t/x")  # fmt: skip
     assert quiet.from_json(quiet.to_json(message)) == message
 
 
@@ -180,7 +180,7 @@ async def test_the_push_cap_leaves_overflow_in_the_panel(h: Harness, monkeypatch
     await d.send_now(agent_message("Reply", "a", urgent=False))
     await d.send_now(agent_message("Follow-up", "b", urgent=False))
     d.options = after_quiet(d)
-    monkeypatch.setattr(d.channel, "send", lambda message, **kw: "rate_limited")
+    monkeypatch.setattr(d.notifier, "send", lambda message, **kw: "rate_limited")
     assert await d.flush_held(datetime.now(UTC)) == "rate_limited"
     view = d.held_view(datetime.now(UTC))
     assert view is not None and view["count"] == 0 and view["undelivered"] == ["Agent: Reply", "Agent: Follow-up"]
@@ -188,7 +188,7 @@ async def test_the_push_cap_leaves_overflow_in_the_panel(h: Harness, monkeypatch
     retry = daemon(h, covering=True)
     await retry.send_now(agent_message("Reply", "c", urgent=False))
     retry.options = after_quiet(retry)
-    monkeypatch.setattr(retry.channel, "send", lambda message, **kw: "failed")
+    monkeypatch.setattr(retry.notifier, "send", lambda message, **kw: "failed")
     assert await retry.flush_held(datetime.now(UTC)) == "failed"
     view = retry.held_view(datetime.now(UTC))
     assert view is not None and view["count"] == 1

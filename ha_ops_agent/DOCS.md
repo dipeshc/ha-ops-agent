@@ -21,4 +21,10 @@ https://github.com/dipeshc/ha-ops-agent#readme
 It starts in `agent.mode: observe` and changes nothing. Switch to `act`, and
 `updates.auto_install: on`, when you have read what it would do.
 
+Upgrading: keep "Create backup" on when you update the add-on; that backup
+is the way back, since an older version refuses a store a newer one
+upgraded. 0.24.0 removes the `llm.provider` option (a saved value is
+ignored; the AI switch is the off switch) and reads `claude.plan: auto` as
+`pro`. See the CHANGELOG and the README's Upgrading section.
+
 Support: GitHub issues, best effort.

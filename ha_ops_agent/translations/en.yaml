@@ -6,13 +6,6 @@ configuration:
       mode:
         name: Mode
         description: "observe reports only; act also installs updates and applies approved changes."
-  llm:
-    name: Model provider
-    description: Which AI provider the agent uses.
-    fields:
-      provider:
-        name: Provider
-        description: "claude, or none for deterministic alerts only."
   claude:
     name: Claude
     description: Claude Code sign-in and models.
@@ -22,7 +15,7 @@ configuration:
         description: "A setup token from claude setup-token (subscription), or an API key. Empty: AI is off."
       plan:
         name: Plan
-        description: "Subscription tier that sizes the agent's run-time budget (its weekly hours). auto means pro, the smallest."
+        description: "Subscription tier that sizes the agent's run-time budget (its weekly hours). pro, max5 or max20; auto (from earlier versions) is read as pro."
       model_standard:
         name: Standard model
         description: Health-check triage, chat, follow-ups, investigations and update reviews.

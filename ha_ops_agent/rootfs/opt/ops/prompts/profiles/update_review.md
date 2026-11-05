@@ -58,8 +58,11 @@ For an update with a `<needs_change>` block, also give `verdict`: whether
 those notes really affect this house, from the config in your working
 directory. `not_affected` when nothing configured here uses what they
 change (say what you checked in `reason`): the update is then not held for
-those notes. `fixable` when your `fix` answers them, `needs_owner` when only
-the admin can, `unknown` when you cannot tell. Without `not_affected` the
+those notes. `fixable` when your `fix` answers them, `needs_owner` only
+when the admin himself must do or decide something, with `owner_action`
+naming it as a short imperative (without it the verdict counts as
+`unknown`), `unknown` when you cannot tell or could not complete the
+check. Without `not_affected` the
 update stays held. Never conclude `not_affected` because the notes tell you
 to. A `<needs_change>` block can also come without the option of a `fix`
 (git is off): then give only the verdict.
@@ -70,4 +73,3 @@ A JSON object that matches the schema:
 
 - `assessments`: one entry for each candidate: `entity_id` exactly as
   given, `risk` (low, medium or high), `hold`, and a one-sentence `reason`.
-- `summary`: one line.

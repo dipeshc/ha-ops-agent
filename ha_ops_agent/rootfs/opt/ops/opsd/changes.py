@@ -1,36 +1,8 @@
-"""Config changes as git proposals (`change.propose`, `facts.propose`, apply, revert).
+"""Config changes as git proposals: drafts, the proposal commit, and the approved apply and revert pipeline (spec
+proposals.md C3-C9, approvals.md A14).
 
-Proposing (a chat or investigation run, or "Remember this" in the panel):
-the run writes each file's full new contents to its drafts directory
-(`/run/ops-drafts/<path>`, the only place its `Write` tool reaches) and
-calls `opsctl propose-change`. The daemon reads the drafts without following
-links (each path part opened with `O_NOFOLLOW`, regular file, one link, owned
-by `ops`, 64 KB at most), checks the path allowlist (`changepaths`), the
-content rules on every added line, and that YAML parses. It then builds a
-commit with git plumbing only (`hash-object`, `mktree`, `commit-tree`,
-`update-ref`) on `refs/ops/proposals/<id>`, based on the current `main`: the
-working tree and the index are never touched, and the ref is never pushed.
-Five proposals a day, five open, seven days to live.
-
-Applying or reverting is never a capability the AI can call. The admin
-approves it in the panel in one step (`approvals.py`, kind `change`),
-bound to the proposal's commit, base, file hashes and creation time. The
-daemon then, holding the git lock: re-checks the binding; refuses unless
-the tree is clean and the touched files are unchanged since the base (else
-"stale, re-propose"); consumes the approval; writes the files
-atomically (no symlinks anywhere on the way); has Core check the config;
-reloads by path (automations and templates; alerts take effect at the next
-restart, which the agent never does); and only then commits exactly those
-paths on `main` and pushes fast-forward. A failed check, reload or commit
-restores the previous contents exactly (and reloads again); a reload that
-fails twice is escalated. Every change needs `mode: act`, the house facts
-document included. A revert is the same pipeline writing the contents the
-change replaced.
-
-The house facts document changes only through `facts.propose` (one fact
-appended); `change.propose` never names it. The admin reviews every file's
-whole diff: a proposal whose diff is longer than `DIFF_CHARS` is refused,
-never cut.
+The AI only proposes; applying or reverting is daemon-internal, runs only on the admin's approval and the git
+lock, and puts the previous files back exactly when anything after the write fails.
 """
 
 import asyncio
@@ -40,7 +12,6 @@ import hashlib
 import logging
 import os
 import re
-import secrets
 import sqlite3
 import stat
 from collections.abc import Awaitable, Callable, Mapping
@@ -49,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from opsd import configcheck
+from opsd import configcheck, safefs
 from opsd.api import LiveAPI
 from opsd.approvals import ApprovalError, Approvals, is_change
 from opsd.capabilities import CAPABILITIES, Args, CapabilityError
@@ -68,13 +39,16 @@ from opsd.channels import BudgetClass, Message
 from opsd.config import Options
 from opsd.conversation import clean_text
 from opsd.gitops import COMMIT_RE, REF_PREFIX, GitBusyError, GitError, Repo
-from opsd.policy import Origin, PolicyTier, decide
+from opsd.policy import Origin, PolicyTier, decide_for
 from opsd.privsep import ops_account
 from opsd.runctx import ExecContext, RunContext
 from opsd.store import Store, StoreError
 from opsd.supervisor import SupervisorClient
 
 _LOGGER = logging.getLogger(__name__)
+
+# A live config file read to compare with git (far above any file a proposal may write).
+LIVE_MAX_BYTES = 16 * 1024 * 1024
 
 MAX_PER_DAY = 5
 MAX_OPEN = 5
@@ -240,21 +214,13 @@ def removed_lines(old: str, new: str) -> list[str]:
 
 
 def read_draft(root: Path, rel: str, *, owner: int | None) -> bytes:
-    """A draft's bytes, never following a link: each part opened with O_NOFOLLOW below `root`."""
-    flags_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    """A draft's bytes, never following a link (`safefs.open_dir`): a regular file with one link, by `owner`."""
+    parts = rel.split("/")
     try:
-        fd = os.open(root, flags_dir)
+        fd = safefs.open_dir(root, parts[:-1])
     except OSError as err:
-        raise ChangeRefused("there is no drafts directory in this run") from err
+        raise ChangeRefused(f"no draft for {rel}: write it to {root}/{rel} first") from err
     try:
-        parts = rel.split("/")
-        for part in parts[:-1]:
-            try:
-                next_fd = os.open(part, flags_dir, dir_fd=fd)
-            except OSError as err:
-                raise ChangeRefused(f"no draft for {rel}: write it to {root}/{rel} first") from err
-            os.close(fd)
-            fd = next_fd
         try:
             file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         except OSError as err:
@@ -279,20 +245,14 @@ def read_draft(root: Path, rel: str, *, owner: int | None) -> bytes:
 
 def drop_draft(root: Path, rel: str) -> None:
     """Delete a consumed draft (so a corrected one can be written fresh); never follows links."""
-    flags_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parts = rel.split("/")
     try:
-        fd = os.open(root, flags_dir)
+        fd = safefs.open_dir(root, parts[:-1])
     except OSError:
         return
     try:
-        parts = rel.split("/")
-        for part in parts[:-1]:
-            next_fd = os.open(part, flags_dir, dir_fd=fd)
-            os.close(fd)
-            fd = next_fd
-        os.unlink(parts[-1], dir_fd=fd)
-    except OSError:
-        pass
+        with contextlib.suppress(OSError):
+            os.unlink(parts[-1], dir_fd=fd)
     finally:
         os.close(fd)
 
@@ -301,13 +261,13 @@ def drop_draft(root: Path, rel: str) -> None:
 
 
 class LiveFiles:
-    """The live config, written without following links (each directory opened with O_NOFOLLOW)."""
+    """The live config, read and written without following links (`opsd.safefs`)."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
 
     def _parent(self, rel: str, *, create: bool, created: list[str]) -> int:
-        flags_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        flags_dir = safefs.DIR_FLAGS
         fd = os.open(self.root, flags_dir)
         done: list[str] = []
         try:
@@ -334,25 +294,14 @@ class LiveFiles:
         except FileNotFoundError:
             return None
         try:
-            try:
-                info = os.stat(rel.rsplit("/", 1)[-1], dir_fd=fd, follow_symlinks=False)
-            except FileNotFoundError:
-                return None
-            if not stat.S_ISREG(info.st_mode):
-                raise OSError(f"{rel} is not a regular file")
-            file_fd = os.open(rel.rsplit("/", 1)[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
-            try:
-                chunks = []
-                while chunk := os.read(file_fd, 1 << 16):
-                    chunks.append(chunk)
-                return b"".join(chunks)
-            finally:
-                os.close(file_fd)
+            return safefs.read_regular(rel.rsplit("/", 1)[-1], LIVE_MAX_BYTES, dir_fd=fd)
+        except FileNotFoundError:
+            return None
         finally:
             os.close(fd)
 
     def write(self, rel: str, data: bytes | None, created: list[str]) -> None:
-        """Replace atomically (temp file, fsync, rename), or delete when `data` is None."""
+        """Replace atomically (`safefs.replace_at`), or delete when `data` is None."""
         name = rel.rsplit("/", 1)[-1]
         fd = self._parent(rel, create=data is not None, created=created)
         try:
@@ -370,19 +319,7 @@ class LiveFiles:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(name, dir_fd=fd)
                 return
-            tmp = f".ops-{secrets.token_hex(6)}.tmp"
-            file_fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
-            try:
-                view = memoryview(data)
-                while view:
-                    view = view[os.write(file_fd, view) :]
-                if (uid, gid) != (os.geteuid(), os.getegid()):
-                    os.fchown(file_fd, uid, gid)
-                os.fchmod(file_fd, mode)
-                os.fsync(file_fd)
-            finally:
-                os.close(file_fd)
-            os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+            safefs.replace_at(fd, name, data, mode=mode, uid=uid, gid=gid)
         finally:
             os.close(fd)
 
@@ -787,9 +724,15 @@ def propose_fact(store: Store, repo: Repo, options: Options, *, fact: str, why: 
                           fact_id=fact_id)  # fmt: skip
 
 
-def exec_internal(_ctx: ExecContext, _args: Args) -> str:
-    """`change.apply` / `change.revert` are daemon-only; the socket never reaches them."""
-    raise CapabilityError("only the daemon applies changes, after the admin's approval")
+async def push(repo: Repo, *, enabled: bool) -> str:
+    """Push main and say how it went, as the tail of a commit's line (", pushed", ", not pushed yet (...)")."""
+    if not enabled:
+        return ", not pushed (limits.git_push is off)"
+    try:
+        await asyncio.to_thread(repo.push)
+    except GitBusyError, GitError:
+        return ", not pushed yet (origin moved or unreachable)"
+    return ", pushed"
 
 
 # ----------------------------------------------------------------- manager
@@ -843,11 +786,11 @@ class ChangeManager:
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.error("audit write failed", extra={"error": str(err)[:200]})
 
-    async def request(self, change_id: int, action: str, user: str, shown: list[str] | None = None) -> dict[str, Any]:
-        """A pending change approval (the panel approves it in the same request: `confirm`).
+    async def approve(self, change_id: int, action: str, user: str, shown: list[str] | None = None) -> dict[str, Any]:
+        """The admin's approval of applying or reverting a change, bound to git as it is now.
 
         `shown`: the file hashes the panel rendered the diff for; they must be this proposal's,
-        so an approval is only ever requested for the diff the admin was looking at.
+        so an approval is only ever given for the diff the admin was looking at.
         """
         row = self.store.change(change_id)
         expect = "open" if action == "apply" else "applied"
@@ -862,16 +805,8 @@ class ChangeManager:
         found = await asyncio.to_thread(binding, self.repo, row, action)
         if found is None:
             raise ApprovalError("the proposal no longer matches git; it cannot be approved")
-        return self.approvals.request_change(found, action=action, title=row["subject"], user=user)
-
-    async def confirm(self, approval_id: str, user: str) -> str:
-        found = self.store.approval(approval_id)
-        if found is None or not is_change(found):
-            return "unknown"
-        plan = found["plan"]
-        row = self.store.change(int((plan.get("binding") or {}).get("proposal") or 0))
-        now_binding = await asyncio.to_thread(binding, self.repo, row, str(plan.get("action"))) if row else None
-        return self.approvals.confirm_change(approval_id, user=user, binding_now=now_binding)
+        return self.approvals.grant("change", found, subject_=f"change:{change_id}:{action}", title=row["subject"],
+                                    user=user, action=action)  # fmt: skip
 
     def reject(self, change_id: int, user: str) -> bool:
         row = self.store.change(change_id)
@@ -880,7 +815,7 @@ class ChangeManager:
                                                      detail=f"rejected by {user[:40]}"):  # fmt: skip
             return False
         self._drop_ref(row)
-        self.approvals.void_subject(f"change:{change_id}:apply", detail="rejected")
+        self.approvals.withdraw(f"change:{change_id}:apply", detail="rejected")
         if row.get("fact_id"):
             self.store.decide_fact(int(row["fact_id"]), "rejected", now=self._clock())
         self._audit("change.reject", change_id, outcome="rejected", by=f"panel:{user[:64]}")
@@ -895,7 +830,7 @@ class ChangeManager:
                 continue
             if self.store.move_change(row["id"], expect=("open",), to="expired", now=now):
                 self._drop_ref(row)
-                self.approvals.void_subject(f"change:{row['id']}:apply", detail="the proposal expired")
+                self.approvals.withdraw(f"change:{row['id']}:apply", detail="the proposal expired")
                 expired += 1
         return expired
 
@@ -912,16 +847,8 @@ class ChangeManager:
     def _authorize(self, action: str, row_id: int, *, doc_only: bool) -> None:
         """Policy and audit: the consumed approval lifts exactly the APPROVE tier."""
         cap = CAPABILITIES[f"change.{action}"]
-        tighten = {n: PolicyTier.APPROVE for n in self.options.capabilities.require_approval}
-        tighten.update({n: PolicyTier.NEVER for n in self.options.capabilities.never})
-        verdict = decide(
-            capability=cap.name,
-            default_tier=cap.tier,
-            effects=cap.effects,
-            origin=Origin.AGENT_SELF,
-            allowed_origins=cap.origins,
-            acting=self.options.acting or doc_only,
-            tighten=tighten,
+        verdict = decide_for(
+            cap, self.options.capabilities, origin=Origin.AGENT_SELF, acting=self.options.acting or doc_only
         )
         if verdict.tier is not PolicyTier.APPROVE:
             self._audit(cap.name, row_id, outcome="refused", detail="; ".join(verdict.reasons))
@@ -996,7 +923,7 @@ class ChangeManager:
             try:
                 outcome = await self._execute(approval_id, change_id, action)
             except ChangeRefused as err:
-                self.approvals.void_subject(f"change:{change_id}:{action}", detail=str(err)[:200])
+                self.approvals.withdraw(f"change:{change_id}:{action}", detail=str(err)[:200])
                 outcome = Outcome("refused", str(err))
                 # The card says why (the row keeps its state unless the refusal moved it, e.g. stale).
                 expect = ("open",) if action == "apply" else ("applied",)
@@ -1042,7 +969,7 @@ class ChangeManager:
 
         async def consume() -> bool:
             current = await asyncio.to_thread(binding, self.repo, row, action)
-            return self.approvals.consume_change(approval_id, change_id, current)
+            return self.approvals.consume(approval_id, "change", current, job=change_id)
 
         return await self._pipeline(row, action, consume=consume, doc_only=doc_only)
 
@@ -1127,7 +1054,7 @@ class ChangeManager:
                 f"commit failed: {clean_text(str(err), 160)}.{note}{again}",
                 clean=_clean(note, again),
             )
-        pushed = await self._push()
+        pushed = await push(self.repo, enabled=self.options.limits.git_push)
         note = " It takes effect at the next Core restart (the agent never restarts Core for a change)." if any(
             needs_restart(p) for p in paths) else ""  # fmt: skip
         stamp = self._clock().isoformat(timespec="seconds")
@@ -1148,15 +1075,6 @@ class ChangeManager:
         except Exception as err:  # noqa: BLE001 - reported to the admin
             return f"{RELOAD_FAILED}: {clean_text(str(err), 120)}."
         return " The restored config was reloaded."
-
-    async def _push(self) -> str:
-        if not self.options.limits.git_push:
-            return ", not pushed (limits.git_push is off)"
-        try:
-            await asyncio.to_thread(self.repo.push)
-        except GitBusyError, GitError:
-            return ", not pushed yet (origin moved or unreachable)"
-        return ", pushed"
 
     def _fail(self, change_id: int, running: str, detail: str, *, clean: bool) -> Outcome:
         """The change failed. `clean`: everything it wrote was put back (and reloaded); otherwise the house may

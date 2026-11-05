@@ -13,8 +13,16 @@ your check says he must act, so check before you conclude.
 
 For each finding that says `verdict wanted: yes`, decide it from what you
 can read, and give `verdict`, `reason` (one or two sentences: what you
-checked and what you found) and `evidence` (the files, options, entities or
-commands you read, short).
+checked and what you found), `evidence` (the files, options, entities or
+commands you read, short) and `owner_action` (below).
+
+`needs_owner` is only for something the admin himself must do or
+decide, and then `owner_action` names it as a short imperative (for
+example "Set the country in the workday integration's options"). "Nothing
+here needs a change" or "no fix needed" is `not_affected`, never
+`needs_owner`. A check you could not complete is `unknown`, never
+`needs_owner`. A `needs_owner` without an `owner_action` counts as
+`unknown`. `owner_action` is null for every other verdict.
 
 A Core-minor finding carries several notes (`- note (<integration>): ...`).
 Decide each note on its own, then the finding: `not_affected` when no note
@@ -28,7 +36,9 @@ say exactly what they affect, and that is decidable here:
   templates, packages) for the effect name (`grep -rn`);
 - an option, an action or an entity id: search the config files for it;
 - "if you use integration X": `opsctl entries --domain X` (no entry and no
-  YAML for it means it is not used here);
+  YAML for it means it is not used here); its `settings` show the entry's
+  non-secret options (a country, a list of days, a mode), so a note about
+  a setting is decidable from them;
 - a repair: `opsctl repairs`.
 
 `unknown` is only for a note you genuinely cannot decide from these (for
@@ -40,11 +50,12 @@ read); say which note and why. A note you could check but did not is not
   item changes or removes (for example, the option it renames is not set
   anywhere, or the platform it changes is not used). The finding is then
   closed with your reason, until its evidence changes.
-- `fixable`: a change you add under `edits` or `dashboard` fixes it.
+- `fixable`: a change you add under `edits` fixes it.
 - `needs_owner`: only the admin can do or decide it (the UI, a vendor app,
   a replacement, a choice), or you are sure it affects this install and
-  you cannot propose the change.
-- `unknown`: you cannot tell from what you can read. Say why.
+  you cannot propose the change. Say what he must do in `owner_action`.
+- `unknown`: you cannot tell from what you can read, or a check could
+  not be completed. Say why.
 
 A Home Assistant repair is raised for this install by Home Assistant
 itself: say `not_affected` for one only when its own words show it does not
@@ -104,28 +115,14 @@ replaces the text `old` with `new` in that file.
 - No edits when the change needs a person or a decision, or when you are
   not sure.
 
-Only when the finding lists `dashboard`: `dashboard`, `{url_path,
-card_type, new_type, renames}` for one dashboard the finding names. On
-every card of `card_type` it renames the option keys in `renames` (each
-`{old, new}`) and, if `new_type` is set, changes the card's type. Nothing
-else can be edited this way; leave it out when the change needs more.
+A dashboard change is never an edit: give its steps in `plan` (the
+dashboard and card); the admin makes it by hand.
 
-The daemon only ever edits core display-only cards with no tap actions:
-`card_type` and `new_type` must each be one of `history-graph`,
-`statistics-graph`, `logbook`, `calendar`, `map` or `clock`, and the cards
-must hold no other cards and no actions. It refuses any card that names,
-matches or could select a lock, alarm, cover, door, gate or other access
-hardware, and any rename from or to an action, navigation, service, URL,
-content, entity, nested-card, visibility or condition option. For every
-other card (custom cards included) give the steps in `plan` and leave
-`dashboard` out: the admin makes that change by hand.
-
-The admin approves every proposal and dashboard change. Nothing is applied
-before that.
+The admin approves every proposal. Nothing is applied before that.
 
 ### Final answer
 
 A JSON object that matches the schema: `plans`, one entry for each
 finding you can plan (with `verdict`, `reason` and `evidence` where a
 verdict is wanted; for `not_affected` the plan says why nothing needs to
-change), and `summary`, one line.
+change).

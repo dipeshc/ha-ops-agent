@@ -1,14 +1,8 @@
-"""`run_agent(profile, ...)`: the one way the daemon starts the AI.
+"""`run_agent(profile, ...)`: the one way the daemon starts the AI (spec ai-runner.md).
 
-A `Profile` bundles a system prompt section, an output schema, model
-settings, a budget class and the capabilities the AI may request. The
-runner owns the fail-closed preflight that used to live in the triage
-cycle, in the same order: token, kill switch and backoff, memory floor,
-the `ops` account, the live isolation check, a passing self-test, and a
-fresh read-only export. Only then does it bind the run to the RPC socket,
-start `claude -p` as `ops`, and unbind it when the process is gone,
-whatever happened. Every preflight refusal is a `RunResult` status, never
-an exception, so the deterministic safety net that follows always runs.
+A `Profile` bundles a prompt section, an output schema, model settings, a budget class and the capabilities the
+AI may request. The fail-closed preflight runs cheapest first; every refusal is a `RunResult` status, never an
+exception, so the deterministic safety net that follows always runs.
 """
 
 import asyncio
@@ -26,7 +20,7 @@ from pathlib import Path
 from opsd import claude_runner, privsep
 from opsd.aicontrol import AiControl
 from opsd.baseline import Item
-from opsd.budget import PERCENT, RUNS_PER_DAY, UNIT_KEY, WINDOWS, Caps, Period, Reservation, reading_unit, utilisation
+from opsd.budget import PERCENT, UNIT_KEY, Caps, Period, Reservation, reading_unit, utilisation
 from opsd.capabilities import CAPABILITIES, capability_table
 from opsd.changepaths import GLOBS, ProposalRules
 from opsd.channels import BudgetClass
@@ -44,7 +38,6 @@ from opsd.store import Store, StoreError
 _LOGGER = logging.getLogger(__name__)
 
 CLAUDE_MIN_AVAILABLE_MB = 1200
-MAX_CLAUDE_RUNS_PER_DAY = RUNS_PER_DAY["triage"]
 KEEP_RUN_DAYS = 60
 GUARD_ANOMALY_KEY = "guard.anomaly"
 # How long the health check keeps reporting the latest anomaly.
@@ -80,8 +73,6 @@ class Profile:
     settings: Callable[[Options], RunSettings]
     # Proposals: the run gets the Write tool and an empty drafts directory (proposal contents only).
     drafts: bool = False
-    # The fast model (`claude.model_fast`, else the standard one).
-    fast: bool = False
 
 
 TASK_CAPABILITIES = frozenset({"task.create", "task.list", "task.cancel"})
@@ -108,7 +99,6 @@ TRIAGE = Profile(
     | {
         "task.create",
         "task.list",
-        "baseline.ack",
         "notify.admin",
         "suppress.propose",
         "integration.reload",
@@ -131,7 +121,6 @@ CHAT = Profile(
     | TASK_CAPABILITIES
     | {
         "task.investigate",
-        "approval.request",
         "change.propose",
         "facts.propose",
         "suppress.propose",
@@ -144,18 +133,18 @@ CHAT = Profile(
 
 # A check the agent scheduled for itself (or the admin asked for). Chat powers
 # without starting investigations; the origin is the creator's, so policy limits
-# still apply (an agent-self follow-up cannot ask for approvals).
+# still apply.
 FOLLOWUP = Profile(
     name="followup",
     prompt_file="profiles/followup.md",
     schema_file="reply-result.schema.json",
-    capabilities=READ_CAPABILITIES | TASK_CAPABILITIES | {"approval.request"},
+    capabilities=READ_CAPABILITIES | TASK_CAPABILITIES,
     budget_class=BudgetClass.AGENT,
     settings=_chat_settings,
 )
 
 # One step of an investigation the admin asked for in a chat. Reads,
-# the task list and approval requests; it cannot schedule anything (the daemon
+# the task list and proposals; it cannot schedule anything (the daemon
 # runs the next step when the result asks for one, up to the step limit).
 INVESTIGATE = Profile(
     name="investigate",
@@ -164,7 +153,7 @@ INVESTIGATE = Profile(
     capabilities=READ_CAPABILITIES
     | NETWORK_READS
     | FORK_PROPOSALS
-    | {"task.list", "approval.request", "change.propose", "facts.propose", "suppress.propose", "integration.reload"},
+    | {"task.list", "change.propose", "facts.propose", "suppress.propose", "integration.reload"},
     budget_class=BudgetClass.USER,
     settings=lambda options: RunSettings(
         options.claude.model_standard, INVESTIGATE_MAX_TURNS, min(INVESTIGATE_BUDGET_USD, options.limits.run_max_usd)
@@ -193,7 +182,6 @@ SUMMARY = Profile(
     capabilities=frozenset(),
     budget_class=BudgetClass.USER,
     settings=_summary_settings,
-    fast=True,
 )
 
 
@@ -451,8 +439,6 @@ class AgentRunner:
         if not self.options.valid:
             # Invalid add-on options fail closed; the health check reports them.
             return RunResult(status="options_invalid", error="; ".join(self.options.all_problems)[:300])
-        if self.options.llm.provider == "none":
-            return RunResult(status="no_provider", error="llm.provider is none")
         if not self._token():
             _LOGGER.warning("no AI token configured; deterministic alerting only")
             return RunResult(status="no_token")
@@ -466,22 +452,6 @@ class AgentRunner:
         if available < CLAUDE_MIN_AVAILABLE_MB:
             _LOGGER.warning("not enough memory to run the AI", extra={"available_mb": available})
             return RunResult(status="skipped_low_memory", error=f"{available} MB available")
-        return self._user_reserve(profile, now)
-
-    def _user_reserve(self, profile: Profile, now: datetime) -> RunResult | None:
-        """User-class runs stop at half of each window's run-time budget, leaving the rest to monitoring runs."""
-        if profile.budget_class is not BudgetClass.USER or self.store is None:
-            return None
-        try:
-            usage = self.store.usage(self._period(now), at=now)
-            caps = self._caps()
-        except (StoreError, sqlite3.Error) as err:
-            _LOGGER.error("usage unavailable; user run refused", extra={"error": str(err)[:200]})
-            return RunResult(status="store_unavailable", error="store_unavailable")
-        for window, scope in zip(WINDOWS, ("window", "week"), strict=True):
-            if float(usage[scope]["seconds"]) >= caps.stop(window, user=True):
-                _LOGGER.info("user run held back for monitoring", extra={"profile": profile.name, "window": window})
-                return RunResult(status="share_reserve", error=f"share_reserve:{window}")
         return None
 
     def _isolation(self) -> tuple[RunResult | None, tuple[int, int] | None]:

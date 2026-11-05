@@ -2,8 +2,8 @@
 
 Unattended maintenance for Home Assistant. It checks the system every day,
 tells you only when something changed, installs updates that have soaked
-with a backup, a health diff and rollback, and answers questions in one
-admin chat. An AI model handles the parts that need judgement; plain,
+with a backup, a health diff and rollback, and talks with you on every
+item it shows. An AI model handles the parts that need judgement; plain,
 tested code does everything that acts, and anything risky waits for your
 approval.
 
@@ -14,8 +14,8 @@ approval.
   HAOS and firmware ask first.
 - **Proactive maintenance**: deprecations and removals that affect your
   setup become one-tap fix proposals before they break anything.
-- **One chat** in the panel or in reply to a push. It never approves
-  anything itself.
+- **A conversation on every item**, in the panel or in reply to its push,
+  and questions about anything else. It never approves anything itself.
 - **Never** operates locks, alarm panels or garage doors.
 
 See the **Documentation** tab to set it up, and

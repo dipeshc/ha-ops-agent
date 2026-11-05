@@ -8,12 +8,15 @@ size-caps.
 """
 
 import asyncio
+import json
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from opsd import __version__, githistory, privacy
+from opsd import __version__, githistory, privacy, safefs
 from opsd.api import LiveAPI
 from opsd.baseline import Baseline, diff, honoured_expected
 from opsd.capabilities import Args
@@ -22,8 +25,9 @@ from opsd.jsonstore import read_json, read_jsonl
 from opsd.runctx import ExecContext
 from opsd.supervisor import ApiError, SupervisorClient
 
-MAX_OUTPUT_CHARS = 40_000
 MAX_LOG_LINES = 1000
+# `.storage/core.config_entries` is read like the run copy (maintenance.md M8): a regular file, no links, bounded.
+STORED_ENTRIES_LIMIT = 32 * 1024 * 1024
 
 
 async def _ws(client: SupervisorClient, msg_type: str, **fields: Any) -> Any:
@@ -49,7 +53,7 @@ def cmd_baseline(ctx: ExecContext, _: Args) -> Any:
         "repairs": b.repairs,
         "known_log_patterns": len(b.log_fps),
         "custom_integrations_ok": b.custom_ok,
-        "acks": b.acks,
+        "acks": {k: {f: v for f, v in ack.items() if f != "item"} for k, ack in b.acks.items()},
     }
 
 
@@ -141,15 +145,48 @@ def cmd_integrations(ctx: ExecContext, _: Args) -> Any:
     return derive_custom_integrations(custom_domains(ctx.paths.custom_components), counts, unavailable, entries)
 
 
+def _stored_entries(path: Path) -> dict[str, Mapping[str, Any]] | None:
+    """The stored config entries by id (their `data` and `options`, which the websocket never returns); None when
+    the file cannot be read or has an odd shape (no settings then, never an error)."""
+    data = safefs.read_or_none(path, STORED_ENTRIES_LIMIT)
+    try:
+        raw = json.loads(data) if data is not None else None
+    except ValueError:
+        return None
+    found = raw.get("data", {}).get("entries") if isinstance(raw, dict) and isinstance(raw.get("data"), dict) else None
+    if not isinstance(found, list):
+        return None
+    return {str(e["entry_id"]): e for e in found if isinstance(e, Mapping) and isinstance(e.get("entry_id"), str)}
+
+
 def cmd_entries(ctx: ExecContext, args: Args) -> Any:
+    """Config entries, each with its non-secret settings (`privacy.entry_settings`, spec capabilities.md K12a)."""
     domain = args.opt_text("domain")
     failed = args.flag("failed")
     entries = asyncio.run(_ws(ctx.client, "config_entries/get"))
-    rows = [
+    rows: list[dict[str, Any]] = [
         {k: e.get(k) for k in ("entry_id", "domain", "title", "state", "reason", "disabled_by", "source")}
         for e in entries
         if (not domain or e.get("domain") == domain) and (not failed or e.get("state") != "loaded")
     ]
+    stored = _stored_entries(ctx.paths.core_config_entries)
+    if stored is None:
+        return {"count": len(rows), "entries": rows, "settings_unavailable": True}
+    redactor = ctx.env.redactor()
+    budget = privacy.ENTRIES_MAX_CHARS
+    for row in rows:
+        entry = stored.get(str(row.get("entry_id")))
+        if entry is None or entry.get("domain") != row.get("domain"):
+            continue
+        settings, withheld = privacy.entry_settings(entry, redactor.redact)
+        cost = len(json.dumps(settings))
+        if settings and cost <= budget:
+            row["settings"] = settings
+            budget -= cost
+        elif settings:
+            withheld += sum(len(part) for part in settings.values())
+        if withheld:
+            row["withheld"] = withheld
     return {"count": len(rows), "entries": rows}
 
 

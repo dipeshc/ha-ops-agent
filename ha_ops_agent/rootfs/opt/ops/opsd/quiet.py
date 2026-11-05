@@ -1,16 +1,8 @@
-"""Quiet hours: non-urgent pushes wait until they end.
+"""Quiet hours: non-urgent pushes wait until they end (spec items-and-pushes.md N8).
 
-The window is local wall-clock time (`quiet_start`, `quiet_end`, HH:MM in
-the house's time zone) and may wrap midnight; an empty or equal pair turns
-it off. Wall-clock comparison means a DST change moves nothing: 07:00 stays
-07:00 local.
-
-Never held: urgent pushes, the safety class (Core down, critical health
-items, update escalations) and pushes marked `quiet_ok` (a reminder the
-admin scheduled themselves, which fires at the time they chose). Everything
-else (replies, follow-ups, agent reminders, Needs-you items) is stored and
-delivered at the end of the window, one push each (no digest), within the
-daily caps. Agent runs are never delayed; only delivery is.
+A local wall-clock window (it may wrap midnight; empty or equal turns it off; at most 12 hours). Urgent, safety and
+`quiet_ok` messages bypass it. Messages that are not items' are held in the store and sent at the end of the window;
+the item book keeps item pushes back itself.
 """
 
 import json
@@ -84,13 +76,11 @@ def to_json(message: Message) -> str:
     data = asdict(message)
     data["actions"] = [asdict(a) | {"kind": str(a.kind)} for a in message.actions]
     data["budget_class"] = str(message.budget_class)
-    data["action_ttl"] = message.action_ttl.total_seconds() if message.action_ttl is not None else None
     return json.dumps(data, default=str)
 
 
 def from_json(raw: str) -> Message:
     data: dict[str, Any] = json.loads(raw)
-    ttl = data.get("action_ttl")
     return Message(
         title=str(data["title"]),
         body=str(data["body"]),
@@ -98,16 +88,10 @@ def from_json(raw: str) -> Message:
         tag=str(data.get("tag") or "ha-ops"),
         thread_id=data.get("thread_id"),
         actions=tuple(
-            Action(
-                ActionKind(a["kind"]),
-                str(a["title"]),
-                bool(a.get("authentication_required")),
-                bool(a.get("text_input")),
-            )
+            Action(ActionKind(a["kind"]), str(a["title"]), text_input=bool(a.get("text_input")))
             for a in data.get("actions") or []
         ),
         budget_class=BudgetClass(data.get("budget_class") or BudgetClass.AGENT),
         url=data.get("url"),
-        action_ttl=timedelta(seconds=float(ttl)) if ttl is not None else None,
         quiet_ok=bool(data.get("quiet_ok")),
     )

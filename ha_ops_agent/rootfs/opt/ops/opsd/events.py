@@ -1,20 +1,8 @@
-"""Event queue, dispatcher and task scheduler: one pipeline for every trigger.
+"""Event queue, dispatcher and task scheduler: one pipeline for every trigger (spec overview.md D1).
 
-Every trigger (a due task, a manual check, Core recovering, a verified tap
-from the admin's phone) becomes an `Event` on one bounded priority queue.
-The queue drops duplicates of an event that is still pending or in flight
-(`dedupe_key`), so a burst of triggers cannot stack runs. The dispatcher
-hands each event to its handler as a task, so a long health check does not
-hold up later events; the single AI slot is enforced by the agent
-runner, not here.
-
-The scheduler is driven by the store: it claims due tasks with a
-compare-and-set (a task fires once even across restarts), turns them into
-`schedule.fired` events, and sleeps until the next due time or a wake-up.
-
-Deterministic safety alerts (Core down, critical items) do not depend on
-any of this: the liveness loop pushes directly, and the health handler's
-safety push does not depend on the AI.
+The bounded priority queue drops duplicates still pending or in flight (`dedupe_key`); the dispatcher runs each
+handler as a task; the store-driven scheduler claims due tasks with a compare-and-set so a task fires once. Safety
+alerts never depend on any of this.
 """
 
 import asyncio
@@ -41,14 +29,12 @@ RETRY_FULL_QUEUE = timedelta(minutes=1)
 
 
 class Priority(IntEnum):
-    """Lower runs first: safety > user message > approval > follow-up > triage."""
+    """Lower runs first: user message > approval > follow-up > triage."""
 
-    SAFETY = 0
     USER = 10
     APPROVAL = 20
     FOLLOWUP = 30
     TRIAGE = 40
-    MAINTENANCE = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +45,6 @@ class Event:
     payload: Mapping[str, Any] = field(default_factory=dict)
     principal: Principal = AGENT_SELF
     dedupe_key: str | None = None
-    at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 Handler = Callable[[Event], Awaitable[None]]
@@ -74,7 +59,6 @@ class EventQueue:
         self._order = itertools.count()
         self._keys: set[str] = set()
         self._ready = asyncio.Event()
-        self.dropped = 0
 
     def __len__(self) -> int:
         return len(self._heap)
@@ -88,7 +72,6 @@ class EventQueue:
         if event.dedupe_key is not None and event.dedupe_key in self._keys:
             return False
         if len(self._heap) >= self._maxsize:
-            self.dropped += 1
             _LOGGER.warning("event queue full; event dropped", extra={"event": event.type, "source": event.source})
             return False
         if event.dedupe_key is not None:
@@ -139,22 +122,17 @@ class Dispatcher:
 
 @dataclass(frozen=True, slots=True)
 class Schedule:
-    """`daily_at` (local HH:MM) or `every_s` seconds."""
+    """`daily_at` (local HH:MM)."""
 
     daily_at: str | None = None
-    every_s: int | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {k: v for k, v in (("daily_at", self.daily_at), ("every_s", self.every_s)) if v is not None}
+        return {"daily_at": self.daily_at} if self.daily_at is not None else {}
 
     @classmethod
     def from_json(cls, raw: Mapping[str, Any]) -> Schedule:
         daily = raw.get("daily_at")
-        every = raw.get("every_s")
-        return cls(
-            daily_at=daily if isinstance(daily, str) else None,
-            every_s=every if isinstance(every, int) and not isinstance(every, bool) and every > 0 else None,
-        )
+        return cls(daily_at=daily if isinstance(daily, str) else None)
 
 
 class TaskScheduler:

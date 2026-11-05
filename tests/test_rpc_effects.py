@@ -1,4 +1,4 @@
-"""Adversarial tests for the first mutating socket surface: binding, profiles, quotas, audit."""
+"""Adversarial tests for the mutating socket surface: binding, profiles, quotas, audit."""
 
 import json
 from collections.abc import Iterator
@@ -22,6 +22,8 @@ from opsd.store import Store
 from tests.conftest import make_options
 
 OPS_UID = 1001
+# A run-only effect that takes no push quota (a History note): the pipeline tests' mutating request.
+NOTE = {"title": "t", "message": "m", "reason": "note"}
 CLAUDE_PID = 500
 ITEMS = {
     "entities:zha": Item("entities:zha", "entities", "warning", "2 zha entities newly unavailable"),
@@ -106,12 +108,8 @@ def strict(paths: Paths) -> Iterator[World]:
 
 
 async def test_effects_refused_outside_a_run(world: World) -> None:
-    for verb, args in (
-        ("ack", {"key": "entities:zha"}),
-        ("notify", {"title": "t", "message": "m", "reason": "needs_action"}),
-    ):
-        response = await world.call(verb, **args)
-        assert not response["ok"] and "only available inside an agent run" in response["error"]
+    response = await world.call("notify", title="t", message="m", reason="needs_action")
+    assert not response["ok"] and "only available inside an agent run" in response["error"]
     assert world.sink.messages == []
     assert all(r["decision"] == "rejected" for r in world.audit())
 
@@ -126,12 +124,12 @@ async def test_strict_binding_by_uid_and_process_tree(strict: World) -> None:
     assert (await strict.call("status", Peer(pid=2, uid=4242)))["error"] == "peer not allowed"
     assert (await strict.call("status", Peer(pid=None, uid=None)))["error"] == "peer not allowed"
     strict.run()
-    assert (await strict.call("ack", ops_claude_child, key="entities:zha"))["ok"]
+    assert (await strict.call("notify", ops_claude_child, **NOTE))["ok"]
     assert "not part of the active agent run" in (await strict.call("status", stranger_ops))["error"]
     assert "not part of the active agent run" in (await strict.call("status", Peer(pid=None, uid=OPS_UID)))["error"]
-    assert (await strict.call("ack", root, key="entities:zha"))["error"] == "peer not allowed"
+    assert (await strict.call("notify", root, **NOTE))["error"] == "peer not allowed"
     strict.server.end_run()
-    assert (await strict.call("ack", ops_claude_child, key="entities:zha"))["error"] == "no agent run is active"
+    assert (await strict.call("notify", ops_claude_child, **NOTE))["error"] == "no agent run is active"
 
 
 async def test_run_not_attached_to_a_process_refuses_ops(strict: World) -> None:
@@ -169,43 +167,15 @@ def test_descends_from_proc(tmp_path: Path) -> None:
 
 async def test_profile_allowlist(world: World) -> None:
     world.run(allowed=READ_CAPABILITIES)
-    response = await world.call("ack", key="entities:zha")
+    response = await world.call("notify", **NOTE)
     assert not response["ok"] and "not available in the triage profile" in response["error"]
     assert (await world.call("status"))["ok"]
 
 
 async def test_origin_not_accepted(world: World) -> None:
     world.run(principal=Principal(Origin.ADMIN, user_id="u1", channel="companion"))
-    response = await world.call("ack", key="entities:zha")
+    response = await world.call("notify", **NOTE)
     assert not response["ok"] and "origin admin not accepted" in response["error"]
-
-
-# -------------------------------------------------------------------- ack
-
-
-async def test_ack_validation_and_clamps(world: World) -> None:
-    run = world.run()
-    unknown = await world.call("ack", key="made:up", days=1)
-    assert not unknown["ok"] and "unknown item key" in unknown["error"]
-    critical = await world.call("ack", key="custom:acme_solar", days=30, accept=True, reason="fine")
-    assert critical["ok"] and "accept refused" in critical["output"] and "at most 3 days" in critical["output"]
-    plain = await world.call("ack", key="entities:zha", days=99, accept=True)
-    assert plain["ok"]
-    acks = {a.key: a for a in run.effects.acks}
-    assert acks["custom:acme_solar"].accept is False and acks["custom:acme_solar"].days == 3
-    assert acks["entities:zha"].accept is True and acks["entities:zha"].days == 30
-    assert acks["entities:zha"].reason == "no reason given"
-
-
-async def test_replayed_ack_from_an_earlier_run_is_refused(world: World) -> None:
-    world.run()
-    request = {"key": "entities:zha", "days": 2}
-    assert (await world.call("ack", **request))["ok"]
-    world.server.end_run()
-    assert not (await world.call("ack", **request))["ok"]
-    later = world.run(handoff={"custom:acme_solar": ITEMS["custom:acme_solar"]})
-    replay = await world.call("ack", **request)
-    assert not replay["ok"] and "unknown item key" in replay["error"] and later.effects.acks == []
 
 
 # ----------------------------------------------------------------- notify
@@ -319,24 +289,24 @@ async def test_flood_is_bounded_by_budget_and_audit_limit(world: World) -> None:
 async def test_every_request_is_audited(world: World) -> None:
     run = world.run()
     await world.call("status")
-    await world.call("ack", key="entities:zha", days=2)
-    await world.call("ack", key="nope")
+    await world.call("notify", **NOTE)
+    await world.call("notify", title="t", message="m")
     await world.server.dispatch(b"not json")
     rows = world.audit()
     assert [(r["capability"], r["outcome"]) for r in rows] == [
         ("agent.status", "ok"),
-        ("baseline.ack", "ok"),
-        ("baseline.ack", "rejected"),
+        ("notify.admin", "ok"),
+        ("notify.admin", "rejected"),
         ("?", "rejected"),
     ]
     assert all(r["run_id"] == run.run_id and r["principal"] == "agent-self" for r in rows)
-    assert json.loads(rows[1]["args"])["days"] == 2
+    assert json.loads(rows[1]["args"])["reason"] == "note"
 
 
 async def test_audit_failure_refuses_request(world: World) -> None:
     world.run()
     world.store.close()
-    response = await world.call("ack", key="entities:zha")
+    response = await world.call("notify", **NOTE)
     assert response == {"ok": False, "error": "audit log unavailable; request refused"}
 
 
@@ -347,7 +317,7 @@ async def test_effects_need_a_store(paths: Paths) -> None:
     ctx = RunContext(profile="triage", principal=AGENT_SELF, allowed=TRIAGE.capabilities,
                      budget_class=BudgetClass.AGENT, started_at=datetime.now(UTC), handoff=ITEMS)  # fmt: skip
     server.begin_run(ctx)
-    response = await server.dispatch(b'{"verb": "ack", "args": {"key": "entities:zha"}}')
+    response = await server.dispatch(json.dumps({"verb": "notify", "args": NOTE}).encode())
     assert response["error"] == "audit log unavailable; request refused"
 
 
@@ -401,6 +371,5 @@ async def test_failed_execution_refunds_the_run_quota(paths: Paths) -> None:
 async def test_chat_origin_cannot_use_mutating_effects(world: World) -> None:
     world.run(principal=Principal(Origin.ADMIN_CHAT, user_id="u1", channel="companion"))
     assert (await world.call("status"))["ok"]
-    for verb, args in (("ack", {"key": "entities:zha"}),):
-        response = await world.call(verb, **args)
-        assert not response["ok"] and ("not accepted" in response["error"] or "chat-origin" in response["error"])
+    response = await world.call("notify", **NOTE)
+    assert not response["ok"] and ("not accepted" in response["error"] or "chat-origin" in response["error"])

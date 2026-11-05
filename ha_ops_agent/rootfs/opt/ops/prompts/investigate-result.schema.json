@@ -36,7 +36,8 @@
           "additionalProperties": false,
           "required": [
             "verdict",
-            "reason"
+            "reason",
+            "owner_action"
           ],
           "properties": {
             "verdict": {
@@ -58,6 +59,17 @@
                 "type": "string",
                 "maxLength": 120
               }
+            },
+            "owner_action": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "maxLength": 160
+                }
+              ]
             }
           }
         }

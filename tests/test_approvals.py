@@ -1,4 +1,4 @@
-"""Approvals: two factors, bound to the exact plan, single use, expiring; replay, drift and forgery refused."""
+"""Approvals: one admin action bound to the exact plan, single use, expiring; replay, drift and forgery refused."""
 
 import dataclasses
 from datetime import timedelta
@@ -30,10 +30,10 @@ async def latest_plan(rig: Rig) -> tuple[int, dict[str, dict[str, Any]]]:
     return int(run["id"]), {i["entity_id"]: i for i in run["plan"]}
 
 
-async def approve(rig: Rig, entity_id: str, *, when: str = "window", user: str = ADMIN) -> tuple[str, str]:
+async def approve(rig: Rig, entity_id: str, *, when: str = "window", user: str = ADMIN) -> str:
     run, items = await latest_plan(rig)
-    found = rig.approvals.request(items[entity_id], plan_run=run, user=user, when=when)
-    return found["id"], await rig.manager.confirm_approval(found["id"], ADMIN)
+    found = await rig.manager.approve(items[entity_id], plan_run=run, user=user, when=when)
+    return str(found["id"])
 
 
 def state(rig: Rig, approval_id: str) -> str:
@@ -43,8 +43,9 @@ def state(rig: Rig, approval_id: str) -> str:
 
 
 async def test_an_approved_update_runs_in_the_window_through_the_pipeline(rig: Rig) -> None:
-    approval, outcome = await approve(rig, WEATHER)
-    assert outcome == "approved" and state(rig, approval) == "approved"
+    approval = await approve(rig, WEATHER)
+    assert state(rig, approval) == "approved"
+    assert [r["decision"] for r in rig.audit("approval.approved")] == ["approved"]
     rig.now += timedelta(days=1)
     result = await rig.manager.run_window()
     assert result["result"] == "executed"
@@ -59,37 +60,34 @@ async def test_an_approved_update_runs_in_the_window_through_the_pipeline(rig: R
 
 
 async def test_replay_is_refused_and_an_approval_is_used_once(rig: Rig) -> None:
-    approval, _ = await approve(rig, WEATHER)
-    assert await rig.manager.confirm_approval(approval, ADMIN) == "refused"  # the second tap
+    approval = await approve(rig, WEATHER)
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
-    assert not rig.approvals.consume(approval, 999)
-    assert not rig.approvals.proves(approval, job("hacs", WEATHER))  # another job cannot borrow it
+    assert state(rig, approval) == "used"
+    assert not rig.approvals.consume_update(approval, 999)
+    assert not rig.approvals.proves_update(approval, job("hacs", WEATHER))  # another job cannot borrow it
 
 
 async def test_an_expired_approval_does_nothing(rig: Rig) -> None:
-    approval, _ = await approve(rig, WEATHER)
+    approval = await approve(rig, WEATHER)
     rig.now += APPROVAL_TTL + timedelta(minutes=1)
     await rig.manager.run_window()
     assert rig.ops.installs() == [] and state(rig, approval) == "expired"
-    # A tap after expiry is refused too.
-    run, items = await latest_plan(rig)
-    late = rig.approvals.request(items[WEATHER], plan_run=run, user=ADMIN, when="window")
-    rig.now += APPROVAL_TTL + timedelta(minutes=1)
-    assert await rig.manager.confirm_approval(late["id"], ADMIN) == "expired"
 
 
 async def test_a_version_change_voids_the_approval(rig: Rig) -> None:
-    approval, _ = await approve(rig, WEATHER)
+    approval = await approve(rig, WEATHER)
     rig.ops.entities[WEATHER]["attributes"]["latest_version"] = "v2.4.2"
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
     assert rig.ops.installs() == [] and state(rig, approval) == "void"
-    # And a change between the request and the tap voids it at the tap.
+    # And a change between the plan the admin saw and the tap refuses the tap: nothing is approved.
     run, items = await latest_plan(rig)
-    pending = rig.approvals.request(items[WEATHER], plan_run=run, user=ADMIN, when="window")
     rig.ops.entities[WEATHER]["attributes"]["latest_version"] = "v2.4.3"
-    assert await rig.manager.confirm_approval(pending["id"], ADMIN) == "void"
+    with pytest.raises(ApprovalError, match=r"now offers .* instead"):
+        await rig.manager.approve(items[WEATHER], plan_run=run, user=ADMIN, when="window")
+    assert rig.store.approvals(states=("approved",)) == []
+    assert rig.audit("approval.refused")
 
 
 async def test_the_hash_binds_entity_versions_and_plan(rig: Rig) -> None:
@@ -102,26 +100,18 @@ async def test_the_hash_binds_entity_versions_and_plan(rig: Rig) -> None:
         assert plan_hash(item | change, 7, "2026-01-28T04:00:00+00:00") != base, change
     assert plan_hash(item, 8, "2026-01-28T04:00:00+00:00") != base
     assert plan_hash(item, 7, "2026-01-28T04:00:01+00:00") != base
-    # A tampered stored hash makes the tap void, even with the right versions.
-    run, items = await latest_plan(rig)
-    found = rig.approvals.request(items[WEATHER], plan_run=run, user=ADMIN, when="window")
+    # A tampered stored hash voids it, even with the right versions.
+    found = await approve(rig, WEATHER)
     with rig.store._tx() as conn:
-        conn.execute("UPDATE approvals SET plan_hash = ? WHERE id = ?", ("0" * 64, found["id"]))
-    assert await rig.manager.confirm_approval(found["id"], ADMIN) == "void"
-
-
-async def test_only_the_admin_who_asked_can_confirm(rig: Rig) -> None:
-    run, items = await latest_plan(rig)
-    found = rig.approvals.request(items[WEATHER], plan_run=run, user=ADMIN, when="window")
-    assert await rig.manager.confirm_approval(found["id"], "u-household") == "refused"
-    assert state(rig, found["id"]) == "pending"
-    assert await rig.manager.confirm_approval("0" * 32, ADMIN) == "unknown"
+        conn.execute("UPDATE approvals SET plan_hash = ? WHERE id = ?", ("0" * 64, found))
+    rig.now += timedelta(days=1)
+    await rig.manager.run_window()
+    assert rig.ops.installs() == [] and state(rig, found) == "void"
 
 
 async def test_approving_while_paused_waits_for_the_resume(rig: Rig) -> None:
     rig.manager.set_paused(True, by="panel:u-admin")
-    approval, outcome = await approve(rig, WEATHER, when="now")
-    assert outcome == "now"
+    approval = await approve(rig, WEATHER, when="now")
     result = await rig.manager.run_window("approved")
     assert result["result"] == "reported" and rig.ops.installs() == []
     # No push; the approved item stays Scheduled and says why it waits.
@@ -163,13 +153,13 @@ async def test_reject(rig: Rig) -> None:
     assert not [m for m in rig.sent if m.tag == rig.item(WEATHER, "v2.4.1")["id"]]
     _, items = await latest_plan(rig)
     with pytest.raises(ApprovalError):
-        rig.approvals.request(items[ACME_POOL], plan_run=run, user=ADMIN, when="window")  # pinned
+        await rig.manager.approve(items[ACME_POOL], plan_run=run, user=ADMIN, when="window")  # pinned
 
 
 async def test_the_operating_system_can_be_approved_and_is_never_rolled_back(rig: Rig) -> None:
     rig.ops.entities[OS] = entity("17.2", "17.3", 27, "Home Assistant Operating System")
     rig.ops.registry.append({"entity_id": OS, "platform": "hassio", "unique_id": "home_assistant_os_version_latest"})
-    approval, _ = await approve(rig, OS)
+    approval = await approve(rig, OS)
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
     assert ("update_os", "17.3") in rig.ops.installs() and rig.jobs()[OS].state == "succeeded"
@@ -219,15 +209,15 @@ async def test_the_approval_is_checked_against_its_plan_row(rig: Rig) -> None:
     run, items = await latest_plan(rig)
     # Editing the approval's own copy (another plan id, or another version) breaks the binding.
     for edit in ({"plan": run + 50}, {"to": "v9.9.9"}):
-        found = rig.approvals.request(items[WEATHER], plan_run=run, user=ADMIN, when="window")
+        found = await rig.manager.approve(items[WEATHER], plan_run=run, user=ADMIN, when="window")
         with rig.store._tx() as conn:
             edited = json.dumps(found["plan"] | edit)
             conn.execute("UPDATE approvals SET payload = ? WHERE kind = 'approval' AND id = ?", (edited, found["id"]))
-        assert not rig.approvals.bound(rig.store.approval(found["id"]) or {})
-        assert await rig.manager.confirm_approval(found["id"], ADMIN) == "void"
+        assert not rig.approvals.bound_update(rig.store.approval(found["id"]) or {})
+        assert "approved" not in str(rig.approvals.annotate(list(items.values()), void=True))
+        assert state(rig, found["id"]) == "void"
     # So does a change to the plan row it came from (what the admin was shown).
-    approval, outcome = await approve(rig, WEATHER)
-    assert outcome == "approved"
+    approval = await approve(rig, WEATHER)
     source_run = int((rig.store.approval(approval) or {})["plan"]["plan"])
     source = rig.store.update_run(source_run)
     assert source is not None
@@ -242,23 +232,22 @@ async def test_using_an_approval_checks_its_expiry_its_plan_and_the_job(rig: Rig
     """Single use when the job is created: an expired approval or one for another action is never used."""
     from opsd.updates import job_spec
 
-    approval, outcome = await approve(rig, WEATHER)
+    approval = await approve(rig, WEATHER)
     run, items = await latest_plan(rig)
-    assert outcome == "approved"
     [wrong] = rig.store.add_update_jobs(run, [job_spec(items[WEATHER] | {"latest": "v2.4.9"})], now=rig.now)
-    assert not rig.approvals.consume(approval, wrong.id) and state(rig, approval) == "void"
-    assert not rig.approvals.consume(approval, 999_999)
+    assert not rig.approvals.consume_update(approval, wrong.id) and state(rig, approval) == "void"
+    assert not rig.approvals.consume_update(approval, 999_999)
 
-    late, _ = await approve(rig, WEATHER)
+    late = await approve(rig, WEATHER)
     run, items = await latest_plan(rig)
     [right] = rig.store.add_update_jobs(run, [job_spec(items[WEATHER])], now=rig.now)
     rig.now += APPROVAL_TTL + timedelta(hours=5)
-    assert not rig.approvals.consume(late, right.id) and state(rig, late) == "expired"
+    assert not rig.approvals.consume_update(late, right.id) and state(rig, late) == "expired"
 
 
 async def test_an_approval_is_void_when_what_it_installs_changed(rig: Rig) -> None:
     """Same entity and versions, but another HACS repository behind it: the approval does not carry over."""
-    approval, _ = await approve(rig, WEATHER)
+    approval = await approve(rig, WEATHER)
     rig.ops.hacs["612978245"]["full_name"] = "someone-else/ha-acme-weather"
     rig.now += timedelta(days=1)
     await rig.manager.run_window()

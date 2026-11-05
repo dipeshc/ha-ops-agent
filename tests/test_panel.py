@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 
 from opsd import panel as panel_mod
-from opsd.baseline import Item
 from opsd.daemon import Daemon
 from opsd.live import MAX_LIVE
 from opsd.panel import MAX_BODY, PanelServer
@@ -133,7 +132,7 @@ async def test_healthz_is_the_only_open_route_and_says_nothing(p: Panel) -> None
     "path",
     [
         "/",
-        "/t/0123456789abcdef",
+        "/t/u-0123456789ab",
         "/api/state",
         "/api/threads",
         "/api/home",
@@ -266,11 +265,14 @@ async def test_client_id_makes_sending_idempotent_and_one_message_in_flight(p: P
 
 
 async def test_shell_base_path_is_validated_and_the_csp_is_strict(p: Panel) -> None:
-    status, headers, page = await p.request("GET", "/t/0123456789abcdef")
+    status, headers, page = await p.request("GET", "/t/u-0123456789ab")
     # Relative to the page's own URL: the client's X-Ingress-Path is never used.
     assert status == 200 and '<base href="../">' in page
     assert '<base href="./">' in (await p.request("GET", "/"))[2]
-    assert '<base href="../../">' in (await p.request("GET", "/t/0123456789abcdef/"))[2]
+    assert '<base href="../../">' in (await p.request("GET", "/t/u-0123456789ab/"))[2]
+    # Old chat links (`t/<16 hex>`, before 0.22.0) and `/updates` are no pages any more.
+    assert (await p.request("GET", "/t/0123456789abcdef"))[0] == 404
+    assert (await p.request("GET", "/updates"))[0] == 404
     nonce = re.search(r"script-src 'nonce-([^']+)'", headers["content-security-policy"])
     assert nonce is not None and f'nonce="{nonce.group(1)}"' in page
     csp = headers["content-security-policy"]
@@ -439,24 +441,13 @@ async def test_presence_is_admin_only_rate_limited_and_bounded(p: Panel) -> None
 
 async def test_state_ai_switch_and_ops(p: Panel, h: Harness) -> None:
     status, _, state = await p.request("GET", "/api/state")
-    assert status == 200 and state["status"] in ("ready", "off") and state["chat"]["cap"] == 30
+    assert status == 200 and state["status"] in ("ready", "off") and state["chat"]["cap"] == 20
     assert state["tz"] == str(p.d.tz)
     assert (await p.request("POST", "/api/ai", body={"on": "yes"}))[0] == 400
     status, _, body = await p.request("POST", "/api/ai", body={"on": False})
     assert status == 200 and body["state"]["status"] == "off"
     status, _, ops = await p.request("GET", "/api/ops")
-    assert status == 200 and {"items", "history", "status"} <= set(ops)
-
-
-async def test_ops_items_are_redacted_for_the_panel(p: Panel) -> None:
-    """Open items carry raw log samples, which the Ops tab shows: secrets are masked before they leave the daemon."""
-    p.d.paths.secrets_yaml.write_text("cam_url: rtsp://user:hunter2@192.168.1.9/live\n")
-    sample = "Stream failed for rtsp://user:hunter2@192.168.1.9/live"
-    p.d._save_open_items([Item("log:x", "log", "warning", "new ERROR from go2rtc", {"sample": sample, "count": 3})],
-                         datetime.now(UTC))  # fmt: skip
-    status, _, ops = await p.request("GET", "/api/ops")
-    assert status == 200 and "hunter2" not in json.dumps(ops)
-    assert ops["items"][0]["detail"]["count"] == 3 and ops["items"][0]["summary"] == "new ERROR from go2rtc"
+    assert status == 200 and set(ops) == {"status", "profile"}
 
 
 async def test_a_conversation_unread_retry_and_paging(p: Panel, h: Harness) -> None:

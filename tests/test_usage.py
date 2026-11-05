@@ -20,7 +20,6 @@ from opsd.budget import (
     Caps,
     Period,
     reading_unit,
-    resolve_plan,
     share_fraction,
     utilisation,
 )
@@ -28,7 +27,7 @@ from opsd.claude_runner import RunResult, interpret_result, raw_utilisation, run
 from opsd.config import Options, UsageOptions
 from opsd.redact import Redactor
 from opsd.runctx import AGENT_SELF, RunContext
-from opsd.store import Store
+from opsd.store import ACTION_KEY, Store
 from opsd.supervisor import ApiError
 from opsd.usage import UsageGuard
 from tests.conftest import make_options
@@ -69,11 +68,16 @@ def test_share_option_scales_run_time_and_is_clamped() -> None:
 
 
 def test_plan_resolution() -> None:
-    # The provider reports no tier in its stream, so `auto` is pro, the smallest.
-    assert resolve_plan("auto") == "pro" and resolve_plan("max5") == "max5" and resolve_plan("weird") == "pro"
     pro, max20 = Caps.from_options(Options()), Caps.from_options(make_options(claude__plan="max20"))
     assert pro.week_seconds == 40 * 3600 * 0.05 and pro.window_seconds == pro.week_seconds * 0.2
     assert max20.week_seconds == 6 * pro.week_seconds
+
+
+def test_a_legacy_auto_plan_loads_as_pro() -> None:
+    legacy = Options.from_mapping({"claude": {"plan": "auto"}})
+    assert legacy.valid and legacy.claude.plan == "auto"
+    assert Caps.from_options(legacy).week_seconds == Caps.from_options(Options()).week_seconds
+    assert Options().claude.plan == "pro"
 
 
 def test_utilisation_parsing() -> None:
@@ -266,11 +270,15 @@ def test_prune_bounds_the_store(db: Store) -> None:
     held = db.hold_push("{}", title="still held", now=old)
     fact = db.add_fact("an old fact", thread_id=None, turn_id=None, now=old)
     assert db.decide_fact(fact, "rejected", now=old)
+    db.kv_set("evidence:old", "{}", now=old)
+    db.kv_set("evidence:fresh", "{}", now=NOW)
     counts = db.prune(now=NOW)
     assert counts["actions"] == 1 and counts["runs"] == 1 and counts["counters"] == 1
-    assert db.issued_action("OPS_DONE_" + "b" * 32) is not None and db.count(old.date().isoformat(), "chat_turns") == 0
+    assert db.kv_get(f"{ACTION_KEY}OPS_DONE_{'b' * 32}") != "" and db.count(old.date().isoformat(), "chat_turns") == 0
     assert [h["id"] for h in db.held_pushes(states=("held", "delivered"))] == [held]
     assert db.fact(fact) is None
+    # The cloud evidence cache is bounded too.
+    assert db.kv_get("evidence:old") == "" and db.kv_get("evidence:fresh") == "{}"
 
 
 # ---------------------------------------------------------- claude output
@@ -701,3 +709,9 @@ def test_the_agents_investigations_never_use_the_runs_kept_for_plan_a_fix(db: St
     assert text.startswith("Today's limit for investigations and Plan a fix is reached (6 runs a day")
     assert "chat runs" not in text
     assert "20 runs a day" in refusal_card("run_cap_reached", "chat", now=NOW, tz=UTC).text
+
+
+def test_the_maintenance_check_has_its_own_visible_daily_cap() -> None:
+    from opsd.budget import DEFAULT_PROFILE_RUNS, RUNS_PER_DAY
+
+    assert RUNS_PER_DAY["maintenance_plan"] == DEFAULT_PROFILE_RUNS == 3

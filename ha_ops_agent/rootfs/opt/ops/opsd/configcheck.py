@@ -1,39 +1,14 @@
-"""What a proposed config file may contain: a fail-closed allowlist over the parsed YAML.
+"""What a proposed config file may contain: a fail-closed allowlist over the parsed YAML (spec proposals.md C5).
 
-Line rules (`changes.check_content`) are only a pre-filter; this is the check.
-The whole file is walked, not just the added lines:
-
-- No anchors, aliases or merge keys (found in the YAML event stream).
-- Each file kind has a fixed shape: an automation (`automations/**`), a list
-  of template blocks (`templates/*`), or a package with `alert:` and
-  `template:` only (`alerts/*`). Unknown keys are refused.
-- Every action step is one of the known step types (call, condition,
-  choose, if, repeat, parallel, sequence, delay, wait_template,
-  wait_for_trigger, variables, stop), recursed into; anything else
-  (`event:`, `scene:`, device actions, `use_blueprint`) is refused.
-- Every call names, as a literal string, an action in `ALLOWED_DOMAINS` /
-  `FIXED_ACTIONS` or the admin's notify services. Its targets are literal
-  entity ids only (in `target:`, `entity_id:` or `data.entity_id`): no
-  templates, `all`/`none`, areas, devices, floors or labels; each must
-  exist in the entity registry and belong to the action's domain.
-- `device_id`, `area_id`, `floor_id`, `label_id`, `event`, `scene`,
-  `service_template` and `data_template` are refused anywhere.
-- Alert `notifiers` are only the admin's.
-- `repeat` runs a literal `count` of at most `MAX_REPEAT` or a literal
-  `for_each` list of at most `MAX_REPEAT` items (no `while`/`until` loops);
-  no `webhook` trigger; a `time_pattern` trigger fires at most once a
-  minute (no `seconds`).
-
-The old version of a file is checked too (`does_more`, `alerts_removed`):
-a file that already does more than the allowlist (an action outside it,
-devices, areas, events, scenes, YAML tags) is never changed by a proposal,
-and an existing alert is never removed and keeps its entity, state,
-repeat, skip_first, can_acknowledge and notifiers.
+The whole file is walked, never only the added lines: fixed shapes per file kind, known step types, literal
+allowed actions with literal registered targets, no anchors, tags or loops beyond the limits. The old version of
+a file is checked too: one that already does more than the allowlist is never changed by a proposal.
 """
 
 import difflib
+import itertools
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -134,32 +109,26 @@ def push_data(data: Any) -> str | None:
     return None
 
 
-def _fetch_key(value: Any) -> str | None:
-    """The first mapping key at any depth that names a picture or URL (`entity_picture`, `url`, ...)."""
+def _nodes(value: Any) -> Iterator[Any]:
+    """Every value at any depth: the value, then each mapping's values and each list's items."""
     stack = [value]
     while stack:
         item = stack.pop()
-        if isinstance(item, dict):
-            for key, child in item.items():
-                if isinstance(key, str) and _FETCH_KEY_RE.search(key):
-                    return key
-                stack.append(child)
-        elif isinstance(item, list):
-            stack.extend(item)
-    return None
-
-
-def _has_template(value: Any) -> bool:
-    stack = [value]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, str) and _templated(item):
-            return True
+        yield item
         if isinstance(item, dict):
             stack.extend(item.values())
         elif isinstance(item, list):
             stack.extend(item)
-    return False
+
+
+def _fetch_key(value: Any) -> str | None:
+    """The first mapping key at any depth that names a picture or URL (`entity_picture`, `url`, ...)."""
+    keys = (k for n in _nodes(value) if isinstance(n, dict) for k in n)
+    return next((k for k in keys if isinstance(k, str) and _FETCH_KEY_RE.search(k)), None)
+
+
+def _has_template(value: Any) -> bool:
+    return any(isinstance(n, str) and _templated(n) for n in _nodes(value))
 
 
 class ConfigRefused(ValueError):
@@ -713,11 +682,7 @@ def collect(text: str | None) -> Calls:
         data = yaml.load(text, Loader=_Loader)  # noqa: S506 - a SafeLoader subclass
     except yaml.YAMLError, RecursionError, ValueError:
         return calls
-    stack = [data]
-    seen = 0
-    while stack and seen < MAX_NODES:
-        seen += 1
-        item = stack.pop()
+    for item in itertools.islice(_nodes(data), MAX_NODES):
         if isinstance(item, dict):
             for key in ("action", "service"):
                 if isinstance(item.get(key), str):
@@ -731,9 +696,6 @@ def collect(text: str | None) -> Calls:
             notifiers = item.get("notifiers")
             if isinstance(notifiers, list):
                 calls.actions.update(f"notify.{n}" for n in notifiers if isinstance(n, str))
-            stack.extend(item.values())
-        elif isinstance(item, list):
-            stack.extend(item)
     return calls
 
 

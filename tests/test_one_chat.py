@@ -1,15 +1,16 @@
-"""Conversations live on items: an item's own, a question's, and the earlier one chat kept read only. The agent's own
-notes are items in History, never messages in a conversation; push replies land on the item the push was about."""
+"""Conversations live on items: an item's own or a question's. The agent's own notes are items in History, never
+messages in a conversation; push replies land on the item the push was about."""
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from opsd.events import Event, Priority
-from opsd.store import EARLIER_KEY, StoreError
+from opsd.store import StoreError
 from tests.conftest import FakeHA, conversation
 from tests.test_assistant import CHAT, chat
 from tests.test_daemon import Harness
@@ -118,31 +119,6 @@ async def test_only_conversations_of_stored_items_are_reachable(p: Panel, h: Har
     assert moved is not None and moved.thread_id == question
 
 
-async def test_the_earlier_one_chat_becomes_one_read_only_history_item(p: Panel, h: Harness) -> None:  # noqa: F811
-    store, assistant = p.d.store, p.d.assistant
-    assert store is not None and assistant is not None and p.d.items is not None
-    now = datetime.now(UTC)
-    store.create_thread("a" * 16, principal="admin", channel="panel", now=now - timedelta(days=3))
-    store.append_turn("a" * 16, role="admin", text="hello from 0.21", now=now - timedelta(days=3))
-    store.append_turn("a" * 16, role="agent", text="hi", now=now - timedelta(days=2))
-    assistant.keep_earlier()
-    assistant.keep_earlier()  # written once
-    [earlier] = [i for i in store.items_all() if i["key"] == EARLIER_KEY]
-    assert earlier["state"] == "done" and earlier["title"] == "Earlier conversation" and not earlier["needs"]
-    assert earlier["gist"].startswith("2 messages")
-    status, _, page = await p.request("GET", f"/api/items/{earlier['id']}/thread")
-    assert status == 200 and page["read_only"] and [t["text"] for t in page["turns"]] == ["hello from 0.21", "hi"]
-    status, _, refused = await p.request("POST", f"/api/items/{earlier['id']}/messages",
-                                         body={"text": "more", "client_id": "client-0010"})  # fmt: skip
-    assert status == 409 and refused["error"] == "read_only"
-    status, _, hist = await p.request("GET", "/api/history?filter=questions")
-    assert status == 200 and [i["id"] for i in hist["items"]] == [earlier["id"]]
-    assert hist["items"][0]["kind"] == "question" and hist["items"][0]["conversation"] == "read_only"
-    # Never pruned, and its turns stay.
-    store.prune(now=now + timedelta(days=400))
-    assert store.item(earlier["id"]) is not None and len(store.turns_page("a" * 16)) == 2
-
-
 async def test_push_replies_land_on_the_item_the_push_was_about(h: Harness) -> None:
     d = daemon(h)
     now = datetime.now(UTC)
@@ -166,7 +142,7 @@ async def test_push_replies_land_on_the_item_the_push_was_about(h: Harness) -> N
     assert h.pushes()[-1]["data"]["tag"] == item["id"]
 
 
-def test_health_check_with_a_critical_item_needs_the_admin() -> None:
+def test_the_health_checks_own_line_is_never_a_need() -> None:
     from opsd.baseline import Item
     from opsd.daemon import Daemon
 
@@ -177,15 +153,14 @@ def test_health_check_with_a_critical_item_needs_the_admin() -> None:
             calls.append({"kind": kind, **kwargs})
 
     d = object.__new__(Daemon)
-    d.activity = Recorder()  # type: ignore[assignment]
+    d.services = SimpleNamespace(activity=Recorder())  # type: ignore[assignment]
     warning = Item("k1", "log", "warning", "new warning")
     critical = Item("k2", "assist_exposure", "critical", "lock exposed to Assist")
     d._note_check("daily", "pushed", [warning], "s", None)
     d._note_check("daily", "pushed", [warning, critical], "s", None)
     d._note_check("daily", "quiet", [], "s", None)
-    # The items are in Needs you themselves; the check's own line is never a need.
-    assert [c.get("chat", False) for c in calls] == [False, True, False]
-    assert not any(c.get("needs_admin") for c in calls)
+    # The items are in Needs you themselves; the check's own line is never a need nor a chat message.
+    assert len(calls) == 3 and not any(c.get("needs_admin") or "chat" in c for c in calls)
 
 
 async def test_an_answer_never_replaces_an_urgent_items_push(h: Harness) -> None:
@@ -198,21 +173,3 @@ async def test_an_answer_never_replaces_an_urgent_items_push(h: Harness) -> None
     assert plain.tag == f"ha-ops-agent-{item['id']}" and plain.thread_id == f"item:{item['id']}"
     d.store.put_item(item | {"source": source | {"urgent": False}})
     assert d.assistant.item_message(f"item:{item['id']}", "t", "b").tag == item["id"]
-
-
-async def test_an_investigation_open_at_upgrade_reports_to_its_own_item(h: Harness) -> None:
-    d = daemon(h)
-    now = datetime.now(UTC)
-    d.store.create_thread("b" * 16, principal="admin", channel="panel", now=now)
-    d.store.append_turn("b" * 16, role="admin", text="look into the fridge", now=now)
-    task, _ = d.store.create_task(kind="followup", title="Fridge alerts", owner="admin", created_by="chat:r",
-                                  next_fire_at=now + timedelta(minutes=5),
-                                  payload={"investigation": True, "note": "n", "max_steps": 2, "step": 0},
-                                  idempotency_key="old-inv", now=now, thread_id="b" * 16)  # fmt: skip
-    own = d.store.item_by_key(f"task:{task.id}")
-    assert own is not None
-    d.assistant.keep_earlier()
-    moved = d.store.get_task(task.id)
-    # Its steps and its card go to its own item's conversation, never the read-only earlier chat.
-    assert moved is not None and moved.thread_id == f"item:{own['id']}"
-    assert d.assistant.writable(moved.thread_id) and not d.assistant.writable("b" * 16)

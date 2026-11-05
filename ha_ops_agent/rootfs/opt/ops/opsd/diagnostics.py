@@ -149,7 +149,6 @@ def build(daemon: Daemon, *, now: datetime | None = None) -> dict[str, Any]:
             "last_result": status.get("last_result"),
             "last_run_status": status.get("last_run_status"),
             "core_down_since": status.get("core_down_since"),
-            "core_state": core.get("state"),
             "snapshot_at": snapshot.get("taken_at"),
             "source_errors": [_text(redactor, e) for e in (snapshot.get("errors") or [])][:MAX_ERRORS],
             "open_items": {"total": len(items), "by_severity": severities, "by_kind": kinds},

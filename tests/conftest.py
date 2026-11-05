@@ -157,8 +157,6 @@ class FakeHA:
         selfguard.check_ws(msg_type, fields)
         if msg_type == "lovelace/dashboards/list":
             return [{"url_path": k, "title": k, "mode": self.lovelace_modes.get(k, "storage")} for k in self.lovelace]
-        if msg_type == "lovelace/resources":
-            return []
         if msg_type == "lovelace/config":
             if fields.get("url_path") not in self.lovelace:
                 raise RuntimeError("config_not_found")
@@ -266,3 +264,8 @@ def conversation(assistant: Any) -> str:
     if record is None:
         record = assistant.items.question(TEST_QUESTION, state="done", gist="asked", title="Test question")
     return f"ask:{record['id']}"
+
+
+def system_task(store: Any, key: str) -> Any:
+    """The daemon's task with this `system_key` (system schedules and chat retries), or None."""
+    return next((t for t in store.tasks_created_by("daemon") if t.system_key == key), None)

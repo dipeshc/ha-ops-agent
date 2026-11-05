@@ -108,12 +108,11 @@ class World:
     async def approve(self, change_id: int, action: str = "apply", user: str = ADMIN) -> str:
         row = self.store.change(change_id)
         shown = [f["new_sha256"] for f in row["files"]] if row else []
-        found = await self.manager.request(change_id, action, user, shown)
+        found = await self.manager.approve(change_id, action, user, shown)
         return str(found["id"])
 
     async def run(self, change_id: int, action: str = "apply") -> ch.Outcome:
         approval = await self.approve(change_id, action)
-        assert await self.manager.confirm(approval, ADMIN) == "approved"
         return await self.manager.execute(approval)
 
     def read(self, path: str) -> str:
@@ -221,6 +220,32 @@ def test_drafts_are_read_without_following_links(tmp_path: Path) -> None:
         ch.read_draft(drafts, "alerts/big.yaml", owner=None)
     ch.drop_draft(drafts, "alerts/ok.yaml")
     assert not (drafts / "alerts" / "ok.yaml").exists() and secret.exists()
+
+
+def test_a_failed_live_write_leaves_no_temporary_file_and_the_old_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live = LiveFiles(tmp_path)
+    (tmp_path / "alerts").mkdir()
+    (tmp_path / "alerts" / "a.yaml").write_bytes(b"old\n")
+    (tmp_path / "secret.yaml").write_text("x\n")
+    (tmp_path / "alerts" / "link.yaml").symlink_to(tmp_path / "secret.yaml")
+
+    def broken(fd: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fsync", broken)
+    with pytest.raises(OSError, match="disk full"):
+        live.write("alerts/a.yaml", b"new\n", [])
+    assert sorted(f.name for f in (tmp_path / "alerts").iterdir()) == ["a.yaml", "link.yaml"]
+    assert live.read("alerts/a.yaml") == b"old\n"
+    monkeypatch.undo()
+    # Never read or written through a link.
+    with pytest.raises(OSError):
+        live.read("alerts/link.yaml")
+    with pytest.raises(OSError):
+        live.write("alerts/link.yaml", b"y\n", [])
+    assert (tmp_path / "secret.yaml").read_text() == "x\n"
 
 
 ADMIN_NOTIFY = "mobile_app_admin_phone"
@@ -490,24 +515,23 @@ async def test_a_failing_applied_hook_never_raises_into_the_apply(w: World) -> N
     assert (await w.run(found["id"])).state == "applied"
 
 
-async def test_two_factors_binding_replay_and_expiry(w: World) -> None:
+async def test_one_approval_binding_replay_and_expiry(w: World) -> None:
     found = w.propose({ALERT: NEW_ALERT})
     approval = await w.approve(found["id"])
-    assert w.store.approval(approval)["state"] == "pending"  # type: ignore[index]
-    # The panel request alone does nothing; another user's tap is refused.
-    assert await w.manager.confirm(approval, "u-household") == "refused"
-    assert (await w.manager.execute(approval)).state == "refused" and w.read(ALERT) == FILES[ALERT]
-    assert await w.manager.confirm(approval, ADMIN) == "approved"
-    assert await w.manager.confirm(approval, ADMIN) == "refused"  # replayed tap
+    assert w.store.approval(approval)["state"] == "approved"  # type: ignore[index]
+    assert [r["capability"] for r in w.store.audit_rows(limit=50) if r["channel"] == "approvals"] == [
+        "approval.approved"
+    ]
+    # An update approval path never accepts a change approval.
+    assert not w.approvals.consume_update(approval, 1)
     assert (await w.manager.execute(approval)).state == "applied"
     assert (await w.manager.execute(approval)).state == "refused"  # used once
-    # An update approval path never accepts a change approval.
-    assert w.approvals.confirm(approval, user=ADMIN, current=None) == "refused"
     # Expiry.
     other = w.propose({TEMPLATE: FILES[TEMPLATE].replace("{{ 1 }}", "{{ 2 }}")})
     late = await w.approve(other["id"])
     w.now += APPROVAL_TTL + timedelta(minutes=1)
-    assert await w.manager.confirm(late, ADMIN) == "expired"
+    assert (await w.manager.execute(late)).state == "refused" and w.read(TEMPLATE) == FILES[TEMPLATE]
+    assert w.store.approval(late)["state"] == "expired"  # type: ignore[index]
 
 
 @pytest.mark.parametrize("tamper", ["row_hash", "ref", "approval_hash"])
@@ -525,14 +549,13 @@ async def test_tampering_voids_the_approval(w: World, tamper: str) -> None:
     else:
         with w.store._tx() as conn:
             conn.execute("UPDATE approvals SET plan_hash = ? WHERE id = ?", ("f" * 64, approval))
-    assert await w.manager.confirm(approval, ADMIN) == "void"
-    assert w.read(ALERT) == FILES[ALERT]
+    assert (await w.manager.execute(approval)).state == "refused"
+    assert w.read(ALERT) == FILES[ALERT] and w.store.approval(approval)["state"] == "void"  # type: ignore[index]
 
 
 async def test_a_binding_change_after_the_tap_stops_the_apply(w: World) -> None:
     found = w.propose({ALERT: NEW_ALERT})
     approval = await w.approve(found["id"])
-    assert await w.manager.confirm(approval, ADMIN) == "approved"
     files = [f | {"old_sha256": "0" * 64} for f in found["files"]]
     with w.store._tx() as conn:
         conn.execute("UPDATE approvals SET payload = json_set(payload, '$.files', json(?)) WHERE kind = 'change'"
@@ -545,7 +568,6 @@ async def test_a_binding_change_after_the_tap_stops_the_apply(w: World) -> None:
 async def test_stale_and_dirty_trees_are_refused(w: World) -> None:
     found = w.propose({ALERT: NEW_ALERT})
     approval = await w.approve(found["id"])
-    assert await w.manager.confirm(approval, ADMIN) == "approved"
     (w.repo_path / ALERT).write_text(FILES[ALERT] + "# edited by hand\n")
     git(w.repo_path, "commit", "-q", "-am", "fix: hand edit")
     outcome = await w.manager.execute(approval)
@@ -556,7 +578,6 @@ async def test_stale_and_dirty_trees_are_refused(w: World) -> None:
     second = w.propose({TEMPLATE: FILES[TEMPLATE].replace("{{ 1 }}", "{{ 4 }}")})
     (w.repo_path / "configuration.yaml").write_text("homeassistant:\n  name: Changed\n")
     approval = await w.approve(second["id"])
-    assert await w.manager.confirm(approval, ADMIN) == "approved"
     outcome = await w.manager.execute(approval)
     assert outcome.state == "refused" and "uncommitted changes" in outcome.detail
     assert w.read(TEMPLATE) == FILES[TEMPLATE] and w.store.change(second["id"])["state"] == "open"  # type: ignore[index]
@@ -984,7 +1005,6 @@ def test_trigger_event_data_is_match_data_not_a_call() -> None:
 async def test_a_refused_execution_says_why_on_the_card(w: World) -> None:
     found = w.propose({ALERT: NEW_ALERT})
     approval = await w.approve(found["id"])
-    assert await w.manager.confirm(approval, ADMIN) == "approved"
     (w.repo_path / "configuration.yaml").write_text("homeassistant:\n  name: Busy\n")  # dirty tree
     outcome = await w.manager.execute(approval)
     row = w.store.change(found["id"])
@@ -1173,7 +1193,7 @@ async def test_a_change_not_shown_in_full_cannot_be_approved(w: World) -> None:
                                 diff=cut[: ch.LEGACY_DIFF_CHARS])  # fmt: skip
     assert not ch.diff_complete(row)
     with pytest.raises(Exception, match="cannot be shown in full"):
-        await w.manager.request(int(row["id"]), "apply", ADMIN, [f["new_sha256"] for f in files])
+        await w.manager.approve(int(row["id"]), "apply", ADMIN, [f["new_sha256"] for f in files])
     # Never a question: it cannot be applied, and it expires by itself.
     item = w.store.item_by_key(f"change:{row['id']}")
     assert item is not None and item["state"] == "proposed" and not item["needs"]

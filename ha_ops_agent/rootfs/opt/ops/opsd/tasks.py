@@ -1,26 +1,14 @@
-"""Reminder and follow-up capabilities (`task.create`, `task.list`, `task.cancel`).
+"""Reminder, follow-up and investigation capabilities (`task.*`; spec chat.md).
 
-Tasks are rows in the store, so they survive restarts, and the scheduler
-fires them. Limits, all enforced here rather than trusted from the AI:
-- a due time between one minute and one year ahead;
-- at most `MAX_OPEN_TASKS` open tasks in total (one admin, one agent);
-- a follow-up created by a follow-up run is one generation deeper, and the
-  chain stops at `MAX_GENERATION`, so a run cannot schedule itself forever;
-- creation is idempotent per run (the same request twice in one run creates
-  one task), and every task carries an idempotency key.
-A task records the origin of the run that made it; a follow-up runs with
-that origin, so a chat-created follow-up stays limited to chat powers.
-
-`task.investigate` is a follow-up marked as an investigation: it
-belongs to the chat thread that started it, is due at once, and runs up to
-three steps (`investigate` profile runs) that report into that thread. Each
-step is a normal run under every usage cap; the admin can cancel it from
-the thread. A chat may have one open investigation, the house two.
+Tasks are store rows the scheduler fires. Every limit is enforced here, never trusted from the AI: the due-time
+range, open tasks per owner, the follow-up generation chain and per-run idempotency. An investigation
+(`open_investigation`) is a follow-up of up to three `investigate` steps that report into its thread.
 """
 
 import hashlib
 import re
 from datetime import UTC, datetime, timedelta, tzinfo
+from typing import Any
 
 from opsd.capabilities import Args, CapabilityError
 from opsd.effects import NOTE, PUSH_REASONS
@@ -177,6 +165,44 @@ async def exec_cancel(ctx: ExecContext, args: Args) -> str:
     return f"ok: cancelled #{task_id}"
 
 
+def investigation_refusal(store: Store, thread: str, owner: str) -> str | None:
+    """Why no investigation may open in `thread` now (one per thread, `MAX_OPEN_INVESTIGATIONS` in all, the
+    owner's open-task limit), or None."""
+    open_now = store.open_investigations()
+    if any(t.thread_id == thread for t in open_now):
+        return "this conversation already has an investigation open; wait for it or stop it"
+    if len(open_now) >= MAX_OPEN_INVESTIGATIONS:
+        return f"{MAX_OPEN_INVESTIGATIONS} investigations are already open; try again later"
+    if store.count_open_tasks(owner) >= MAX_OPEN_TASKS[owner]:
+        return "too many open reminders and follow-ups; cancel some first"
+    return None
+
+
+def open_investigation(
+    store: Store,
+    *,
+    title: str,
+    brief: str,
+    steps: int,
+    owner: str,
+    created_by: str,
+    origin: Origin,
+    user_id: str | None,
+    thread_id: str,
+    idempotency_key: str,
+    now: datetime,
+    generation: int = 0,
+    extra: dict[str, Any] | None = None,
+) -> tuple[Task, bool]:
+    """The investigation task (a follow-up due now in `thread_id`), and whether it was created."""
+    payload = {"investigation": True, "note": brief, "max_steps": steps, "step": 0, "findings": [],
+               "origin": str(origin), "user_id": user_id, **(extra or {})}  # fmt: skip
+    return store.create_task(
+        kind="followup", title=title, owner=owner, created_by=created_by, next_fire_at=now, payload=payload,
+        idempotency_key=idempotency_key, now=now, generation=generation, thread_id=thread_id,
+    )  # fmt: skip
+
+
 def validate_investigate(ctx: ExecContext, args: Args) -> Args:
     run = _run(ctx)
     store = _store(ctx)
@@ -186,43 +212,23 @@ def validate_investigate(ctx: ExecContext, args: Args) -> Args:
     brief = (args.opt_text("brief") or "").strip()
     if not title or not brief:
         raise CapabilityError("title and brief are required")
-    open_now = store.open_investigations()
-    if any(t.thread_id == run.thread_id for t in open_now):
-        raise CapabilityError(
-            "this conversation already has an investigation open; wait for it or ask the admin to stop it"
-        )
-    if len(open_now) >= MAX_OPEN_INVESTIGATIONS:
-        raise CapabilityError(f"{MAX_OPEN_INVESTIGATIONS} investigations are already open; try again later")
-    if store.count_open_tasks(owner_of(run)) >= MAX_OPEN_TASKS[owner_of(run)]:
-        raise CapabilityError("too many open tasks; cancel some first")
+    refusal = investigation_refusal(store, run.thread_id, owner_of(run))
+    if refusal is not None:
+        raise CapabilityError(refusal)
     return args.replace(title=title[:MAX_TITLE_CHARS], brief=brief[:MAX_BRIEF_CHARS])
 
 
 async def exec_investigate(ctx: ExecContext, args: Args) -> str:
     run = _run(ctx)
-    store = _store(ctx)
-    now = datetime.now(UTC)
+    if run.thread_id is None:
+        raise CapabilityError("investigations start from a chat with the admin")
     steps = args.number("steps")
-    task, created = store.create_task(
-        kind="followup",
-        title=args.text("title"),
-        owner=owner_of(run),
-        created_by=f"{run.profile}:{run.run_id}",
-        next_fire_at=now,
-        payload={
-            "investigation": True,
-            "note": args.text("brief"),
-            "max_steps": steps,
-            "step": 0,
-            "findings": [],
-            "origin": str(run.principal.origin),
-            "user_id": run.principal.user_id,
-        },
-        idempotency_key=f"{run.run_id}:investigate",
-        now=now,
+    task, created = open_investigation(
+        _store(ctx), title=args.text("title"), brief=args.text("brief"), steps=steps, owner=owner_of(run),
+        created_by=f"{run.profile}:{run.run_id}", origin=run.principal.origin, user_id=run.principal.user_id,
+        thread_id=run.thread_id, idempotency_key=f"{run.run_id}:investigate", now=datetime.now(UTC),
         generation=run.generation,
-        thread_id=run.thread_id,
-    )
+    )  # fmt: skip
     if not created:
         return f"ok: investigation #{task.id} was already started in this run"
     return (

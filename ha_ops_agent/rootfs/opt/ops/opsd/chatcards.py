@@ -1,16 +1,8 @@
-"""Inline chat cards: why a message got no answer, and when it is retried.
+"""Inline chat cards: why a message got no answer, and when it is retried (spec chat.md T5).
 
-A refused or failed chat turn gets one `system` turn (a card) in its thread
-instead of silence. The text is fixed per reason and filled only with times
-and numbers computed by the daemon; nothing in a card comes from the model.
-
-Automatic retry (on by default): after a usage limit, a run or
-run-time cap, the account yielding, or a slot timeout, the admin's message is
-retried at the earliest time the block can lift (or on a backoff of 15 min
-doubling to 8 h), unless the admin turns it off on the card. A retry is a
-normal run: every cap, the kill switch and the run-time budget are checked
-again. After `len(RETRY_BACKOFF)` attempts, or when relief is further than
-`RETRY_HORIZON` from the first refusal, it gives up and says so.
+A refused or failed turn gets one `system` card with fixed text per reason, filled only with daemon-computed times
+and numbers. Blocks that lift by themselves are retried automatically on a capped backoff (`plan_retry`), unless the
+admin turns that off on the card.
 """
 
 import re
@@ -37,7 +29,6 @@ _TEXT: dict[str, str] = {
     "usage_limited": "The AI provider reported a usage limit, so the agent is backing off.",
     "account_busy": "Your AI subscription is near its limit from other use, so the agent yields.",
     "skipped_busy": "The agent was busy with another run for too long.",
-    "chat_cap": "Today's chat limit ({limit} messages) is reached.",
     "busy": "Not sent: the agent's queue is full.",
     "interrupted": "The agent restarted before answering this. Your message is saved.",
 }
@@ -64,6 +55,19 @@ def _when(at: datetime, now: datetime, tz: tzinfo) -> str:
     return local.strftime("%H:%M") if local.date() == now.astimezone(tz).date() else local.strftime("%a %H:%M")
 
 
+def check_wait(reason: str, detail: str, *, retry_at: datetime, now: datetime, tz: tzinfo) -> str:
+    """The maintenance scan's own check could not run: why, in daemon words, and that it retries by itself. Never
+    chat wording (the admin asked for nothing and has nothing to retry)."""
+    nxt = f"(next try {_when(retry_at, now, tz)})"
+    if reason == "ai_disabled":
+        return f"AI is off, so the agent's check waits {nxt}"
+    if reason in ("run_cap_reached", "share_cap", "share_reserve", "cost_cap", "account_busy"):
+        return f"the agent's check waits for its daily allowance {nxt}"
+    if reason == "usage_limited":
+        return f"the agent's check waits for the AI provider's usage limit to lift {nxt}"
+    return f"the agent's check failed and will run again by itself {nxt}"
+
+
 def plan_retry(
     reason: str, *, attempt: int, first_at: datetime, now: datetime, hint: datetime | None
 ) -> datetime | None:
@@ -88,14 +92,13 @@ def refusal_card(
     retry_at: datetime | None = None,
     attempt: int = 0,
     auto_off: bool = False,
-    limit: int = 0,
 ) -> Card:
     template = _TEXT.get(reason)
     if template is None:
         return error_card(reason, now=now)
     kept = OWNER_RESERVED_RUNS.get(detail, 0)
     text = template.format(window=_WINDOWS.get(detail, "subscription"), detail=detail.replace("_", " ") or reason,
-                           limit=limit, runs=PROFILE_WORDS.get(detail, "this kind of run"),
+                           runs=PROFILE_WORDS.get(detail, "this kind of run"),
                            cap=RUNS_PER_DAY.get(detail, DEFAULT_PROFILE_RUNS),
                            kept=f", the last {kept} kept for your Plan a fix taps" if kept else "")  # fmt: skip
     actions: list[str] = []

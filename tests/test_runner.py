@@ -4,7 +4,7 @@ import dataclasses
 import os
 import stat
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +54,7 @@ class Setup:
             self.calls.append(cfg)
             self.tokens.append(kw["token"])
             kw["on_start"](77)
-            run = self.rpc.active_run
+            run = self.rpc._active
             self.bound.append((run.profile, run.root_pid) if run else None)
             return RunResult(status="ok", cost_usd=0.1)
 
@@ -80,7 +80,7 @@ def s(paths: Paths) -> Iterator[Setup]:
 
 async def test_run_binds_the_socket_and_writes_a_readable_prompt(s: Setup, paths: Paths) -> None:
     assert (await s.go()).status == "ok"
-    assert s.bound == [("triage", 77)] and s.rpc.active_run is None
+    assert s.bound == [("triage", 77)] and s.rpc._active is None
     cfg = s.calls[0]
     assert cfg.system_prompt_file == paths.run_prompt_file and cfg.run_as is None
     assert stat.S_IMODE(cfg.system_prompt_file.stat().st_mode) == 0o644
@@ -120,20 +120,17 @@ async def test_preflight_refusals_never_start_claude(s: Setup, change: str, stat
 
         s.runner.build_export = broken
     assert (await s.go()).status == status
-    assert s.calls == [] and s.rpc.active_run is None
+    assert s.calls == [] and s.rpc._active is None
 
 
-async def test_an_api_key_run_gets_the_key_and_skips_the_user_reserve(
-    s: Setup, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    original = s.store.usage
-
-    def busy(period: Any, *, at: datetime) -> dict[str, Any]:
-        figures = original(period, at=at)
-        figures["window"]["seconds"] = 5000.0  # far past the user-class reserve of a subscription
-        return figures
-
-    monkeypatch.setattr(s.store, "usage", busy)
+async def test_an_api_key_run_gets_the_key_and_skips_the_user_reserve(s: Setup) -> None:
+    at = NOW - timedelta(minutes=10)
+    seeded = s.store.reserve_run(run_id="seed", profile="triage", budget_class="agent", period=Period.at(at, UTC),
+                                 at=at, max_turns=1, budget_usd=0.1, caps=Caps())  # fmt: skip
+    assert not isinstance(seeded, str)
+    # Past the user-class reserve of a subscription's 5-hour window, still inside the monitoring share.
+    s.store.finish_run("seed", status="ok", at=at, turns=1, tokens_in=1, tokens_out=1, tokens_cache_read=0,
+                       duration_s=Caps().stop("five_hour", user=True), model="m")  # fmt: skip
     chat = PROFILES["chat"]
     assert (await s.go(chat)).status == "share_reserve" and s.calls == []
     s.token = "sk-ant-api03-TEST-ONLY-NOT-REAL"
@@ -142,7 +139,6 @@ async def test_an_api_key_run_gets_the_key_and_skips_the_user_reserve(
     assert s.calls[-1].credential is CredentialKind.API_KEY and s.tokens[-1] == s.token
     s.token = "oat-token"
     s.runner._slot = type(s.runner._slot)()
-    monkeypatch.setattr(s.store, "usage", original)
     assert (await s.go()).status == "ok" and s.calls[-1].credential is CredentialKind.SETUP_TOKEN
 
 
@@ -170,7 +166,7 @@ async def test_failed_run_charges_its_reservation_and_one_slot(s: Setup) -> None
 def test_compose_prompt_has_base_profile_and_table(paths: Paths) -> None:
     text = compose_system_prompt(paths.prompts_dir, TRIAGE, SAMPLE_PROFILE)
     assert text.index("# Ops Agent") < text.index("## Mode: triage") < text.index("## Capabilities")
-    assert "docs/facts.md" in text and "`opsctl ack" in text and "`opsctl git-show <spec>`" in text
+    assert "docs/facts.md" in text and "`opsctl notify" in text and "`opsctl git-show <spec>`" in text
     assert "<<" not in text and text.index("## House notes") < text.index("## Capabilities")
     assert "<house_notes>" in text and "custom_components/acme_solar" in text and "local-patches.yaml" not in text
 
@@ -226,4 +222,4 @@ async def test_missing_prompt_files_refuse_cleanly(s: Setup, paths: Paths, tmp_p
     import dataclasses
 
     s.runner.paths = dataclasses.replace(paths, opt=tmp_path / "no-opt")
-    assert (await s.go()).status == "setup_failed" and s.calls == [] and s.rpc.active_run is None
+    assert (await s.go()).status == "setup_failed" and s.calls == [] and s.rpc._active is None

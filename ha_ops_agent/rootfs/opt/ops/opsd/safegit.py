@@ -1,38 +1,9 @@
-"""Git invocations that cannot be steered into running programs.
+"""Git invocations that cannot be steered into running programs (spec proposals.md C2).
 
-Repository config and attributes can name executables (fsmonitor, hooks,
-pagers, editors, external diff, diff drivers, textconv, clean/smudge/process
-filters, signing programs, credential helpers, askpass, proxies, remote
-transports) or redirect where git reads and writes (includes, URL rewrites,
-another work tree). Every git call the agent makes goes through
-`git_argv`/`git_env`:
-
-- system and global config are ignored, attributes come from the empty tree
-  instead of the work tree, and `-c` overrides (which win over repository
-  config) neutralise every program-naming key above, including every filter
-  and diff driver the repository config defines, whatever its name;
-- the only transport is SSH (`GIT_ALLOW_PROTOCOL`, which overrides every
-  `protocol.*` key), askpass and the editor are disabled in the environment;
-- before each call the repository's own config is listed (`--no-includes`,
-  which runs nothing) and the call is refused when it holds a key a `-c`
-  override cannot neutralise: `include.*`, `includeIf.*`, `url.*`,
-  `core.gitProxy`, `core.worktree`, `core.alternateRefsCommand`, any
-  remote other than `origin`, a remote's `uploadpack`/`receivepack`/`vcs`,
-  or a driver name that cannot be written as a `-c` key.
-
-That listing and the call are two processes, so a driver added to the
-repository config between them would escape the overrides. The agent
-therefore never runs a git command that converts work-tree content, the
-only place a filter driver runs: nothing is staged with `add` or committed
-with `commit`, the live index is never refreshed or edited entry by entry
-(`update-index` re-checks racily clean entries by content), and nothing is
-compared with `status` or a work-tree `diff`. A commit is built from
-`main`'s tree and the approved bytes (`hash-object --stdin --no-filters`,
-`mktree`, `commit-tree`, `update-ref`), and `read-tree` levels the index;
-the work tree is compared with the index by hashing each file with
-`hash-object --no-filters` and comparing the executable bit
-(`status_lines`). Every other command the agent
-runs reads only the object store, the index or the refs.
+Every git call goes through `run`: system and global config ignored, attributes from the empty tree, `-c`
+overrides neutralising every program-naming key, SSH only, and a repository config holding a key no override can
+neutralise refused. A driver added between the config listing and the call would escape the overrides, so the
+agent never runs a command that converts work-tree content (`status_lines` compares without filters).
 """
 
 import os
@@ -193,9 +164,16 @@ def git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def _run(repo: Path, *args: str, data: bytes | None = None, timeout: float = 60) -> bytes:
-    done = subprocess.run(git_argv(repo, *args), input=data, capture_output=True, timeout=timeout, env=git_env(),
+def run(repo: Path, *args: str, data: bytes | None = None, timeout: float = 60,
+        env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:  # fmt: skip
+    """Every git call the agent makes: the hardened argv and environment (`env` adds to it); any exit code."""
+    return subprocess.run(git_argv(repo, *args), input=data, capture_output=True, timeout=timeout, env=git_env(env),
                           check=False)  # fmt: skip
+
+
+def output(repo: Path, *args: str, data: bytes | None = None, timeout: float = 60) -> bytes:
+    """A git call's stdout; `CalledProcessError` on a non-zero exit."""
+    done = run(repo, *args, data=data, timeout=timeout)
     if done.returncode != 0:
         raise subprocess.CalledProcessError(done.returncode, ["git", args[0]], done.stdout, done.stderr)
     return done.stdout
@@ -203,9 +181,7 @@ def _run(repo: Path, *args: str, data: bytes | None = None, timeout: float = 60)
 
 def _trusts_filemode(repo: Path) -> bool:
     """Whether git compares the executable bit here (`core.fileMode`, true unless the repository says false)."""
-    done = subprocess.run(git_argv(repo, "config", "--type=bool", "--get", "core.filemode"), capture_output=True,
-                          timeout=30, env=git_env(), check=False)  # fmt: skip
-    return done.stdout.strip() != b"false"
+    return run(repo, "config", "--type=bool", "--get", "core.filemode", timeout=30).stdout.strip() != b"false"
 
 
 def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
@@ -217,16 +193,15 @@ def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
     `git status`, nothing is refreshed and no clean filter runs, whatever the repository config says.
     """
     lines: dict[str, list[str]] = {}
-    head = subprocess.run(git_argv(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"), capture_output=True,
-                          timeout=60, env=git_env(), check=False)  # fmt: skip
+    head = run(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
     staged: dict[str, str] = {}
     if head.returncode == 0:
-        fields = _run(repo, "diff-index", "--cached", "--no-renames", "--name-status", "-z", "HEAD").split(b"\0")
+        fields = output(repo, "diff-index", "--cached", "--no-renames", "--name-status", "-z", "HEAD").split(b"\0")
         for code, name in zip(fields[0::2], fields[1::2], strict=False):
             if code and name:
                 staged[name.decode(errors="surrogateescape")] = code.decode()[:1]
     index: dict[str, tuple[str, str]] = {}
-    for record in _run(repo, "ls-files", "--stage", "-z").split(b"\0"):
+    for record in output(repo, "ls-files", "--stage", "-z").split(b"\0"):
         if not record:
             continue
         meta, _, name = record.partition(b"\t")
@@ -251,7 +226,7 @@ def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
             continue
         if stat.S_ISLNK(info.st_mode):
             target = os.readlink(repo / path).encode(errors="surrogateescape")
-            found = _run(repo, "hash-object", "--no-filters", "--stdin", data=target).decode().strip()
+            found = output(repo, "hash-object", "--no-filters", "--stdin", data=target).decode().strip()
             if mode != "120000" or found != sha:
                 worktree[path] = "M"
         elif stat.S_ISREG(info.st_mode) and mode in ("100644", "100755") and "\n" not in path:
@@ -263,7 +238,7 @@ def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
             worktree[path] = "M"
     if regular:
         names = "".join(f"{p}\n" for p in regular).encode(errors="surrogateescape")
-        hashes = _run(repo, "hash-object", "--no-filters", "--stdin-paths", data=names).decode().split()
+        hashes = output(repo, "hash-object", "--no-filters", "--stdin-paths", data=names).decode().split()
         if len(hashes) != len(regular):
             raise subprocess.SubprocessError("git hash-object: unexpected output")
         for path, found in zip(regular, hashes, strict=True):
@@ -273,6 +248,6 @@ def status_lines(repo: Path, *, untracked: bool = True) -> list[str]:
         lines.setdefault(path, []).append(f"{staged.get(path, ' ')}{worktree.get(path, ' ')} {path}")
     out = [line for path in sorted(lines) for line in lines[path]]
     if untracked:
-        others = _run(repo, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0")
+        others = output(repo, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0")
         out += [f"?? {n.decode(errors='surrogateescape')}" for n in others if n]
     return out

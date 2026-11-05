@@ -14,7 +14,6 @@ from opsd import rpc
 from opsd.capabilities import BY_VERB, build_parser
 
 DEFAULT_SOCKET = "/run/ops-sock/opsd.sock"
-MAX_OUTPUT_CHARS = rpc.MAX_OUTPUT_CHARS
 
 
 def main(argv: list[str] | None = None) -> int:

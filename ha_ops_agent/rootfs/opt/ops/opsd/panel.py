@@ -1,31 +1,8 @@
-"""The admin-only ingress panel: app shell, JSON API and live updates.
+"""The admin-only ingress panel: app shell, JSON API and live updates (spec panel.md N1-N9, N20).
 
-A small hand-rolled HTTP/1.1 server (one request per connection) behind the
-Supervisor's ingress proxy. `/healthz` is the only unauthenticated route and
-returns no data. Everything else, GETs and the live stream included:
-
-- must come from the Supervisor's ingress address, and
-- must carry the ingress user header naming the admin (constant-time
-  compare; refused while the admin is unknown). A live stream re-checks it
-  at every ping.
-
-State-changing requests are POSTs with `Content-Type: application/json`
-(a cross-site form cannot send that without a CORS preflight, and no CORS
-headers are ever sent), the per-process token in `X-Ops-CSRF` (the page
-gets it in a `<meta>`; a cross-site page cannot read it), and, when the
-browser sends it, `Sec-Fetch-Site: same-origin`. Bodies are capped at 16
-KiB and refused with 413 before they are read; chunked bodies are refused.
-Headers are capped in count and size. Live connections (SSE streams and
-waiting long-polls) are capped by the hub, all connections here.
-
-Connections from any address other than the Supervisor's (ingress proxy
-and watchdog) are closed unread; the whole request must arrive within 10 s;
-the last connection slots are kept for `/healthz`.
-
-Responses never echo model text into HTML: the shell is a static file with
-only a relative base path (from the route, never a header), the token and a
-CSP nonce substituted, and all data goes out as JSON for the page to render as text.
-Panel messages keep the `admin-chat` origin.
+A hand-rolled HTTP/1.1 server behind the Supervisor's ingress proxy: only the Supervisor's address, only the admin's
+ingress user header (constant-time), JSON-only POSTs with the per-process CSRF token, capped bodies, headers and
+connections, a static shell with a CSP nonce, and data only ever as JSON. `/healthz` is the one open route.
 """
 
 import asyncio
@@ -75,9 +52,8 @@ MAX_CHAT_CHARS = 2000
 
 # An item id, the only handle a client gives for a conversation (`?item=`, presence); the thread is the daemon's.
 ITEM_RE = re.compile(r"[a-z]-[0-9a-z]{1,40}")
-# The shell is served at the panel root and at deep links: an item (`t/<item id>`, from its push), and the old chat
-# link (`t/<16 hex>`) of pushes sent before 0.22.0, which opens Home.
-_SHELL_RE = re.compile(r"/(?:t/([0-9a-f]{16}|[a-z]-[0-9a-z]{1,40})/?|updates/?)?")
+# The shell is served at the panel root and at an item's deep link (`t/<item id>`, from its push).
+_SHELL_RE = re.compile(r"/(?:t/[a-z]-[0-9a-z]{1,40}/?)?")
 _PART_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _SCRIPT_RE = re.compile(r"[a-z]{1,32}\.js")
 # ASCII digits only: `str.isdigit()` also accepts characters `int()` refuses.

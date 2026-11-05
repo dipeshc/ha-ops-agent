@@ -38,7 +38,7 @@ from opsd.updates import (
 )
 from opsd.updexec import ExecutorRefused, Executors, verify_backup
 from opsd.updiff import HealthPoint, compare
-from tests.conftest import GENERIC, make_options
+from tests.conftest import GENERIC, make_options, system_task
 from tests.conftest import WATCHED as WATCHED_ENTITIES
 from tests.test_changes import w  # noqa: F401
 from tests.test_panel import Panel, h, local_ingress, p  # noqa: F401
@@ -298,7 +298,7 @@ class FakeOps:
         broken = any(self._version(e) == v for e, v in self.bad)
         down = {x: "zha" for (e, v), ids in self.unavailable_when.items() if self._version(e) == v for x in ids}
         return HealthPoint(
-            at="t", core_state="running", core_version=self._version(CORE), api_up=True, unavailable=down,
+            at="t", api_up=True, unavailable=down,
             custom={"acme_solar": {"entities": 3, "unavailable": 0, "entries_failed": 0}},
             watched={WATCHED_ENTITIES[0]: "unavailable" if broken else "locked", WATCHED_ENTITIES[1]: "locked",
                      WATCHED_ENTITIES[2]: "disarmed"},
@@ -396,10 +396,6 @@ class Rig:
                                             state="open", requested_by=requested_by(item["entity_id"], item["latest"]),
                                             now=self.now, expires_at=self.now + timedelta(days=7))  # fmt: skip
 
-        async def send(message: Message) -> str:
-            self.sent.append(message)
-            return "sent"
-
         async def review(prompt: str) -> RunResult:
             self.reviews.append(prompt)
             return self.review_result
@@ -416,12 +412,11 @@ class Rig:
                 store=self.store,
                 options=self.options,
                 clock=lambda: self.now,
-                approval_proof=self.approvals.proves,
+                approval_proof=self.approvals.proves_update,
             ),
             options=self.options,
             snapshot=snapshot,
             custom_domains=lambda: ["acme_solar"],
-            send=send,
             review=review,
             redactor=lambda: Redactor([]),
             tz=lambda: UTC,
@@ -1031,7 +1026,7 @@ async def test_an_unknown_outcome_is_verified_not_retried(rig: Rig) -> None:
 def test_internal_capabilities_are_never_on_the_socket() -> None:
     names = set(internal())
     assert names == {"backup.create", "update.install", "update.rollback", "change.apply", "change.revert",
-                     "dashboard.save", "fork.apply"}  # fmt: skip
+                     "fork.apply"}  # fmt: skip
     verbs = {CAPABILITIES[n].verb for n in names}
     assert not verbs & cli_verbs()
     for verb in verbs:
@@ -1049,7 +1044,7 @@ def test_internal_capabilities_are_never_on_the_socket() -> None:
 
 
 def point(**kw: Any) -> HealthPoint:
-    base: dict[str, Any] = {"at": "t", "core_state": "running", "api_up": True,
+    base: dict[str, Any] = {"at": "t", "api_up": True,
                             "custom": {"acme_solar": {"entities": 3, "unavailable": 0, "entries_failed": 0}},
                             "watched": dict.fromkeys(WATCHED_ENTITIES, "locked")}  # fmt: skip
     return HealthPoint(**(base | kw))
@@ -1059,7 +1054,7 @@ def test_compare_regressions_and_notes() -> None:
     before = point(repairs={"x:old": "warning|t"})
     assert compare(before, point()).healthy
     cases = {
-        "Core is not running": point(core_state="stopped"),
+        "Core is not running": point(api_up=False),
         "acme_solar: 2 more": point(custom={"acme_solar": {"entities": 3, "unavailable": 2, "entries_failed": 0}}),
         "acme_solar: config entry failed": point(
             custom={"acme_solar": {"entities": 3, "unavailable": 0, "entries_failed": 1}}
@@ -1118,7 +1113,7 @@ async def test_pausing_and_resuming_updates_from_the_panel(h: Any, local_ingress
 async def test_daemon_schedules_the_window_and_health_waits_for_updates(h: Any) -> None:  # noqa: F811
     d = h.daemon()
     d.setup_schedule(600)
-    task = d.store.system_task("update.window")
+    task = system_task(d.store, "update.window")
     assert task is not None and task.schedule == {"daily_at": "04:00"}
     assert d.status_view()["updates"]["effective"] is False
     async with d.updates._lock:
@@ -1215,7 +1210,7 @@ async def test_probe_reads_what_the_rule_needs(fake_ha: Any) -> None:
     fake_ha.states.append({"entity_id": WATCHED_ENTITIES[0], "state": "locked", "attributes": {}})
     assert (await probe(fake_ha, ["acme_solar"])).watched == {}  # no house profile: nothing watched
     point_now = await probe(fake_ha, ["acme_solar"], watched=WATCHED_ENTITIES)
-    assert point_now.core_state == "running" and point_now.api_up and not point_now.errors
+    assert point_now.api_up and not point_now.errors
     assert point_now.custom["acme_solar"]["entities"] == 3
     assert point_now.watched == {
         WATCHED_ENTITIES[0]: "locked",
@@ -1468,22 +1463,17 @@ async def test_backup_manager_view_drops_everything_but_the_schedule() -> None:
     assert secret not in json.dumps(await ops.core_backups())
 
 
-async def test_core_state_comes_from_the_api_not_core_info(fake_ha: Any) -> None:
-    """The Supervisor may omit `state` from /core/info; a missing state must not read as Core down."""
+async def test_core_is_running_when_its_api_answers(fake_ha: Any) -> None:
+    """Core's state comes from its API answering, never from the Supervisor's /core/info."""
     from opsd.updiff import probe
 
-    real = fake_ha.supervisor
-
-    async def no_state(path: str) -> Any:
-        found = await real(path)
-        return {k: v for k, v in found.items() if k != "state"} if path == "/core/info" else found
-
-    fake_ha.supervisor = no_state
     up = await probe(fake_ha, [])
-    assert up.core_state == "running" and compare(up, up).healthy
+    assert up.api_up and compare(up, up).healthy
     fake_ha.core_state = "stopped"  # the fake's API then refuses /states
     down = await probe(fake_ha, [])
-    assert down.core_state == "not responding" and not compare(up, down).healthy
+    assert not down.api_up and not compare(up, down).healthy
+    # A point stored by an earlier version (with `core_state`) still loads.
+    assert HealthPoint.from_json(up.to_json() | {"core_state": "running", "core_version": "2026.10.3"}) == up
 
 
 def test_an_automatic_backup_record_passes_verification() -> None:
@@ -1575,7 +1565,7 @@ async def test_a_core_addon_minor_soaks_then_installs_after_its_review() -> None
         # Day 14: no repair or held version touches it, and the release-note review lets it through.
         rig.now += timedelta(days=11)
         rig.ages = {BROKER: 14.0}
-        rig.review_result = RunResult(status="ok", structured={"summary": "s", "assessments": [
+        rig.review_result = RunResult(status="ok", structured={"assessments": [
             {"entity_id": BROKER, "risk": "low", "hold": False, "reason": "bug fixes"}]})  # fmt: skip
         assert (await rig.manager.run_window())["result"] == "executed"
         assert "4.2.0 -> 4.3.0" in rig.reviews[-1]
@@ -1734,7 +1724,7 @@ async def test_a_held_core_update_waits_for_its_one_tap_config_change_then_insta
         rig.evidence.changes = [Change("breaking", "Template: legacy", "template", "Legacy syntax removed.", (), "src")]
         fix = {"why": "The notes remove the legacy template syntax.",
                "edits": [{"path": "templates/status.yaml", "old": "{{ 1 }}", "new": "{{ 2 }}"}]}  # fmt: skip
-        rig.review_result = RunResult(status="ok", structured={"summary": "s", "assessments": [
+        rig.review_result = RunResult(status="ok", structured={"assessments": [
             {"entity_id": CORE, "risk": "medium", "hold": True, "reason": "template change", "fix": fix},
             {"entity_id": WEATHER, "risk": "low", "hold": False, "reason": "fine"}]})  # fmt: skip
         await rig.manager.run_window()
@@ -1758,7 +1748,7 @@ async def test_a_held_core_update_waits_for_its_one_tap_config_change_then_insta
         # The admin applied it (one tap on its item): the next window installs the update.
         assert rig.store.move_change(change, expect=("open",), to="applied", now=rig.now)
         rig.now += timedelta(days=1)
-        rig.review_result = RunResult(status="ok", structured={"summary": "s", "assessments": [
+        rig.review_result = RunResult(status="ok", structured={"assessments": [
             {"entity_id": CORE, "risk": "low", "hold": False, "reason": "fixed"}]})  # fmt: skip
         assert (await rig.manager.run_window())["result"] == "executed"
         assert rig.ops.installs()[0] == ("update_core", "2026.10.4") and rig.jobs()[CORE].state == "succeeded"
@@ -1775,10 +1765,10 @@ async def test_a_config_change_is_written_only_by_its_own_run_over_home_assistan
     fix = {"why": "w", "edits": [{"path": "templates/status.yaml", "old": "{{ 1 }}", "new": "{{ 2 }}"}]}
     answers = [
         # The general run answers a fix for Core too: it was not asked, so it is ignored.
-        RunResult(status="ok", structured={"summary": "s", "assessments": [
+        RunResult(status="ok", structured={"assessments": [
             {"entity_id": WEATHER, "risk": "low", "hold": False, "reason": "fine"},
             {"entity_id": CORE, "risk": "low", "hold": False, "reason": "x", "fix": fix}]}),
-        RunResult(status="ok", structured={"summary": "s", "assessments": [
+        RunResult(status="ok", structured={"assessments": [
             {"entity_id": CORE, "risk": "medium", "hold": True, "reason": "template change"}]}),
     ]  # fmt: skip
 
@@ -1963,8 +1953,10 @@ def notes_review(rig: Rig, verdict: str) -> None:
                  if e in prompt]  # fmt: skip
         if "<needs_change" in prompt:
             found = [{"entity_id": CORE, "risk": "low", "hold": False, "verdict": verdict,
-                      "reason": "nothing here uses the legacy template syntax"}]  # fmt: skip
-        return RunResult(status="ok", structured={"summary": "s", "assessments": found})
+                      "reason": "nothing here uses the legacy template syntax",
+                      "owner_action": "Decide whether to keep the legacy templates" if verdict == "needs_owner"
+                      else None}]  # fmt: skip
+        return RunResult(status="ok", structured={"assessments": found})
 
     rig.manager._review = review
 
@@ -2011,6 +2003,8 @@ async def test_a_checked_hold_stays_released_and_needs_owner_keeps_it(tmp_path: 
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
     assert not any("<needs_change" in r for r in rig.reviews[reviews:])
+    kept = verdicts.load(rig.store, "core:2026.10")
+    assert kept is not None and kept.owner_action == "Decide whether to keep the legacy templates"
     # A remembered "not affected" for these notes releases the hold in every later plan (here "Plan now"),
     # without a review.
     fingerprint = verdicts.notes_fingerprint([("breaking", "template", "Template: legacy")])

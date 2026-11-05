@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from opsd import ws
-from opsd.channels import Action, ActionKind, BudgetClass, CompanionPush, Message, push_kind
+from opsd.channels import Action, ActionKind, BudgetClass, Message
 from opsd.events import Dispatcher, Event, EventQueue, Priority
 from opsd.inbound import (
     EVENT_TYPE,
@@ -22,8 +22,8 @@ from opsd.inbound import (
 )
 from opsd.notify import Notifier
 from opsd.policy import Origin
-from opsd.rpc import RejectionLimiter
 from opsd.store import Store
+from opsd.ws import RejectionLimiter
 
 NOW = datetime(2026, 1, 26, 12, 0, tzinfo=UTC)
 ADMIN = AdminIdentity(user_id="u-admin", device_id="dev-1")
@@ -166,38 +166,37 @@ async def test_gate_audits_refusals_with_a_limit_and_queues_verified(store: Stor
 # ----------------------------------------------------------------- channels
 
 
-def test_companion_push_issues_actions(store: Store, tmp_path: Path) -> None:
+def test_the_notifier_issues_actions(store: Store, tmp_path: Path) -> None:
     calls: list[dict[str, Any]] = []
-    notifier = Notifier(state_file=tmp_path / "n.json", push_cache_file=tmp_path / "p.json",
-                        notify_service="mobile_app_admin_phone", max_per_day=3,
-                        call_service=lambda d, s, data: calls.append(data))  # fmt: skip
     ids = iter(["OPS_REPLY_" + "11" * 16, "OPS_DONE_" + "22" * 16])
-    channel = CompanionPush(notifier, store, new_id=lambda kind: next(ids))
+
+    def notifier(with_store: Store | None) -> Notifier:
+        return Notifier(state_file=tmp_path / "n.json", push_cache_file=tmp_path / "p.json",
+                        notify_service="mobile_app_admin_phone", max_per_day=3, store=with_store,
+                        call_service=lambda d, s, data: calls.append(data), new_id=lambda kind: next(ids))  # fmt: skip
+
     message = Message("Ask", "body", tag="ha-ops-thread-9", thread_id="t9", budget_class=BudgetClass.USER,
                       actions=(Action(ActionKind.REPLY, "Reply", text_input=True),
-                               Action(ActionKind.DONE, "Done", authentication_required=True)))  # fmt: skip
-    assert channel.send(message, core_up=True, now=NOW) == "sent"
+                               Action(ActionKind.DONE, "Done")))  # fmt: skip
+    assert notifier(store).send(message, core_up=True, now=NOW) == "sent"
     actions = calls[0]["data"]["actions"]
     assert actions[0] == {"action": "OPS_REPLY_" + "11" * 16, "title": "Reply", "behavior": "textInput"}
-    assert actions[1]["authenticationRequired"] is True
+    assert actions[1] == {"action": "OPS_DONE_" + "22" * 16, "title": "Done"}
     event = verify_action(tap(action="OPS_DONE_" + "22" * 16), ADMIN, store, NOW)
     assert isinstance(event, Event) and event.type == "user.action" and event.payload["thread_id"] == "t9"
-    no_store = CompanionPush(notifier, None)
-    assert no_store.send(message, core_up=True, now=NOW) == "sent" and "actions" not in calls[-1]["data"]
+    # Without the store a tap could never be verified: no buttons.
+    assert notifier(None).send(message, core_up=True, now=NOW) == "sent" and "actions" not in calls[-1]["data"]
 
 
-def test_budget_classes_map_to_buckets(tmp_path: Path) -> None:
-    assert push_kind(Message("t", "b", budget_class=BudgetClass.SAFETY)) == "safety"
-    # An urgent agent push is time-sensitive but counts in the normal bucket, never the safety reserve.
-    assert push_kind(Message("t", "b", urgent=True)) == "normal"
-    assert push_kind(Message("t", "b")) == "normal"
-    assert push_kind(Message("t", "b", urgent=True, budget_class=BudgetClass.USER)) == "user"
+def test_budget_classes_are_the_buckets(tmp_path: Path) -> None:
     notifier = Notifier(state_file=tmp_path / "n.json", push_cache_file=tmp_path / "p.json",
                         notify_service="mobile_app_x", max_per_day=0, call_service=lambda *a: None)  # fmt: skip
-    channel = CompanionPush(notifier, None)
-    # User replies have their own bucket: an exhausted agent budget does not block them.
-    assert channel.send(Message("t", "b"), core_up=True, now=NOW) == "rate_limited"
-    assert channel.send(Message("t", "b", budget_class=BudgetClass.USER), core_up=True, now=NOW) == "sent"
+    # An urgent agent push is time-sensitive but counts in the agent bucket, never the safety reserve.
+    assert notifier.send(Message("t", "b", urgent=True), core_up=True, now=NOW) == "rate_limited"
+    assert notifier.send(Message("t", "b"), core_up=True, now=NOW) == "rate_limited"
+    # User replies and safety pushes have their own buckets: an exhausted agent budget does not block them.
+    assert notifier.send(Message("t", "b", budget_class=BudgetClass.USER), core_up=True, now=NOW) == "sent"
+    assert notifier.send(Message("t", "b", budget_class=BudgetClass.SAFETY), core_up=True, now=NOW) == "sent"
 
 
 # ------------------------------------------------------------- event queue
@@ -207,11 +206,11 @@ async def test_queue_priority_dedupe_and_bound() -> None:
     queue = EventQueue(maxsize=3)
     assert queue.put(Event("triage", "s", Priority.TRIAGE, dedupe_key="a"))
     assert not queue.put(Event("triage", "s", Priority.TRIAGE, dedupe_key="a"))
+    assert queue.put(Event("followup", "s", Priority.FOLLOWUP))
     assert queue.put(Event("user", "s", Priority.USER))
-    assert queue.put(Event("safety", "s", Priority.SAFETY))
-    assert not queue.put(Event("overflow", "s", Priority.SAFETY)) and queue.dropped == 1
+    assert not queue.put(Event("overflow", "s", Priority.USER))
     order = [(await queue.get()).type for _ in range(3)]
-    assert order == ["safety", "user", "triage"]
+    assert order == ["user", "followup", "triage"]
     assert queue.busy("a")
     queue.done(Event("triage", "s", Priority.TRIAGE, dedupe_key="a"))
     assert not queue.busy("a")
@@ -303,7 +302,7 @@ async def test_event_stream_subscribes_filters_limits_and_reconnects() -> None:
     with pytest.raises(asyncio.CancelledError):
         await stream.run()
     assert first.commands[0] == ("subscribe_events", {"event_type": EVENT_TYPE})
-    assert len(received) == 3 and stream.dropped == 2
+    assert len(received) == 3 and stream.limit.suppressed == 2
     assert first.closed and second.closed and not stream.connected
     assert sleeps[:2] == [1.0, 2.0]
 

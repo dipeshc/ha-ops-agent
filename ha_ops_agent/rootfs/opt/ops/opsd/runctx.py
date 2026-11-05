@@ -23,17 +23,6 @@ from opsd.redact import Redactor
 from opsd.store import Store
 from opsd.supervisor import SupervisorClient
 
-
-@dataclass(frozen=True, slots=True)
-class Ack:
-    """A baseline acknowledgement a triage run made (`opsctl ack`), applied when the run ends."""
-
-    key: str
-    reason: str
-    days: int
-    accept: bool
-
-
 # Requests allowed per AI run, whatever their outcome.
 REQUEST_BUDGET = 200
 
@@ -56,9 +45,7 @@ AGENT_SELF = Principal(Origin.AGENT_SELF, channel="scheduler")
 class RunEffects:
     """What the run's capability calls did, for the handler's post-processing."""
 
-    acks: list[Ack] = field(default_factory=list)
     notify_outcomes: list[str] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -68,7 +55,7 @@ class RunContext:
     allowed: frozenset[str]
     budget_class: BudgetClass
     started_at: datetime
-    # Items handed to this run, by key: the only keys an ack may name.
+    # Items handed to this run, by key: the only keys a suppression rule may name.
     handoff: Mapping[str, Item] = field(default_factory=dict)
     run_id: str = field(default_factory=lambda: secrets.token_hex(8))
     # The AI process; socket callers must descend from it.

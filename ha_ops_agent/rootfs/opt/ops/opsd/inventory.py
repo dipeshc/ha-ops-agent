@@ -1,35 +1,19 @@
-"""What this install uses, read-only: the inventory proactive maintenance matches notices against.
-
-- integrations: the domains of the enabled config entries, and Core's loaded components (both halves of
-  `<platform>.<integration>`), which include the ones set up in YAML. What is **configured** here
-  (`configured`) is narrower: the config entries, the YAML integration keys and platforms and the custom
-  integrations. The entity-platform half of every loaded `<platform>.<integration>` (`sensor`, `climate`,
-  `group`, ...) is loaded on every install, so loading alone never counts;
-- YAML features: in the config files the agent may read (the tracked files when git is on, else the
-  export's allowlist of files on disk, `privsep.disk_files`; never secrets, `.storage/` or hidden
-  paths), the top-level integration keys of `configuration.yaml` and `packages/`, and every
-  `platform: <name>`. The text is kept in memory for the scan only, to find where a term is used;
-- custom integrations (their manifests' name, version and GitHub repository) and the entity
-  platforms each one provides here (from the entity registry);
-- frontend plugins (the dashboard resources) and every dashboard's mode and card types
-  (`opsd.dashboards.read_all`);
-- the installed add-ons.
-
-Everything here is data from this install. Names are matched, never followed: nothing in a file or a
-manifest decides what the agent does.
+"""What this install configures, read-only: the inventory proactive maintenance matches notices against (spec
+maintenance.md M7-M8). Config entries, YAML keys and platforms, custom integrations, the readable YAML text (in
+memory for the scan only) and dashboard card types; names are matched, never followed.
 """
 
 import json
-import os
 import re
-import stat
-from collections.abc import Iterable, Mapping
+from collections import Counter
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from opsd import safefs
 from opsd.conversation import clean_text
-from opsd.evidence import addon_repo
+from opsd.evidence import DOMAIN_RE, addon_repo
 
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024
@@ -37,11 +21,14 @@ MAX_MANIFEST_BYTES = 64 * 1024
 MAX_REFS = 12
 _TOP_KEY_RE = re.compile(r"^([a-z_][a-z0-9_]{1,63}):", re.MULTILINE)
 _PLATFORM_RE = re.compile(r"^\s*-?\s*platform:\s*['\"]?([a-z0-9_]{2,64})['\"]?\s*(?:#.*)?$", re.MULTILINE)
-_DOMAIN_RE = re.compile(r"[a-z0-9_]{1,64}")
 # Files whose `platform:` lines are triggers: automations, scripts and blueprints.
 _TRIGGER_FILES_RE = re.compile(r"(?:automations?|scripts?|blueprints)(?:/|\.ya?ml$)")
-_PLUGIN_RE = re.compile(r"/(?:hacsfiles|local)/([A-Za-z0-9_.-]{1,80})/")
-_FILE_RE = re.compile(r"/([A-Za-z0-9_.-]{1,80})\.js\b")
+# Container keys whose mappings are cards (not views, badges or picture elements).
+_CARD_KEYS = frozenset({"cards", "card"})
+_CARD_TYPE_RE = re.compile(r"(?:custom:)?[a-z0-9][a-z0-9_-]{0,79}")
+# Home Assistant's rule for a storage dashboard's url_path: lower case, with a hyphen.
+_DASHBOARD_PATH_RE = re.compile(r"[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+")
+MAX_DASHBOARDS = 20
 # Top-level keys of configuration.yaml that are Home Assistant's own structure, not integrations.
 _STRUCTURE = frozenset({"homeassistant", "default_config", "frontend", "http", "logger", "recorder", "automation",
                         "script", "scene", "template", "group", "sensor", "binary_sensor", "input_boolean",
@@ -57,26 +44,17 @@ class Inventory:
     yaml: dict[str, list[str]] = field(default_factory=dict)
     # domain -> {name, version, repo, platforms}
     custom: dict[str, dict[str, Any]] = field(default_factory=dict)
-    plugins: list[str] = field(default_factory=list)
-    # url_path ("" is the default dashboard) -> {mode, title, cards}
+    # url_path ("" is the default dashboard) -> {cards: {card type: count}}
     dashboards: dict[str, dict[str, Any]] = field(default_factory=dict)
-    addons: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     # The YAML text, for `references` (in memory only, never stored).
     texts: dict[str, str] = field(default_factory=dict, repr=False)
-
-    @property
-    def hacs(self) -> bool:
-        return "hacs" in self.domains or "hacs" in self.custom
 
     def yaml_domains(self) -> set[str]:
         found: set[str] = set()
         for features in self.yaml.values():
             found.update(f.removeprefix("platform:") for f in features)
         return found
-
-    def uses(self, domain: str | None) -> bool:
-        return bool(domain) and (domain in self.domains or domain in self.custom or domain in self.yaml_domains())
 
     def configured_domains(self) -> frozenset[str]:
         """The integrations set up here: config entries, YAML integration keys and platforms, custom ones."""
@@ -103,12 +81,6 @@ class Inventory:
                 found.append(f"dashboard {url_path or 'overview'}")
         return found[:limit]
 
-    def to_json(self) -> dict[str, Any]:
-        return {"entry_domains": sorted(self.entry_domains), "domains": sorted(self.domains),
-                "yaml": {k: v for k, v in sorted(self.yaml.items())}, "custom": self.custom,
-                "plugins": self.plugins, "dashboards": self.dashboards, "addons": self.addons,
-                "problems": self.problems[:10]}  # fmt: skip
-
 
 def yaml_features(path: str, text: str) -> list[str]:
     """The integration keys (configuration.yaml and packages only) and the platforms a YAML file names. In an
@@ -124,19 +96,8 @@ def yaml_features(path: str, text: str) -> list[str]:
 
 def read_text(root: Path, rel: str, limit: int) -> str | None:
     """A regular file under the config root, never through a symlink, at most `limit` bytes; None otherwise."""
-    if ".." in PurePosixPath(rel).parts:
-        return None
-    try:
-        fd = os.open(root / rel, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        data = os.read(fd, limit + 1)
-    finally:
-        os.close(fd)
-    if len(data) > limit:
+    data = safefs.read_or_none(root / rel, limit) if ".." not in PurePosixPath(rel).parts else None
+    if data is None:
         return None
     try:
         return data.decode("utf-8")
@@ -162,7 +123,7 @@ def read_yaml(root: Path, names: Iterable[str]) -> dict[str, str]:
 
 def manifest(custom_components: Path, domain: str) -> dict[str, Any]:
     """A custom integration's name, version and GitHub repository from its manifest (cleaned)."""
-    if not _DOMAIN_RE.fullmatch(domain):
+    if not DOMAIN_RE.fullmatch(domain):
         return {}
     text = read_text(custom_components, f"{domain}/manifest.json", MAX_MANIFEST_BYTES)
     try:
@@ -177,24 +138,60 @@ def manifest(custom_components: Path, domain: str) -> dict[str, Any]:
             "version": clean_text(str(raw.get("version") or ""), 30), "repo": repo}  # fmt: skip
 
 
-def plugin_names(resources: Any) -> list[str]:
-    found: list[str] = []
-    for entry in resources if isinstance(resources, list) else []:
-        url = str(entry.get("url") or "") if isinstance(entry, Mapping) else ""
-        match = _PLUGIN_RE.search(url) or _FILE_RE.search(url)
-        if match and match.group(1) not in found:
-            found.append(match.group(1))
-    return found[:50]
+def _walk(node: Any, container: str | None = None) -> Iterator[tuple[str | None, Mapping[str, Any]]]:
+    if isinstance(node, Mapping):
+        yield container, node
+        for key, child in node.items():
+            yield from _walk(child, str(key))
+    elif isinstance(node, list):
+        for child in node:
+            yield from _walk(child, container)
+
+
+def card_types(config: Any) -> dict[str, int]:
+    """How many cards of each type a dashboard config holds (nested stacks included)."""
+    found: Counter[str] = Counter()
+    for container, node in _walk(config):
+        kind = node.get("type")
+        if container in _CARD_KEYS and isinstance(kind, str) and _CARD_TYPE_RE.fullmatch(kind):
+            found[kind] += 1
+    return dict(found)
+
+
+async def read_dashboards(ws: Callable[..., Awaitable[Any]]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """(each dashboard's card types by url_path, problems), read-only. The default dashboard is "" here; one Home
+    Assistant generates (no stored config) is left out."""
+    found: dict[str, dict[str, Any]] = {}
+    problems: list[str] = []
+    try:
+        listed = await ws("lovelace/dashboards/list")
+    except Exception as err:  # noqa: BLE001 - a missing source is a problem, never a crash
+        return found, [f"dashboards unreadable: {clean_text(str(err), 120)}"]
+    boards: list[Mapping[str, Any]] = [{"url_path": ""}]
+    boards += [b for b in listed if isinstance(b, Mapping)][:MAX_DASHBOARDS] if isinstance(listed, list) else []
+    for board in boards:
+        url_path = board.get("url_path")
+        if not isinstance(url_path, str) or (url_path and not _DASHBOARD_PATH_RE.fullmatch(url_path)):
+            continue
+        try:
+            config = await ws("lovelace/config", url_path=url_path) if url_path else await ws("lovelace/config")
+        except Exception as err:  # noqa: BLE001 - "no config" is normal for a generated default dashboard
+            if url_path:
+                problems.append(f"dashboard {url_path}: {clean_text(str(err), 120)}")
+            continue
+        if isinstance(config, Mapping):
+            found[url_path] = {"cards": card_types(config)}
+    return found, problems
 
 
 def build(*, entries: Any, components: Any, texts: Mapping[str, str], custom: Mapping[str, Mapping[str, Any]],
-          registry: Any, resources: Any, dashboards: Mapping[str, dict[str, Any]], addons: Any,
+          registry: Any, dashboards: Mapping[str, dict[str, Any]],
           problems: Iterable[str] = ()) -> Inventory:  # fmt: skip
     """The inventory from what was read (pure; every input may be missing or malformed)."""
     entry_domains = {
         str(e.get("domain"))
         for e in (entries if isinstance(entries, list) else [])
-        if isinstance(e, Mapping) and not e.get("disabled_by") and _DOMAIN_RE.fullmatch(str(e.get("domain") or ""))
+        if isinstance(e, Mapping) and not e.get("disabled_by") and DOMAIN_RE.fullmatch(str(e.get("domain") or ""))
     }
     loaded = {part for c in components for part in str(c).split(".")} if isinstance(components, list) else set()
     platforms: dict[str, set[str]] = {}
@@ -205,16 +202,12 @@ def build(*, entries: Any, components: Any, texts: Mapping[str, str], custom: Ma
                                    "entities": sum(1 for e in registry if isinstance(e, Mapping)
                                                    and e.get("platform") == d) if isinstance(registry, list) else 0}
                   for d, info in sorted(custom.items())}  # fmt: skip
-    slugs = [str(a.get("slug")) for a in (addons or {}).get("addons", []) if isinstance(a, Mapping)
-             and a.get("slug")] if isinstance(addons, Mapping) else []  # fmt: skip
     return Inventory(
         entry_domains=frozenset(entry_domains),
-        domains=frozenset(d for d in entry_domains | loaded if _DOMAIN_RE.fullmatch(d)),
+        domains=frozenset(d for d in entry_domains | loaded if DOMAIN_RE.fullmatch(d)),
         yaml={path: features for path, text in sorted(texts.items()) if (features := yaml_features(path, text))},
         custom=custom_out,
-        plugins=plugin_names(resources),
         dashboards=dict(dashboards),
-        addons=slugs[:100],
         problems=list(problems),
         texts=dict(texts),
     )

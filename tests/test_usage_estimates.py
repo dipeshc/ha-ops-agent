@@ -35,7 +35,7 @@ async def test_a_run_is_charged_its_run_time_whatever_the_utilisation_says(h: Ha
 
     async def run_claude(cfg: RunConfig, prompt: str, **_: Any) -> RunResult:
         # As seen live: whole percents that do not move during a short run.
-        return RunResult(status="ok", turns=5, duration_s=11.3, rate_first=info(6, 28), rate_last=info(6, 28),
+        return RunResult(status="ok", turns=5, duration_s=11.3, rate_last=info(6, 28),
                          cost_usd=0.04, structured={"reply": "fine", "summary": ""})  # fmt: skip
 
     d.runner.run_claude = run_claude
@@ -55,10 +55,9 @@ async def test_a_run_is_charged_its_run_time_whatever_the_utilisation_says(h: Ha
 def test_the_store_refuses_empty_agent_turns(tmp_path: Path) -> None:
     store = Store.open(tmp_path / "ops.db")
     try:
-        store.create_thread("0123456789abcdef", principal="admin", channel="panel", now=datetime.now(UTC))
         for text in ("", "   "):
             with pytest.raises(ValueError, match="needs text"):
-                store.append_turn("0123456789abcdef", role="agent", text=text, now=datetime.now(UTC))
+                store.append_turn("ask:q-0123456789ab", role="agent", text=text, now=datetime.now(UTC))
     finally:
         store.close()
 

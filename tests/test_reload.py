@@ -410,7 +410,7 @@ async def test_a_hung_entry_times_out(api: FakeReloadAPI, paths: Paths) -> None:
 
 
 def test_registry_row_is_narrow() -> None:
-    assert CAP.effects == frozenset({Effect.RELOAD}) and not CAP.internal and CAP.enabled and CAP.refund_refused
+    assert CAP.effects == frozenset({Effect.RELOAD}) and not CAP.internal and CAP.refund_refused
     assert CAP.origins == frozenset({Origin.AGENT_SELF, Origin.ADMIN_CHAT})
     assert CAP.quota.per_day == 6 and list(CAP.args) == ["domain"]
     assert Effect.RELOAD in CHAT_EFFECTS
@@ -477,10 +477,10 @@ def world(paths: Paths, api: FakeReloadAPI, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 async def test_socket_triage_run_reloads_and_audits(world: World, api: FakeReloadAPI) -> None:
-    run = world.run()
+    world.run()
     reply = await world.call("integration-reload", domain="acme_vacuum")
     assert reply["ok"], reply
-    assert api.posts and any("Reloaded acme_vacuum" in n for n in run.effects.notes)
+    assert api.posts and "Reloaded acme_vacuum" in str(reply["output"])
     row = next(r for r in world.audit() if r["capability"] == "integration.reload")
     assert row["decision"] == "execute"
 

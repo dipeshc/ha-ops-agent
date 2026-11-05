@@ -1,6 +1,7 @@
 """Proactive maintenance on a synthetic install: the inventory, each signal and item variant, when it asks, what the
 plan run may and may not add, and that missing or unrecognised evidence fails closed. Every name is made up."""
 
+import hashlib
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -48,10 +49,7 @@ def inv(**changes: Any) -> inventory.Inventory:
         registry=[{"entity_id": "sensor.acme_weather_rain", "platform": "acme_weather"},
                   {"entity_id": "weather.acme_home", "platform": "acme_weather"},
                   {"entity_id": "light.porch", "platform": "zha"}],
-        resources=[{"url": "/hacsfiles/acme-gauge/acme-gauge.js", "type": "module"}],
-        dashboards={"example-garden": {"mode": "storage", "title": "Garden", "cards": {"history-graph": 1}},
-                    "example-generated": {"mode": "storage", "title": "Wall", "cards": {"history-graph": 1}}},
-        addons={"addons": [{"slug": "core_mosquitto"}]},
+        dashboards={"example-garden": {"cards": {"history-graph": 1}}, "example-wall": {"cards": {"history-graph": 1}}},
     )  # fmt: skip
     for key, value in changes.items():
         setattr(built, key, value)
@@ -108,12 +106,14 @@ class Rig:
         self.fetched: list[str] = []
         self.prompts: list[str] = []
         self.answer: dict[str, Any] | None = None
+        # A run result the check returns as is (a refusal or a failure), instead of `answer`.
+        self.run: RunResult | None = None
         self.proposed: list[tuple[str, list[Any]]] = []
         self.acting = acting
         source = EvidenceSource(cache=EvidenceCache(self.store, clock=lambda: self.now), fetch=self.fetch,
                                 clock=lambda: self.now)  # fmt: skip
         self.manager = MaintenanceManager(store=self.store, gather=self.gather, evidence=source, git=git,
-                                          generated=frozenset({"example-generated"}), plan=self.plan,
+                                          plan=self.plan,
                                           propose=self.propose, clock=lambda: self.now)  # fmt: skip
         self.sent: list[Any] = []
 
@@ -141,11 +141,12 @@ class Rig:
         return github(url)
 
     async def gather(self) -> Gathered:
-        return Gathered(installed=self.installed, issues=self.issues, logs=self.logs, inventory=self.inventory,
-                        configs={"example-garden": GARDEN_BOARD, "example-generated": GARDEN_BOARD})  # fmt: skip
+        return Gathered(installed=self.installed, issues=self.issues, logs=self.logs, inventory=self.inventory)
 
     async def plan(self, prompt: str) -> RunResult:
         self.prompts.append(prompt)
+        if self.run is not None:
+            return self.run
         if self.answer is None:
             return RunResult(status="ai_off")
         return RunResult(status="ok", structured=self.answer)
@@ -179,12 +180,39 @@ def test_the_inventory_reads_what_the_install_uses() -> None:
     assert {"zha", "acme_sprinkler", "acme_weather", "sensor"} <= found.domains and "acme_off" not in found.domains
     assert found.yaml["configuration.yaml"] == ["acme_legacy_hub", "acme_sprinkler"]
     assert found.custom["acme_weather"]["platforms"] == ["sensor", "weather"]
-    assert found.custom["acme_weather"]["entities"] == 2 and found.hacs
-    assert found.plugins == ["acme-gauge"] and found.addons == ["core_mosquitto"]
-    assert found.uses("acme_legacy_hub") and not found.uses("acme_lights")
+    assert found.custom["acme_weather"]["entities"] == 2
+    assert found.configured("acme_legacy_hub") and not found.configured("acme_lights")
     assert found.references("acme_sprinkler.run_zone") == ["automations/garden.yaml:3"]
-    assert found.references("history-graph") == ["dashboard example-garden", "dashboard example-generated"]
-    assert "texts" not in found.to_json() and "CONFIGURATION" not in json.dumps(found.to_json())
+    assert found.references("history-graph") == ["dashboard example-garden", "dashboard example-wall"]
+
+
+def test_card_types_count_nested_cards_but_not_views_or_sections() -> None:
+    board = {"views": [{"title": "Home", "sections": [{"type": "grid", "cards": [
+        {"type": "history-graph", "entity": "sensor.acme_power"},
+        {"type": "vertical-stack", "cards": [{"type": "history-graph"}, {"type": "entities", "entities": []}]},
+    ]}]}]}  # fmt: skip
+    assert inventory.card_types(board) == {"history-graph": 2, "vertical-stack": 1, "entities": 1}
+
+
+async def test_dashboards_are_only_read_through_the_self_guard() -> None:
+    from opsd import selfguard
+
+    sent: list[str] = []
+
+    async def ws(msg_type: str, **fields: Any) -> Any:
+        selfguard.check_ws(msg_type, fields)
+        sent.append(msg_type)
+        if msg_type == "lovelace/dashboards/list":
+            return [{"url_path": "example-garden", "mode": "storage"}, {"url_path": "Not A Path"},
+                    {"url_path": "example-broken", "mode": "yaml"}]  # fmt: skip
+        if fields.get("url_path") == "example-broken":
+            raise RuntimeError("no config")
+        return GARDEN_BOARD
+
+    found, problems = await inventory.read_dashboards(ws)
+    assert found == {"": {"cards": {"history-graph": 1}}, "example-garden": {"cards": {"history-graph": 1}}}
+    assert problems == ["dashboard example-broken: no config"]
+    assert set(sent) == {"lovelace/dashboards/list", "lovelace/config"}
 
 
 def test_yaml_features_name_integration_keys_and_platforms() -> None:
@@ -241,11 +269,9 @@ def test_the_removal_version_is_the_one_next_to_the_removal_words() -> None:
     assert maintenance.removal_in("removed in 2030.13") is None
 
 
-def test_the_post_parser_keeps_headings_and_new_integrations_and_fails_closed() -> None:
+def test_the_post_parser_keeps_new_integrations_and_fails_closed() -> None:
     data = parse_post(AHEAD, "s")
     assert {"domain": "acme_weather", "name": "Acme Weather"} in data["new"]
-    assert any("Marketplace" in heading for heading in data["headings"])
-    assert all("<" not in heading for heading in data["headings"])
     with pytest.raises(ValueError):
         parse_post("<html><h2>Marketplace</h2></html>", "s")
 
@@ -289,7 +315,7 @@ async def test_repairs_logs_and_notes_become_deprecations_with_their_removal(tmp
     # A removal the text names; a farewell in a release not installed yet; a card option in a dashboard.
     assert notes["acme_sprinkler"].removal == "2030.6"
     assert notes["acme_legacy_hub"].removal == "2030.3" and notes["acme_legacy_hub"].what == "removed in 2030.3"
-    card = notes["dashboard example-generated"]
+    card = notes["dashboard example-wall"]
     assert card.fixable == ["dashboard"] and "dashboard example-garden" in card.affected
     # Unused integrations, unreferenced developer-blog names and changes already installed are not findings.
     assert "acme_lights" not in notes and all(f.removal != "2030.2" for f in by_signal(rig, "notes"))
@@ -303,8 +329,6 @@ async def test_the_weekly_checks_find_archived_repositories_and_replacements(tmp
     [candidate] = by_signal(rig, "replacement")
     assert candidate.variant == "replacement" and candidate.detail["missing"] == ["weather"]
     assert candidate.detail["risk"] == "high" and "2 entities" in candidate.detail["impact"]
-    [market] = by_signal(rig, "marketplace")
-    assert market.variant == "suggestion"
     fetched = len(rig.fetched)
     # Not again until a week has passed or a new post appears, whatever the trigger says.
     rig.now += timedelta(days=1)
@@ -312,13 +336,6 @@ async def test_the_weekly_checks_find_archived_repositories_and_replacements(tmp
     await rig.scan("weekly")
     assert not any("api.github.com" in u for u in rig.fetched[fetched:])
     assert by_signal(rig, "replacement") and by_signal(rig, "repository")
-
-
-async def test_without_hacs_there_is_no_marketplace_suggestion(tmp_path: Path) -> None:
-    rig = Rig(tmp_path)
-    rig.inventory = inv(custom={"acme_weather": dict(inv().custom["acme_weather"])}, domains=frozenset({"zha"}))
-    await rig.scan()
-    assert by_signal(rig, "marketplace") == []
 
 
 # ------------------------------------------------------------------ items and escalation
@@ -335,7 +352,7 @@ async def test_only_deprecations_within_30_days_of_their_deadline_need_the_admin
     near = items["acme_sprinkler: deprecated, removed in 2030.4"]
     # Six weeks ahead: Coming up and silent, composed again on the day it may ask.
     assert near["state"] == "proposed" and not near["needs"] and near["kicker"] == "Deprecation ahead"
-    assert near["gist"] == "removed in 2030.4, 2 releases left"
+    assert near["gist"].startswith("removed in 2030.4, 2 releases left")
     assert near["source"]["recheck_at"] == ASKS_AT.isoformat()
     assert near["title"] in {r["title"] for r in rig.book.home()["coming"]}
     await rig.deliver()
@@ -357,10 +374,9 @@ async def test_only_deprecations_within_30_days_of_their_deadline_need_the_admin
     await rig.deliver()
     titles = sorted(m.title for m in rig.sent)
     assert "acme_sprinkler: deprecated, removed in 2030.4" in titles
-    assert not any("2030.9" in t or "archived" in t or "replace" in t or "Marketplace" in t for t in titles)
+    assert not any("2030.9" in t or "archived" in t or "replace" in t for t in titles)
     home = rig.book.home()
-    assert {r["title"] for r in home["suggestions"]} == {"acme_weather: Core integration acme_weather may replace it",
-                                                         "hacs: built-in Marketplace in 2030.3"}  # fmt: skip
+    assert {r["title"] for r in home["suggestions"]} == {"acme_weather: Core integration acme_weather may replace it"}
     assert far["title"] in {r["title"] for r in home["coming"]}
 
 
@@ -374,7 +390,7 @@ async def test_an_acknowledged_deprecation_asks_again_one_release_closer(tmp_pat
     rig.installed, rig.now = "2030.3.0", rig.now + timedelta(days=10)
     await rig.scan()
     again = rig.items()[near["title"]]
-    assert again["state"] == "waiting" and again["gist"] == "removed in 2030.4, 1 release left"
+    assert again["state"] == "waiting" and again["gist"].startswith("removed in 2030.4, 1 release left")
 
 
 def test_a_deadline_is_the_month_of_the_removal_and_only_authoritative_removals_have_one() -> None:
@@ -387,7 +403,6 @@ def test_a_deadline_is_the_month_of_the_removal_and_only_authoritative_removals_
         Finding(key="0123456789abcdef", variant="deprecation", signal="repository", what="archived"),
         Finding(key="0123456789abcdef", variant="deprecation", signal="log", what="x", removal="2030.3"),
         Finding(key="0123456789abcdef", variant="replacement", signal="replacement", what="x"),
-        Finding(key="0123456789abcdef", variant="suggestion", signal="marketplace", what="x", removal="2030.3"),
     ):
         assert no_deadline.deadline is None and not no_deadline.asks("2030.3.0", ASKS_AT)
 
@@ -399,23 +414,6 @@ def test_a_fix_stays_ready_until_its_finding_asks() -> None:
     assert maintenance.fix_expiry(repair, ASKS_AT + timedelta(days=5)) == ASKS_AT + timedelta(days=12)
     undated = Finding(key="0123456789abcdef", variant="deprecation", signal="repository", what="x")
     assert maintenance.fix_expiry(undated, NOW) == NOW + maintenance.FIX_READY
-
-
-async def test_only_a_dashboard_restore_that_failed_asks(tmp_path: Path) -> None:
-    rig = Rig(tmp_path)
-    await rig.scan()
-    near = rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]
-    key = near["source"]["finding"]
-    from opsd.dashboards import Outcome
-
-    rig.manager.record_result(key, Outcome("restored", "the save did not read back; the backup was restored"))
-    item = rig.items()[near["title"]]
-    assert item["state"] == "proposed" and not item["needs"]
-    assert any(f["label"] == "Dashboard change" and f["value"].startswith("not made") for f in item["facts"])
-    rig.now += timedelta(minutes=1)
-    rig.manager.record_result(key, Outcome("escalated", "the restore did not read back"))
-    item = rig.items()[near["title"]]
-    assert item["state"] == "failed" and item["need"]["kind"] == "ack" and item["needs"]
 
 
 async def test_a_findings_config_change_moves_its_item(tmp_path: Path) -> None:
@@ -573,48 +571,6 @@ async def test_yaml_edits_become_a_proposal_only_with_git_and_a_yaml_finding(tmp
         assert len(rig.proposed) == expected
 
 
-async def test_a_dashboard_plan_waits_for_approval_and_never_targets_another_dashboard(tmp_path: Path) -> None:
-    rig = Rig(tmp_path)
-    await rig.scan()
-    card = next(f for f in by_signal(rig, "notes") if "dashboard example-garden" in f.affected)
-    edit = {"card_type": "history-graph", "renames": [{"old": "hours_to_show", "new": "hours"}]}
-    rig.answer = {"plans": [{"key": card.key, "plan": "Rename hours_to_show to hours.",
-                             "dashboard": {"url_path": "example-garden", **edit}}], "summary": "s"}  # fmt: skip
-    rig.now += timedelta(hours=1)
-    await rig.scan()
-    item = rig.items()[card.title()]
-    assert item["state"] == "waiting" and item["need"]["kind"] == "approval"
-    assert item["need"]["primary"]["id"] == "apply_dashboard" and "example-garden" in item["change"]["diff"]
-    assert "hours_to_show → hours" in item["change"]["diff"]
-    # The generated dashboard is never planned, even when the answer names it.
-    other = Rig(tmp_path / "generated")
-    await other.scan()
-    card = next(f for f in by_signal(other, "notes") if "dashboard example-generated" in f.affected)
-    other.answer = {"plans": [{"key": card.key, "plan": "p", "dashboard": {"url_path": "example-generated", **edit}}],
-                    "summary": "s"}  # fmt: skip
-    other.now += timedelta(hours=1)
-    await other.scan()
-    assert maintenance.dashboard_plan(other.store, card.key) is None
-    # In observe mode the plan is shown, without the action and without a push.
-    rig.acting = False
-    rig.book.recompose()  # the options changed: the add-on restarted
-    shown = rig.items()[item["title"]]
-    assert shown["state"] == "proposed" and "act" in shown["gist"]
-
-
-async def test_a_dashboard_not_named_by_the_finding_is_never_planned(tmp_path: Path) -> None:
-    rig = Rig(tmp_path)
-    await rig.scan()
-    repair = by_signal(rig, "repair")[0]
-    rig.answer = {"plans": [{"key": repair.key, "plan": "p", "dashboard": {
-        "url_path": "example-garden", "card_type": "history-graph", "renames": [{"old": "hours_to_show",
-                                                                                     "new": "hours"}]}}],
-                  "summary": "s"}  # fmt: skip
-    rig.now += timedelta(hours=1)
-    await rig.scan()
-    assert maintenance.dashboard_plan(rig.store, repair.key) is None
-
-
 # ------------------------------------------------------------------ the update rule
 
 
@@ -680,69 +636,6 @@ def fixture_fetch(url: str, **_: Any) -> str:
     if url in POSTS:
         return POSTS[url]
     raise evidence.FetchError("not found", status=404)
-
-
-async def test_the_panel_applies_an_approved_dashboard_plan_end_to_end(
-    h: Any,  # noqa: F811
-    local_ingress: None,  # noqa: F811
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.test_assistant import ADMIN
-    from tests.test_panel import Panel
-
-    monkeypatch.setattr(evidence, "fetch_text", fixture_fetch)
-    h.fake.lovelace = {"example-garden": json.loads(json.dumps(GARDEN_BOARD))}
-    original = h.fake.supervisor
-
-    async def supervisor(path: str) -> Any:
-        found = await original(path)
-        return found | {"version": INSTALLED} if path == "/core/info" else found
-
-    h.fake.supervisor = supervisor
-    d = h.daemon(agent__mode="act")
-    d.inbound.admin = ADMIN
-    server = d.panel_server(port=0)
-    await server.start()
-    panel = Panel(d, server)
-    try:
-        assert d.maintenance is not None
-        result = await d.maintenance.scan("daily")
-        assert result["result"] == "ok", result
-        card = next(f for f in d.maintenance.findings() if "dashboard example-garden" in f.affected)
-        assert "dashboard" in card.fixable and h.claude_calls and "<evidence>" in h.claude_calls[-1]
-        h.claude_reply = {"plans": [{"key": card.key, "plan": "Rename the option.", "dashboard": {
-            "url_path": "example-garden", "card_type": "history-graph",
-            "renames": [{"old": "hours_to_show", "new": "hours"}]}}], "summary": "s"}  # fmt: skip
-        await d.maintenance.scan("daily")
-        await d.items_flush()
-        item = d.store.item_by_key(f"maint:{card.key}")
-        # Years before its deadline: ready in Coming up, applied from there without asking.
-        assert item["state"] == "proposed" and item["need"] is None
-        assert [a["id"] for a in item["actions"]] == ["apply_dashboard", "reject"]
-        act = {"action": "apply_dashboard", "revision": item["revision"]}
-        # Listed in YAML mode when the admin taps: the request is refused with the reason, nothing queued.
-        h.fake.lovelace_modes["example-garden"] = "yaml"
-        status, _, body = await panel.request("POST", f"/api/items/{item['id']}/act", body=act)
-        assert status == 409 and "YAML-mode" in json.dumps(body)
-        assert d.store.approvals(states=("pending", "approved"), limit=10) == []
-        del h.fake.lovelace_modes["example-garden"]
-        status, _, body = await panel.request("POST", f"/api/items/{item['id']}/act", body=act)
-        assert status == 200, body
-        event = await d.queue.get()
-        assert event.type == "maintenance.dashboard"
-        await d._on_dashboard_approved(event)
-        saved = h.fake.lovelace["example-garden"]["views"][0]["cards"][0]
-        assert saved["hours"] == 30 and "hours_to_show" not in saved
-        assert list((h.paths.data / "maintenance" / "dashboards" / "example-garden").glob("*.json"))
-        await d.items_flush()
-        after = d.store.item_by_key(f"maint:{card.key}")
-        assert after["state"] == "proposed" and "saved" in after["gist"]
-        # The next scan no longer finds the old option in use: resolved.
-        await d.maintenance.scan("daily")
-        await d.items_flush()
-        assert d.store.item_by_key(f"maint:{card.key}")["state"] == "done"
-    finally:
-        await server.stop()
 
 
 async def test_a_pending_core_update_that_removes_something_in_use_asks(tmp_path: Path) -> None:
@@ -895,14 +788,10 @@ def test_core_deprecation_lines_never_give_core_or_none_as_the_domain(
 
 
 @pytest.mark.parametrize("domain", [None, "", "Core", "core", "None", "none", "helpers", "Home Assistant"])
-def test_a_log_finding_without_a_usable_domain_is_never_loaded_titled_or_planned(
-    domain: str | None, tmp_path: Path
-) -> None:
+def test_a_log_finding_without_a_usable_domain_is_never_loaded(domain: str | None, tmp_path: Path) -> None:
     bad = Finding(key="0123456789abcdef", variant="deprecation", signal="log", what="x", domain=domain,
                   removal="2030.9", affected=[f"custom integration {domain}"])  # fmt: skip
     assert not bad.sound() and Finding.from_json(bad.to_json()) is None
-    prompt = maintenance.build_plan_prompt([bad], git=True)
-    assert "0123456789abcdef" not in prompt and "None" not in prompt
     store = opened(tmp_path / "ops.db")
     store.kv_set(maintenance.FINDINGS_KEY, json.dumps([bad.to_json()]), now=NOW)
     assert maintenance.load(store) == []
@@ -1108,6 +997,108 @@ async def test_a_log_finding_is_dropped_when_the_source_is_unreadable_or_the_wee
     assert by_signal(rig, "log") == []
 
 
+LIGHTS_LOG = [{"name": "custom_components.acme_lights", "level": "WARNING", "message": [
+    "acme_lights uses `async_forward_entry_setup`, which is deprecated and will be removed in 2030.6"]}]  # fmt: skip
+
+
+async def lights_rig(tmp_path: Path, text: str | None = "old source\n") -> tuple[Rig, Source]:
+    rig = Rig(tmp_path)
+    rig.logs = list(LIGHTS_LOG)
+    rig.inventory = inv(custom={"acme_lights": {"name": "Acme Lights", "version": "1.0.0", "repo": None,
+                                                "platforms": [], "entities": 0}})  # fmt: skip
+    source = Source(text)
+    rig.manager._fork_text = source.read
+    await rig.scan()
+    [log] = by_signal(rig, "log")
+    assert log.domain == "acme_lights" and log.detail["code"].startswith("custom:1.0.0:")
+    rig.logs = []
+    return rig, source
+
+
+async def test_a_log_finding_resolves_at_once_when_the_code_changed_and_the_warning_is_gone(tmp_path: Path) -> None:
+    rig, source = await lights_rig(tmp_path)
+    [log] = by_signal(rig, "log")
+    source.text = "new source\n"
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    assert by_signal(rig, "log") == []
+    assert rig.store.kv_get(maintenance.GONE_KEY + log.key) == (
+        "resolved: acme_lights changed since the warning (its code) and the warning has not come back"
+    )
+    # A new manifest version is named too.
+    (tmp_path / "again").mkdir()
+    rig, source = await lights_rig(tmp_path / "again")
+    rig.inventory.custom["acme_lights"]["version"] = "1.1.0"
+    await rig.scan()
+    [] = by_signal(rig, "log")
+    # A core integration: the Core version changed.
+    (tmp_path / "core").mkdir()
+    core = Rig(tmp_path / "core")
+    core.logs = list(REAL_SHAPED_LOGS[2:3])
+    await core.scan()
+    [log] = by_signal(core, "log")
+    assert log.detail["code"] == f"core:{INSTALLED}"
+    core.logs = []
+    await core.scan()
+    assert len(by_signal(core, "log")) == 1
+    core.installed = "2030.3.9"
+    await core.scan()
+    assert by_signal(core, "log") == []
+
+
+async def test_a_log_finding_stays_while_the_code_is_unchanged(tmp_path: Path) -> None:
+    rig, _ = await lights_rig(tmp_path)
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    assert len(by_signal(rig, "log")) == 1
+    rig.now += maintenance.LOG_STICKY
+    await rig.scan()
+    assert by_signal(rig, "log") == []
+
+
+async def test_a_log_finding_stays_while_the_warning_is_still_in_the_log(tmp_path: Path) -> None:
+    rig, source = await lights_rig(tmp_path)
+    rig.logs = list(LIGHTS_LOG)
+    source.text = "new source\n"
+    await rig.scan()
+    [log] = by_signal(rig, "log")
+    assert log.detail["code"] == lights_print("new source\n")
+
+
+def lights_print(text: str) -> str:
+    return f"custom:1.0.0:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+
+
+async def test_a_log_finding_stays_when_the_log_or_the_inventory_is_unavailable(tmp_path: Path) -> None:
+    rig, source = await lights_rig(tmp_path)
+    source.text = "new source\n"
+    rig.logs = None  # type: ignore[assignment]
+    await rig.scan()
+    assert len(by_signal(rig, "log")) == 1
+    rig.logs = []
+    rig.inventory.problems.append("config files unreadable")
+    await rig.scan()
+    assert len(by_signal(rig, "log")) == 1
+    rig.inventory.problems.clear()
+    source.text = None
+    await rig.scan()
+    assert len(by_signal(rig, "log")) == 1
+
+
+async def test_a_log_finding_stored_without_a_fingerprint_keeps_the_seven_day_rule(tmp_path: Path) -> None:
+    rig, source = await lights_rig(tmp_path)
+    [log] = by_signal(rig, "log")
+    del log.detail["code"]
+    rig.store.kv_set(maintenance.FINDINGS_KEY, json.dumps([log.to_json()]), now=rig.now)
+    source.text = "new source\n"
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    assert len(by_signal(rig, "log")) == 1
+    rig.now += maintenance.LOG_STICKY
+    await rig.scan()
+    assert by_signal(rig, "log") == []
+
+
 async def test_an_old_fork_reason_is_cleared_when_a_changed_fork_cannot_be_judged(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     forks = Forks()
@@ -1147,7 +1138,7 @@ def live_inventory() -> inventory.Inventory:
         components=["acme_hub", "zha", "acme_tv", "climate.acme_hub", "event.acme_hub", "group", "sensor.zha",
                     "media_player.acme_tv"],
         texts={"configuration.yaml": LIVE_CONFIGURATION, "automations/porch.yaml": LIVE_AUTOMATIONS},
-        custom={}, registry=[], resources=[], dashboards={}, addons={"addons": []},
+        custom={}, registry=[], dashboards={},
     )  # fmt: skip
 
 
@@ -1160,9 +1151,11 @@ def live_rig(tmp_path: Path) -> Rig:
     return rig
 
 
-def answer(finding: Finding, verdict: str, reason: str = "checked the config") -> dict[str, Any]:
+def answer(finding: Finding, verdict: str, reason: str = "checked the config",
+           owner_action: str | None = None) -> dict[str, Any]:  # fmt: skip
     return {"plans": [{"key": finding.key, "plan": "Nothing to change." if verdict == "not_affected" else "Check it.",
-                       "verdict": verdict, "reason": reason, "evidence": ["configuration.yaml"]}],
+                       "verdict": verdict, "reason": reason, "evidence": ["configuration.yaml"],
+                       "owner_action": owner_action}],
             "summary": "s"}  # fmt: skip
 
 
@@ -1188,9 +1181,9 @@ def test_entity_platform_domains_alone_never_make_a_finding() -> None:
     """`climate`, `event` and `group` are loaded on every install (the halves of `<platform>.<integration>`):
     loading alone is not configuring, so their notes are no findings."""
     inv = live_inventory()
-    assert inv.uses("climate") and not inv.configured("climate") and not inv.configured("group")
+    assert "climate" in inv.domains and not inv.configured("climate") and not inv.configured("group")
     # An automation's `platform: event` trigger configures nothing either.
-    assert inv.uses("event") and not inv.configured("event")
+    assert "event" in inv.domains and not inv.configured("event")
     assert inv.configured("acme_hub") and inv.configured("acme_tv") and not inv.configured("acme_doorbell")
     post = parse_post(UNRELEASED, "src") | {"version": "2030.3", "url": "src"}
     [minor] = maintenance.from_notes([post], inv, "2030.2.1")
@@ -1230,32 +1223,33 @@ async def test_one_core_release_is_one_item(tmp_path: Path) -> None:
 async def test_the_live_case_makes_no_needs_and_no_push(tmp_path: Path) -> None:
     """The regression of the live case: six notes for a minor not installed yet, two integrations configured, a
     generic `entity_id` everywhere in the YAML. Without a check: nothing in Needs you, no push. A check that says it
-    needs the admin makes exactly one Core-minor item with the note as a fact; one that says not affected closes it
-    and withdraws its push."""
+    needs the admin keeps exactly one Core-minor item in Coming up with the note as a fact and its reason and owner
+    action under The agent says (a Core minor's notes never ask on their own, M13e); one that says not affected
+    closes it."""
     rig = live_rig(tmp_path)
     await rig.scan()
     await rig.deliver()
     assert rig.store.needs_count() == 0 and rig.sent == []
     [minor] = by_signal(rig, "notes")
     # The next day the check answers: it needs the admin (the option is set in configuration.yaml).
-    rig.answer = answer(minor, "needs_owner", "configuration.yaml sets acme_hub legacy_polling, which 2030.3 ignores")
+    rig.answer = answer(minor, "needs_owner", "configuration.yaml sets acme_hub legacy_polling, which 2030.3 ignores",
+                        "Remove legacy_polling from acme_hub before 2030.3")  # fmt: skip
     rig.now += timedelta(days=1)
     await rig.scan()
     [item] = notes_items(rig)
-    assert item["needs"] and item["need"]["kind"] == "ack" and rig.store.needs_count() == 1
+    assert not item["needs"] and item["state"] == "proposed" and rig.store.needs_count() == 0
     assert any("legacy_polling" in f["value"] for f in item["facts"] if f["label"] == "Breaking change (acme_hub)")
-    assert "legacy_polling" in item["agent"]["text"] and "legacy_polling" not in item["need"]["text"]
+    assert "Remove legacy_polling from acme_hub before 2030.3" in item["agent"]["text"]
     await rig.deliver()
-    [push] = rig.sent
-    assert push.tag == item["id"] and not push.urgent
-    # Plan a fix concludes nothing is needed (the admin removed the option): the item closes, its push is withdrawn.
+    assert rig.sent == []
+    # Plan a fix concludes nothing is needed (the admin removed the option): the item closes.
     verdicts.record(rig.store, f"maint:{minor.key}", fingerprint=minor.evidence, verdict="not_affected",
                     reason="the option is no longer set", by="plan_fix", now=rig.now)  # fmt: skip
     [item] = notes_items(rig)
     assert item["state"] == "done" and item["gist"] == "checked: not affected here: the option is no longer set"
     assert not item["needs"] and [a["id"] for a in item["actions"]] == ["reopen"]
     await rig.deliver()
-    assert rig.cleared == [item["id"]] and len(rig.sent) == 1
+    assert rig.sent == []
 
 
 async def test_a_not_affected_plan_closes_the_finding_and_is_remembered(tmp_path: Path) -> None:
@@ -1315,19 +1309,90 @@ def test_an_unrelated_edit_keeps_the_fingerprint() -> None:
     assert other.evidence != one.evidence
 
 
-async def test_a_needs_owner_verdict_puts_a_core_minor_in_needs_you(tmp_path: Path) -> None:
+async def test_a_needs_owner_core_minor_stays_in_coming_up(tmp_path: Path) -> None:
+    """The live case: a Core minor that is not installed and not being installed, checked `needs_owner` (here with
+    an owner action, and later without one): Coming up, never Needs you, never a push."""
     rig = live_rig(tmp_path)
     await rig.scan()
     [minor] = by_signal(rig, "notes")
     assert minor.minor_of == "2030.3" and not notes_items(rig)[0]["needs"]
-    rig.answer = answer(minor, "needs_owner", "the option is set")
+    rig.answer = answer(minor, "needs_owner", "the option is set", "Remove the option from acme_hub")
     rig.now += timedelta(days=1)
     await rig.scan()
     [item] = notes_items(rig)
-    assert item["state"] == "waiting" and item["source"]["ack"] == f"verdict:{minor.evidence}"
-    # OK keeps it quiet until its evidence changes.
-    assert rig.book.ack(item, now=rig.now)
-    assert not notes_items(rig)[0]["needs"]
+    assert item["state"] == "proposed" and not item["needs"] and "ack" not in item["source"]
+    assert "Checked (it needs you): the option is set" in item["agent"]["text"]
+    await rig.deliver()
+    assert rig.sent == [] and rig.store.needs_count() == 0
+
+
+async def test_a_core_minors_verdict_is_shown_on_its_core_update(tmp_path: Path) -> None:
+    """A Core update into the minor is pending: the finding follows the update's item, and the update's item is
+    where its checked verdict (and what the admin must do) is shown, beside the notes as facts."""
+    from opsd.items import Composer
+
+    rig = live_rig(tmp_path)
+    await rig.scan()
+    [minor] = by_signal(rig, "notes")
+    rig.answer = answer(minor, "needs_owner", "the option is set", "Remove the option from acme_hub")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    at = rig.now.isoformat()
+    entity = "update.home_assistant_core_update"
+    rig.store.put_item({"id": "u-000000000001", "key": f"updates:{entity}@2030.3.1", "kind": "update",
+                        "kicker": "Core", "ref": "", "gist": "", "title": "Home Assistant Core 2030.3.1",
+                        "revision": 1, "quiet": False, "actions": [], "facts": [], "state": "proposed",
+                        "source": {"kind": "core", "version": "2030.3.1", "entity": entity},
+                        "as_of": at, "at": at, "created_at": at, "updated_at": at})  # fmt: skip
+    rig.now += timedelta(hours=1)
+    await rig.scan()
+    [item] = notes_items(rig)
+    assert item["follows"] == "updates:update.home_assistant_core_update@2030.3.1" and not item["needs"]
+    assert "shown on the Core update to 2030.3.1" in item["gist"]
+    checks = Composer(rig.store, Context(), rig.now, UTC)._core_checks("2030.3.1")
+    assert "Checked the 2030.3 breaking changes (needs owner): the option is set" in checks
+    assert "What you need to do: Remove the option from acme_hub" in checks
+    assert Composer(rig.store, Context(), rig.now, UTC)._core_checks("2030.2.9") == ""
+
+
+async def test_a_needs_owner_verdict_without_an_owner_action_is_unknown(tmp_path: Path) -> None:
+    """`needs_owner` names what the admin must do, or it is `unknown` (normal unknown handling: checked again, and
+    it asks only as it would without a verdict)."""
+    rig = Rig(tmp_path)
+    await rig.scan()
+    removal = next(f for f in by_signal(rig, "notes") if f.removal == "2030.6")
+    for action in (None, "", "No action needed", "n/a"):
+        parsed = maintenance.parse_plans(answer(removal, "needs_owner", "it is used", action), {removal.key})
+        assert parsed[removal.key]["verdict"].verdict == "unknown"
+    rig.answer = answer(removal, "needs_owner", "the integration is used", "nothing")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    found = maintenance.verdict_of(rig.store, removal)
+    assert found is not None and found.verdict == "unknown" and not found.settled
+    assert not rig.items()[removal.title()]["needs"]
+    # An older stored `needs_owner` without an owner action reads as `unknown` too (it is checked again).
+    rig.store.kv_set(verdicts.KEY + maintenance.cause(removal), json.dumps({
+        "verdict": "needs_owner", "reason": "r", "fingerprint": removal.evidence, "at": rig.now.isoformat(),
+        "by": "plan_fix"}), now=rig.now)  # fmt: skip
+    old = maintenance.verdict_of(rig.store, removal)
+    assert old is not None and old.verdict == "unknown" and verdicts.due(old, rig.now)
+
+
+async def test_a_needs_owner_verdict_shows_its_owner_action_in_the_need(tmp_path: Path) -> None:
+    """A repair near its deadline checked `needs_owner`: the need is daemon words around the owner action, fenced
+    and quoted as the agent's words."""
+    rig = Rig(tmp_path)
+    rig.now = ASKS_AT
+    await rig.scan()
+    [repair] = by_signal(rig, "repair")
+    rig.answer = answer(repair, "needs_owner", "the YAML block is still there",
+                        "Move the <acme_sprinkler> block to the UI")  # fmt: skip
+    rig.now += timedelta(days=1, minutes=1)
+    await rig.scan()
+    item = rig.items()["acme_sprinkler: deprecated, removed in 2030.4"]
+    assert item["needs"] and item["need"]["kind"] == "ack"
+    assert 'The agent says you need to: "Move the \u2039acme_sprinkler\u203a block to the UI"' in item["need"]["text"]
+    assert "the YAML block is still there" in item["agent"]["text"]
 
 
 async def test_a_failed_check_asks_as_before(tmp_path: Path) -> None:
@@ -1347,6 +1412,45 @@ async def test_a_failed_check_asks_as_before(tmp_path: Path) -> None:
     await rig.scan()
     quiet = rig.items()[near["title"]]
     assert quiet["state"] == "proposed" and not quiet["needs"] and "still lists the repair" in quiet["gist"]
+
+
+async def test_a_capped_check_names_the_cap_and_retries_by_itself(tmp_path: Path) -> None:
+    """The scan's own check refused by its run cap: the line names the cap and the next try, never "Plan a fix",
+    "failed" or an invitation to retry; the Core minor stays out of Needs you, and the next day's scan retries."""
+    rig = live_rig(tmp_path)
+    rig.run = RunResult(status="run_cap_reached", error="run_cap_reached:maintenance_plan")
+    await rig.scan()
+    [minor] = by_signal(rig, "notes")
+    [item] = notes_items(rig)
+    gist = item["gist"]
+    assert "daily allowance" in gist and "next try" in gist and not item["needs"]
+    assert not any(w in gist for w in ("Plan a fix", "failed", "retry when you like", "Sorry"))
+    assert [a["id"] for a in item["actions"]].count("plan_fix") == 1
+    asked = len(rig.prompts)
+    # The cap reset: the check runs again by itself and its verdict replaces the line.
+    rig.run = None
+    rig.answer = answer(minor, "not_affected", "nothing here uses it")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    assert any(minor.key in p for p in rig.prompts[asked:])
+    [after] = notes_items(rig)
+    assert after["state"] == "done" and "daily allowance" not in after["gist"]
+
+
+async def test_a_check_that_could_not_run_says_the_real_reason(tmp_path: Path) -> None:
+    """AI off and a failed run read as their own cause and a retry by itself, without inviting the admin to act."""
+    rig = live_rig(tmp_path)
+    rig.run = RunResult(status="ai_disabled")
+    await rig.scan()
+    [off] = notes_items(rig)
+    assert "AI is off" in off["gist"] and "next try" in off["gist"]
+    rig.run = RunResult(status="error", error="boom")
+    rig.now += timedelta(days=1)
+    await rig.scan()
+    [broken] = notes_items(rig)
+    assert "failed and will run again by itself" in broken["gist"] and "next try" in broken["gist"]
+    assert not any(w in broken["gist"] for w in ("Plan a fix", "retry when you like", "Sorry", "Your message"))
+    assert not broken["needs"]
 
 
 async def test_a_verdict_never_closes_a_critical_or_access_item(tmp_path: Path) -> None:
@@ -1372,50 +1476,40 @@ async def test_a_verdict_never_closes_a_critical_or_access_item(tmp_path: Path) 
     assert verdicts.guarded(key="core:down") and verdicts.guarded(key="custom:acme_weather")
 
 
-async def test_findings_an_earlier_version_raised_resolve_on_the_first_scan(tmp_path: Path) -> None:
-    """0.22 stored a finding for every breaking change of a newer release, with that release as an invented
-    deadline, also for integrations that are not configured (only loaded, or not at all). The first 0.23.0 scan
-    resolves each with its reason, also when the release posts cannot be read, and withdraws their pushes. A real
-    removal 0.22 found (a farewell item of a configured integration) keeps asking under its key."""
+async def test_a_stored_finding_whose_integration_is_not_configured_resolves_also_offline(tmp_path: Path) -> None:
+    """A stored release-notes finding is re-checked against M4a at every scan from what it stored: one whose
+    integration is not configured here (only loaded, or not at all) resolves with that reason, also when the
+    release posts cannot be read, and its push is withdrawn. A removal of a configured integration keeps asking."""
     rig = live_rig(tmp_path)
-    legacy = []
-    for n, domain in enumerate(("acme_cloudcam", "acme_doorbell", "climate", "group", "event", "acme_hub")):
-        legacy.append(Finding(key=f"{n:016x}", variant="deprecation", signal="notes", what="changes in 2030.3",
-                              domain=domain, removal="2030.3", affected=[f"integration {domain}"],
-                              sources=["src"], quote=f"{domain}: something changes"))  # fmt: skip
+    stale = []
+    for n, domain in enumerate(("acme_cloudcam", "acme_doorbell", "climate", "group", "event")):
+        stale.append(Finding(key=f"{n:016x}", variant="deprecation", signal="notes", what="removed in 2030.3",
+                             domain=domain, removal="2030.3", affected=[f"integration {domain}"], sources=["src"],
+                             quote=f"{domain}: something is removed", named_removal=True))  # fmt: skip
     real = Finding(key="00000000000000ff", variant="deprecation", signal="notes", what="removed in 2030.3",
                    domain="acme_hub", removal="2030.3", affected=["integration acme_hub"], sources=["src"],
-                   quote="Acme Hub: Acme Hub was removed: the vendor shut down its cloud.")  # fmt: skip
-    # As 0.22 stored them: without the `named_removal` field.
-    stored = [{k: v for k, v in f.to_json().items() if k != "named_removal"} for f in [*legacy, real]]
+                   quote="Acme Hub: Acme Hub was removed: the vendor shut down its cloud.",
+                   named_removal=True)  # fmt: skip
     with rig.store.atomic():
-        rig.store.kv_set(maintenance.FINDINGS_KEY, json.dumps(stored), now=rig.now)
+        rig.store.kv_set(maintenance.FINDINGS_KEY, json.dumps([f.to_json() for f in [*stale, real]]), now=rig.now)
         rig.store.kv_set(maintenance.META_KEY, json.dumps({"at": rig.now.isoformat(), "installed": INSTALLED}),
                          now=rig.now)  # fmt: skip
-    # Under the 0.23.0 rules none of them asks any more (no named removal: no deadline), but the real removal...
-    kept = rig.store.item_by_key(f"maint:{real.key}")
-    assert kept is not None and kept["needs"] and rig.store.needs_count() == 1
-    # ...but 0.22 had put each in Needs you and pushed it: as the store holds them at the upgrade.
-    asking = [r for r in rig.store.items_all() if r["kind"] == "maintenance" and r["key"] != kept["key"]]
+    asking = [r for r in rig.store.items_all() if r["kind"] == "maintenance" and r["needs"]]
+    assert len(asking) == len(stale) + 1
     for record in asking:
-        need = {"kind": "ack", "text": "x", "primary": {"id": "ack", "label": "OK"}, "secondary": [],
-                "expires_at": None}  # fmt: skip
-        rig.store.put_item(record | {"state": "waiting", "need": need, "needs_since": rig.now.isoformat(),
-                                     "resolved_at": None, "push": {"key": "waiting:ack:ack", "at": rig.now.isoformat(),
-                                                                   "tag": record["id"]}})  # fmt: skip
-    assert rig.store.needs_count() == len(legacy) + 1
-    # The first scan after the upgrade (here offline: the release posts cannot be read).
+        rig.store.put_item(record | {"push": {"key": "waiting:ack:ack", "at": rig.now.isoformat(),
+                                              "tag": record["id"]}})  # fmt: skip
+    # The next scan (here offline: the release posts cannot be read).
     rig.offline = True
     rig.now += timedelta(hours=1)
     await rig.scan()
-    gone = {r["key"]: r for r in rig.store.items_all() if r["key"] in {f"maint:{f.key}" for f in legacy}}
+    gone = {r["key"]: r for r in rig.store.items_all() if r["key"] in {f"maint:{f.key}" for f in stale}}
     assert all(not r["needs"] and r["state"] == "done" for r in gone.values())
     reasons = {r["key"].removeprefix("maint:"): r["gist"] for r in gone.values()}
-    assert reasons[legacy[0].key] == "resolved: acme_cloudcam is not configured here"
-    assert reasons[legacy[2].key] == "resolved: climate is not configured here"
-    assert reasons[legacy[5].key].startswith("resolved: re-checked under the 0.23.0 rules: no removal is named")
+    assert reasons[stale[0].key] == "resolved: acme_cloudcam is not configured here"
+    assert reasons[stale[2].key] == "resolved: climate is not configured here"
     await rig.deliver()
-    assert sorted(rig.cleared) == sorted(r["id"] for r in asking)
+    assert sorted(rig.cleared) == sorted(r["id"] for r in asking if r["key"] != f"maint:{real.key}")
     still = rig.store.item_by_key(f"maint:{real.key}")
     assert still is not None and still["needs"] and rig.store.needs_count() == 1
 
@@ -1445,7 +1539,7 @@ def test_the_check_gets_what_decides_each_note() -> None:
     from opsd.runner import MAINTENANCE_PLAN
 
     assert {"ha.entities", "ha.entries", "ha.repairs", "ha.core_compare"} <= MAINTENANCE_PLAN.capabilities
-    assert not {"integration.reload", "baseline.ack", "change.propose"} & MAINTENANCE_PLAN.capabilities
+    assert not {"integration.reload", "notify.admin", "change.propose"} & MAINTENANCE_PLAN.capabilities
     post = parse_post(UNRELEASED, "src") | {"version": "2030.3", "url": "src"}
     [minor] = maintenance.from_notes([post], live_inventory(), "2030.2.1")
     prompt = maintenance.build_plan_prompt([minor], git=True)

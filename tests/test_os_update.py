@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from opsd import selfguard
+from opsd.approvals import ApprovalError
 from opsd.capabilities import CAPABILITIES, Args
 from opsd.policy import Bump, Decision, Tier
 from opsd.redact import Redactor
@@ -52,8 +53,7 @@ def os_rig(tmp_path: Path) -> Any:
 
 
 async def approved_night(rig: Rig) -> str:
-    approval, outcome = await approve(rig, OS)
-    assert outcome == "approved"
+    approval = await approve(rig, OS)
     rig.now += timedelta(days=1)
     return approval
 
@@ -259,7 +259,7 @@ def failed_os_job(rig: Rig) -> tuple[int, str]:
 def rig_point() -> Any:
     from opsd.updiff import HealthPoint
 
-    return HealthPoint(at="t", core_state="running", core_version="2026.10.3", api_up=True,
+    return HealthPoint(at="t", api_up=True,
                        custom={"acme_solar": {"entities": 3, "unavailable": 0, "entries_failed": 0}},
                        watched={WATCHED_ENTITIES[0]: "locked", WATCHED_ENTITIES[1]: "locked",
                                 WATCHED_ENTITIES[2]: "disarmed"})  # fmt: skip
@@ -332,16 +332,13 @@ def test_os_phase_reads_the_supervisor_as_it_reports() -> None:
     assert os_phase(st(pending="17.4", reboot_required=True), job) == "pending"
     # A Core older than core#177155: the Supervisor reports the pending version as `version` too.
     assert os_phase(st(version="17.4", pending="17.4"), job) == "pending"
-    # Supervisor 2026.07.0 only (no version_pending yet): the issue and the other slot show it.
-    assert os_phase(st(reboot_required=True, staged=("17.4",)), job) == "pending"
-    assert os_phase(st(staged=("17.4",)), job) == "previous"
     assert os_phase(st(version="17.4"), job) == "active"
     assert os_phase(st(), job) == "previous"
     assert os_phase(st(version="17.5"), job) == "other"
     info = {"version": "17.3", "version_pending": "17.4", "boot": "B",
             "boot_slots": {"A": {"version": "17.4"}, "B": {"version": "17.3"}}}  # fmt: skip
     read = OsState.read(info, {"boot_timestamp": 5}, {"issues": [{"type": "reboot_required"}]})
-    assert read.pending == "17.4" and read.staged == ("17.4",) and read.reboot_required and read.boot_timestamp == 5
+    assert read.pending == "17.4" and read.reboot_required and read.boot_timestamp == 5
 
 
 def test_os_log_lines_keep_only_the_os_host_and_reboot_lines() -> None:
@@ -366,31 +363,30 @@ def test_os_log_lines_keep_only_the_os_host_and_reboot_lines() -> None:
 async def test_an_approval_for_an_installed_pending_os_update_says_why_it_is_not_needed(os_rig: Rig) -> None:
     rig = os_rig
     run, items = await latest_plan(rig)
-    found = rig.approvals.request(items[OS], plan_run=run, user=ADMIN, when="window")
     # Meanwhile 17.4 was installed; Core's update entity no longer offers it.
     await rig.ops.update_os("17.4")
     rig.ops.entities[OS]["state"] = "off"
-    assert await rig.manager.confirm_approval(found["id"], ADMIN) == "void"
+    with pytest.raises(ApprovalError, match="no longer offers this update"):
+        await rig.manager.approve(items[OS], plan_run=run, user=ADMIN, when="window")
     title, detail, needs_admin = rig.notes[-1]
     assert title == "Approval not needed: Home Assistant Operating System 17.3 → 17.4"
     # Said in the entry; whether it needs the admin is the item's business, not the note's.
     assert "already installed and waits for a reboot" in detail and not needs_admin
     assert "void" not in title and "@" not in title
-    assert state(rig, found["id"]) == "void"
-    assert "no longer offers this update" in str(rig.store.approval(found["id"])["detail"])  # type: ignore[index]
+    assert rig.store.approvals(states=("approved",)) == []
 
 
-async def test_other_void_and_approved_notes_are_plain(os_rig: Rig) -> None:
+async def test_other_refused_and_approved_notes_are_plain(os_rig: Rig) -> None:
     rig = os_rig
     run, items = await latest_plan(rig)
-    found = rig.approvals.request(items[OS], plan_run=run, user=ADMIN, when="window")
     rig.ops.entities[OS] = entity("17.3", "17.5", 27, "Home Assistant Operating System")
-    assert await rig.manager.confirm_approval(found["id"], ADMIN) == "void"
+    with pytest.raises(ApprovalError):
+        await rig.manager.approve(items[OS], plan_run=run, user=ADMIN, when="window")
     title, detail, _ = rig.notes[-1]
     assert title.startswith("Approval not used:") and detail == "Home Assistant now offers 17.3 → 17.5 instead."
     rig.ops.entities[OS] = entity("17.3", "17.4", 27, "Home Assistant Operating System")
-    _, outcome = await approve(rig, OS)
-    assert outcome == "approved"
+    approval = await approve(rig, OS)
+    assert state(rig, approval) == "approved"
     title, detail, needs_admin = rig.notes[-1]
     assert title == "Update approved: Home Assistant Operating System 17.3 → 17.4"
     assert detail == "It installs at 04:00." and not needs_admin
@@ -527,7 +523,7 @@ async def test_only_the_executor_scope_reaches_the_reboot(os_rig: Rig, monkeypat
 # ------------------------------------------------- adversarial checks of the OS update flow
 
 
-async def test_review_1_a_silent_night_does_not_swallow_a_later_needs_you_push(os_rig: Rig) -> None:
+async def test_a_silent_night_does_not_swallow_a_later_needs_you_push(os_rig: Rig) -> None:
     """The summary never pushes; each job that needs the admin is an item, and each one pushes."""
     rig = os_rig
     # Two runs that each leave the admin something to do push twice: a later one is never swallowed.
@@ -536,8 +532,7 @@ async def test_review_1_a_silent_night_does_not_swallow_a_later_needs_you_push(o
     await rig.manager.run_window()
     item = rig.item(OS, "17.4")
     assert item["state"] == "waiting" and [x.tag for x in await rig.flush() if x.tag == item["id"]] == [item["id"]]
-    _, outcome = await approve(rig, WEATHER, when="now")
-    assert outcome == "now"
+    await approve(rig, WEATHER, when="now")
     before = len(rig.sent)
     rig.ops.fail.add(WEATHER)
     await rig.manager.run_window("approved")
@@ -548,7 +543,7 @@ async def test_review_1_a_silent_night_does_not_swallow_a_later_needs_you_push(o
     assert [x.tag for x in later] == [acme_weather["id"]]
 
 
-async def test_review_2_an_approved_update_skipped_by_the_precheck_tells_the_admin(os_rig: Rig) -> None:
+async def test_an_approved_update_skipped_by_the_precheck_tells_the_admin(os_rig: Rig) -> None:
     rig = os_rig
     approval = await approved_night(rig)
     real_backup = rig.ops.create_backup
@@ -572,7 +567,7 @@ async def test_review_2_an_approved_update_skipped_by_the_precheck_tells_the_adm
     assert rig.ops.installs() == []
 
 
-async def test_review_4_the_window_is_checked_again_right_before_the_reboot(os_rig: Rig) -> None:
+async def test_the_window_is_checked_again_right_before_the_reboot(os_rig: Rig) -> None:
     rig = os_rig
     await approved_night(rig)
     real_install, real_log, real_jobs = rig.ops.update_os, rig.ops.os_log, rig.ops.jobs
@@ -601,7 +596,7 @@ async def test_review_4_the_window_is_checked_again_right_before_the_reboot(os_r
     assert rig.ops.reboots == 0
 
 
-async def test_review_5_no_reboot_without_a_readable_boot_time(os_rig: Rig) -> None:
+async def test_no_reboot_without_a_readable_boot_time(os_rig: Rig) -> None:
     rig = os_rig
     await approved_night(rig)
 
@@ -618,7 +613,7 @@ async def test_review_5_no_reboot_without_a_readable_boot_time(os_rig: Rig) -> N
     assert "the host needs a reboot" in push.body
 
 
-async def test_review_6_already_on_the_target_verifies_without_a_reboot_or_a_push(os_rig: Rig) -> None:
+async def test_already_on_the_target_verifies_without_a_reboot_or_a_push(os_rig: Rig) -> None:
     rig = os_rig
     approval = await approved_night(rig)
     real_log = rig.ops.os_log
@@ -637,10 +632,9 @@ async def test_review_6_already_on_the_target_verifies_without_a_reboot_or_a_pus
     assert outcome_of(rig, approval).startswith("used:succeeded:")
 
 
-async def test_review_7_only_the_nightly_plan_may_void_an_approval(os_rig: Rig) -> None:
+async def test_only_the_nightly_plan_may_void_an_approval(os_rig: Rig) -> None:
     rig = os_rig
-    approval, outcome = await approve(rig, OS)
-    assert outcome == "approved"
+    approval = await approve(rig, OS)
     # After a reboot HACS and the Supervisor's update entities may not be loaded yet.
     gone = rig.ops.entities.pop(OS)
     assert (await rig.manager.refresh())["result"] == "reported"
@@ -657,9 +651,9 @@ async def test_review_7_only_the_nightly_plan_may_void_an_approval(os_rig: Rig) 
     assert gone["attributes"]["latest_version"] == "17.4"
 
 
-async def test_review_7_a_missing_update_at_the_nightly_plan_is_voided_with_the_reason(os_rig: Rig) -> None:
+async def test_a_missing_update_at_the_nightly_plan_is_voided_with_the_reason(os_rig: Rig) -> None:
     rig = os_rig
-    approval, _ = await approve(rig, OS)
+    approval = await approve(rig, OS)
     rig.ops.entities.pop(OS)
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
@@ -680,8 +674,8 @@ async def test_an_approved_reboot_runs_last_in_a_run_of_its_own(os_rig: Rig) -> 
     job = rig.jobs()[OS]
     night = int(rig.run()["id"])
     assert job.state == "reboot_pending" and rig.store.update_run(night)["state"] == "done"  # type: ignore[index]
-    found = rig.manager.request_reboot(job.id, user=ADMIN)
-    assert await rig.manager.confirm_reboot(found["id"], ADMIN) == "approved"
+    found = rig.manager.approve_reboot(job.id, user=ADMIN)
+    assert found["state"] == "approved"
     # The next night a patch is due too: it installs first, then the reboot.
     rig.ops.reboot_ignored = False
     rig.ops.entities[BROKER] = entity("4.2.1", "4.2.2", 29, "Example Broker")

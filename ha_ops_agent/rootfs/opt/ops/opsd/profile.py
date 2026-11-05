@@ -1,31 +1,8 @@
-"""The house profile: what ties the agent to one house, in one file.
+"""The house profile `ops/profile.yaml`: what ties the agent to one house (spec profile.md P1-P16).
 
-`ops/profile.yaml` in the Home Assistant config (not secret; tracked in git where the config is) is read
-once at start (`Options.load`). Without it the agent is generic: no fragile pieces, no watched entities,
-no reloadable integrations, no overlays, git proposals off, no house documents or notes. The add-on
-options apply either way.
-
-The schema is strict. An unknown key, a wrong type or a value outside its pattern refuses the whole file:
-the agent then runs with the generic profile and fails closed like invalid add-on options (no act mode,
-no automatic updates, no AI) until the file is fixed. The reason shows on the System sheet and as a
-health item.
-
-No value can weaken an invariant. The profile adds caution or names house things, nothing else:
-
-- a fragile piece's tier is approve, pinned or never (never auto), so it can only hold an update back;
-- `reload.domains` may not name a domain on the never-reload list in code
-  (`policy.NEVER_RELOAD_DOMAINS`), and `reload.deny` only adds to that list;
-- document paths are plain relative `.md` files or top-level directories: never hidden, secrets, the
-  agent's add-on, git internals or `ops/` (`guard.valid_read_entry`);
-- proposal kinds are a subset of the three the config check knows, and the facts document is
-  `docs/<name>.md` (`changepaths.ProposalRules`);
-- the house notes reach a model only as fenced data;
-- `self_slug` only names the panel URL in pushes; the self-guard protects every `*_ha_ops_agent` slug.
-
-`overlays` switches on optional modules in `opsd.house` (vacuum rooms, local patch checks,
-known-false-positive rules). This repository ships none of them; a build that adds them under
-`opsd/house/` can enable them here. The core imports them only when the profile lists them, and a
-profile naming an overlay the build does not ship is refused.
+Read once at start, strictly: any unknown key, wrong type or value outside its pattern refuses the whole file and
+the agent fails closed on the generic profile. No value can weaken an invariant; the profile only adds caution or
+names house things, and `overlays` switches on optional `opsd.house` modules the build ships.
 """
 
 import importlib.util
@@ -37,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from opsd import safefs
 from opsd.changepaths import FACTS_RE, KINDS, ProposalRules
 from opsd.configcheck import ConfigRefused
 from opsd.configcheck import parse as parse_yaml
@@ -65,8 +43,6 @@ _LINE = re.compile(r"[^\x00-\x1f\x7f]{1,300}")
 _PERSON = re.compile(r"[^\x00-\x1f\x7f<>]{1,64}")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}")
 _NOTES_BAD = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
-# A storage dashboard's url_path, as Home Assistant requires it (lower case, with a hyphen).
-DASHBOARD_PATH = re.compile(r"[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+")
 
 
 class ProfileError(ValueError):
@@ -145,12 +121,6 @@ class DocsProfile:
 
 
 @dataclass(frozen=True, slots=True)
-class DashboardsProfile:
-    # Storage dashboards that something else writes (a generator, another tool): the agent never edits them.
-    generated: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True, slots=True)
 class HouseProfile:
     """The parsed profile; the defaults are the generic agent (no profile file)."""
 
@@ -167,7 +137,6 @@ class HouseProfile:
     rebase: RebaseProfile = field(default_factory=RebaseProfile)
     git: GitProfile = field(default_factory=GitProfile)
     docs: DocsProfile = field(default_factory=DocsProfile)
-    dashboards: DashboardsProfile = field(default_factory=DashboardsProfile)
 
     def overlay(self, name: str) -> bool:
         return name in self.overlays
@@ -297,7 +266,7 @@ def overlay_installed(name: str) -> bool:
 def parse(data: Any) -> HouseProfile:
     """The profile from parsed YAML. Raises ProfileError on anything outside the schema."""
     top = _mapping(data, "the profile", ("notify_service", "self_slug", "overlays", "house_notes", "health",
-                                         "updates", "reload", "rebase", "git", "docs", "dashboards"))  # fmt: skip
+                                         "updates", "reload", "rebase", "git", "docs"))  # fmt: skip
     overlays = _texts(top.get("overlays"), "overlays", re.compile("|".join(OVERLAYS)), "one of " + ", ".join(OVERLAYS))
     missing = [name for name in overlays if not overlay_installed(name)]
     if missing:
@@ -364,10 +333,6 @@ def parse(data: Any) -> HouseProfile:
         readable=readable,
     )
 
-    dashboards_raw = _mapping(top.get("dashboards"), "dashboards", ("generated",))
-    generated = _texts(dashboards_raw.get("generated"), "dashboards.generated", DASHBOARD_PATH,
-                       "dashboard url paths (lower case, with a hyphen)")  # fmt: skip
-
     notes = top.get("house_notes", "")
     if not isinstance(notes, str) or len(notes) > MAX_NOTES or _NOTES_BAD.search(notes):
         raise ProfileError(f"house_notes must be text of at most {MAX_NOTES} characters (no control characters)")
@@ -385,7 +350,6 @@ def parse(data: Any) -> HouseProfile:
         rebase=RebaseProfile(deny=rebase_deny),
         git=git,
         docs=docs,
-        dashboards=DashboardsProfile(generated=frozenset(generated)),
     )  # fmt: skip
 
 
@@ -407,20 +371,15 @@ def _read(root: Path) -> bytes | None:
     if not stat.S_ISDIR(info.st_mode):
         raise ProfileError(f"{directory.name}/ is not a plain directory")
     try:
-        fd = os.open(root / PROFILE_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        return safefs.read_regular(root / PROFILE_PATH, MAX_BYTES)
     except FileNotFoundError:
         return None
+    except safefs.NotRegular as err:
+        raise ProfileError("is not a regular file") from err
+    except safefs.TooLarge as err:
+        raise ProfileError(f"is larger than {MAX_BYTES // 1024} KB") from err
     except OSError as err:
         raise ProfileError(f"cannot be read ({type(err).__name__})") from err
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ProfileError("is not a regular file")
-        data = os.read(fd, MAX_BYTES + 1)
-    finally:
-        os.close(fd)
-    if len(data) > MAX_BYTES:
-        raise ProfileError(f"is larger than {MAX_BYTES // 1024} KB")
-    return data
 
 
 def load(root: Path) -> tuple[HouseProfile, tuple[str, ...]]:

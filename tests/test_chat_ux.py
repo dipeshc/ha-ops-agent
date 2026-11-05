@@ -19,7 +19,7 @@ from opsd.policy import Origin
 from opsd.runctx import Principal, RunContext
 from opsd.runner import BLOCKED_STATUSES, SUMMARY, Profile, RunOutcome
 from opsd.store import RETRY_KEY, Store
-from tests.conftest import FakeHA, conversation
+from tests.conftest import FakeHA, conversation, system_task
 from tests.test_assistant import ADMIN, CHAT
 from tests.test_daemon import Harness
 
@@ -79,7 +79,7 @@ async def say(a: Assistant, thread: str, text: str, client_id: str | None = None
 
 
 def fire(store: Store, turn_id: int) -> Any:
-    task = store.system_task(f"{RETRY_KEY}{turn_id}")
+    task = system_task(store, f"{RETRY_KEY}{turn_id}")
     assert task is not None and task.state == "pending" and task.next_fire_at is not None
     [claimed] = store.claim_due(datetime.fromisoformat(task.next_fire_at) + timedelta(seconds=1))
     return claimed
@@ -100,7 +100,7 @@ async def test_every_refusal_is_a_card_never_silence(h: Harness, status: str) ->
     assert turn is not None and turn.status == "refused" and turn.text == "is the lock ok?"
     assert card is not None and card.role == "system" and card.status == status
     assert card.meta["reason"] == status and card.meta["auto_retry"] is (status in AUTO_RETRY)
-    assert (store.system_task(f"{RETRY_KEY}{turn_id}") is not None) is (status in AUTO_RETRY)
+    assert (system_task(store, f"{RETRY_KEY}{turn_id}") is not None) is (status in AUTO_RETRY)
     if status == "ai_disabled":
         assert card.meta["actions"] == ["turn_on_retry"]
     assert not [p for p in h.pushes() if p["title"].startswith("Agent: Reply")]
@@ -118,13 +118,10 @@ async def test_run_failure_card_and_daily_cap_card(h: Harness) -> None:
     assert card is not None and card.status == "error" and "timeout" in card.text and card.meta["actions"] == ["retry"]
     push = h.pushes()[-1]
     assert push["title"] == "Agent: Reply failed" and push["data"]["url"].endswith(f"/t/{thread.removeprefix('ask:')}")
-    store.bump(a._day(datetime.now(UTC)), "chat_turns")
-    for _ in range(40):
-        store.bump(a._day(datetime.now(UTC)), "chat_turns")
-    calls = len(runs.calls)
+    runs.results = [("run_cap_reached", "run_cap_reached:chat", None)]
     capped = await say(a, thread, "one more")
     card = store.card_for(capped)
-    assert len(runs.calls) == calls and card is not None and card.status == "chat_cap"
+    assert card is not None and card.status == "run_cap_reached" and "chat runs" in card.text
     assert store.get_turn(capped) is not None
 
 
@@ -236,7 +233,7 @@ async def test_manual_and_automatic_retry_cannot_both_run(h: Harness) -> None:
     claimed = fire(store, turn_id)
     assert a.retry_turn(thread, turn_id) == "queued"
     assert a.retry_turn(thread, turn_id) == "not_retryable"
-    task = store.system_task(f"{RETRY_KEY}{turn_id}")
+    task = system_task(store, f"{RETRY_KEY}{turn_id}")
     assert task is not None and task.state == "running"  # claimed before the manual retry; the CAS decides
     await a.on_retry_fired(claimed)
     await a.drain()
@@ -252,7 +249,7 @@ async def test_retry_backs_off_updates_one_card_then_gives_up(h: Harness) -> Non
     turn_id = await say(a, thread, "x")
     card_id = store.card_for(turn_id).id  # type: ignore[union-attr]
     delays = []
-    while (task := store.system_task(f"{RETRY_KEY}{turn_id}")) is not None and task.state == "pending":
+    while (task := system_task(store, f"{RETRY_KEY}{turn_id}")) is not None and task.state == "pending":
         delays.append(datetime.fromisoformat(task.next_fire_at or "") - datetime.now(UTC))
         await a.on_retry_fired(fire(store, turn_id))
         await a.drain()
@@ -270,9 +267,9 @@ async def test_the_admin_can_turn_automatic_retry_off_and_on(h: Harness) -> None
     assert thread is not None
     runs.results = [("account_busy", "account_busy:five_hour", None)]
     turn_id = await say(a, thread, "x")
-    stale = store.system_task(f"{RETRY_KEY}{turn_id}")
+    stale = system_task(store, f"{RETRY_KEY}{turn_id}")
     assert a.set_auto_retry(thread, turn_id, on=False) == "ok"
-    task = store.system_task(f"{RETRY_KEY}{turn_id}")
+    task = system_task(store, f"{RETRY_KEY}{turn_id}")
     card = store.card_for(turn_id)
     assert task is not None and task.state == "cancelled"
     assert card is not None and not card.meta["auto_retry"] and card.meta["actions"] == ["retry", "enable_auto"]
@@ -281,7 +278,7 @@ async def test_the_admin_can_turn_automatic_retry_off_and_on(h: Harness) -> None
     await a.drain()
     assert len(runs.calls) == 1
     assert a.set_auto_retry(thread, turn_id, on=True) == "ok"
-    assert store.system_task(f"{RETRY_KEY}{turn_id}").state == "pending"  # type: ignore[union-attr]
+    assert system_task(store, f"{RETRY_KEY}{turn_id}").state == "pending"  # type: ignore[union-attr]
     # Toggling never extends the original 24-hour horizon.
     store.update_turn_meta(turn_id, {"first_refused_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat()})
     assert a.set_auto_retry(thread, turn_id, on=False) == "ok"

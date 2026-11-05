@@ -1,33 +1,23 @@
 """Verdicts: the agent's checked conclusion on one cause, before (or instead of) asking the admin.
 
-A verdict answers "does this really need the admin here?" for one cause: a maintenance finding
-(`maint:<finding>`), a health item (`health:<key>`) or the release notes that hold a Core update into a
-minor (`core:<minor>`). It is produced by the agent's own investigation (the maintenance plan run, Plan a
-fix, triage, the isolated update review) and stored here, in `kv` `verdict:<cause>`, with the fingerprint
-of the evidence it was made for. A changed fingerprint is a new question: the old verdict is not read.
-
-- `not_affected`: checked, nothing here is affected; the item may close (within the guards, `closes`).
-- `fixable`: the agent can propose the fix (a proposal follows the usual path).
-- `needs_owner`: only the admin can do or decide it; the item asks, with the agent's reason.
-- `unknown`: the agent could not tell; the item behaves as without a verdict.
-
-Fail safe: no verdict, `unknown`, a run that failed or gave no answer twice: everything behaves as
-before verdicts existed. The model's reason is data shown under The agent says, never a title, a need or
-a push.
+A verdict (`not_affected`, `fixed`, `fixable`, `needs_owner`, `unknown`) is kept per cause (`maint:<finding>`,
+`health:<key>`, `core:<minor>`) in kv `verdict:<cause>` with the fingerprint of the evidence it was made for; a
+changed fingerprint is a new question. Fail safe: no usable verdict behaves as before verdicts. Spec maintenance.md
+M13d, health.md H16a; the reason is model text, shown as data only.
 """
 
 import hashlib
 import json
 import logging
-import sqlite3
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from opsd.access import PROTECTED_DOMAINS, named_like_access
 from opsd.conversation import clean_text
-from opsd.store import Store, StoreError
+from opsd.store import Store
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +26,14 @@ VERDICTS = ("not_affected", "fixable", "needs_owner", "unknown")
 # A health verdict's word for a problem the agent itself fixed (a reload): it closes like `not_affected`.
 TRIAGE_VERDICTS = ("not_affected", "fixed", "needs_owner")
 REASON_CHARS = 300
+# What the admin must do or decide, for a `needs_owner` verdict (model text: shown fenced, never as daemon words).
+OWNER_ACTION_CHARS = 160
+OWNER_ACTION_MIN = 8
+# An owner action that names nothing to do is none: the verdict is then `unknown`.
+_NO_ACTION = re.compile(
+    r"(?i)^\W*(none|nothing|n/?a|no(thing)?\s+(action|change|fix|changes|fixes)?\s*(is\s+)?"
+    r"(needed|required|to do)?)\W*$"
+)
 EVIDENCE_MAX = 6
 # A check that gave no answer this often behaves as without a verdict (it asks as before).
 MAX_TRIES = 2
@@ -62,6 +60,12 @@ class Verdict:
     tries: int = 0
     # The check could not run (AI off, capped, failed): it asks as before, and is tried again after `RETRY`.
     failed: bool = False
+    # Why the scan's check could not run: the run's status reason (`run_cap_reached`, `ai_disabled`, `usage_limited`,
+    # `error`...) and its detail (the capped profile); the item's line is composed from them when shown.
+    why: str = ""
+    detail: str = ""
+    # For `needs_owner`: what the admin must do or decide (model text, `OWNER_ACTION_CHARS`).
+    owner_action: str = ""
 
     @property
     def settled(self) -> bool:
@@ -81,8 +85,25 @@ class Verdict:
         return asdict(self)
 
 
-def answer(raw: Any, *, allowed: Iterable[str] = VERDICTS) -> tuple[str, str, list[str]] | None:
-    """A model's verdict (`{verdict, reason, evidence}`), strictly shaped and cleaned; None when there is none."""
+class Answer(NamedTuple):
+    verdict: str
+    reason: str
+    evidence: list[str]
+    owner_action: str = ""
+
+
+def owner_action_of(raw: Any) -> str:
+    """A usable owner action (cleaned, capped), or "" when it names nothing the admin must do."""
+    text = " ".join(clean_text(raw, OWNER_ACTION_CHARS * 2).split()) if isinstance(raw, str) else ""
+    if len(text) < OWNER_ACTION_MIN or _NO_ACTION.match(text) or not re.search(r"[A-Za-z]{3}", text):
+        return ""
+    return text[:OWNER_ACTION_CHARS]
+
+
+def answer(raw: Any, *, allowed: Iterable[str] = VERDICTS) -> Answer | None:
+    """A model's verdict (`{verdict, reason, evidence, owner_action}`), strictly shaped and cleaned; None when there
+    is none. A `needs_owner` without a usable owner action is `unknown` (spec maintenance.md M13d), or None where
+    `unknown` is not allowed (triage: no verdict)."""
     if not isinstance(raw, Mapping):
         return None
     verdict = raw.get("verdict")
@@ -95,24 +116,32 @@ def answer(raw: Any, *, allowed: Iterable[str] = VERDICTS) -> tuple[str, str, li
     if not reason and verdict != "unknown":
         # A conclusion without a reason is no conclusion.
         return None
-    return str(verdict), reason, evidence
+    action = owner_action_of(raw.get("owner_action")) if verdict == "needs_owner" else ""
+    if verdict == "needs_owner" and not action:
+        # Nothing named for the admin to do: it never asks on its own.
+        if "unknown" not in tuple(allowed):
+            return None
+        verdict = "unknown"
+    return Answer(str(verdict), reason, evidence, action)
 
 
 def load(store: Store, cause: str) -> Verdict | None:
-    try:
-        raw = json.loads(store.kv_get(KEY + cause) or "null")
-    except (StoreError, sqlite3.Error, ValueError) as err:
-        _LOGGER.info("verdict unreadable", extra={"cause": cause[:80], "error": str(err)[:120]})
-        return None
-    if not isinstance(raw, dict) or raw.get("verdict") not in (*VERDICTS, "fixed"):
+    raw = store.kv_json(KEY + cause)
+    if raw is None or raw.get("verdict") not in (*VERDICTS, "fixed"):
         return None
     try:
-        return Verdict(verdict=str(raw["verdict"]), reason=str(raw.get("reason") or ""),
+        found = Verdict(verdict=str(raw["verdict"]), reason=str(raw.get("reason") or ""),
                        fingerprint=str(raw.get("fingerprint") or ""), at=str(raw.get("at") or ""),
                        by=str(raw.get("by") or ""), evidence=[str(e) for e in raw.get("evidence") or []][:EVIDENCE_MAX],
-                       tries=int(raw.get("tries") or 0), failed=bool(raw.get("failed")))  # fmt: skip
+                       tries=int(raw.get("tries") or 0), failed=bool(raw.get("failed")),
+                       why=str(raw.get("why") or "")[:40], detail=str(raw.get("detail") or "")[:40],
+                       owner_action=owner_action_of(raw.get("owner_action")))  # fmt: skip
     except TypeError, ValueError:
         return None
+    if found.verdict == "needs_owner" and not found.owner_action:
+        # An older verdict without an owner action (or a damaged one) asks nothing: it is checked again.
+        found.verdict = "unknown"
+    return found
 
 
 def current(store: Store, cause: str, fingerprint: str) -> Verdict | None:
@@ -122,19 +151,24 @@ def current(store: Store, cause: str, fingerprint: str) -> Verdict | None:
 
 
 def record(store: Store, cause: str, *, fingerprint: str, verdict: str, reason: str, by: str, now: datetime,
-           evidence: Iterable[str] = ()) -> Verdict:  # fmt: skip
+           evidence: Iterable[str] = (), owner_action: str = "") -> Verdict:  # fmt: skip
     """Keep a verdict for this cause and fingerprint (a kv row: the items it shows are composed in the same
-    transaction)."""
+    transaction). A `needs_owner` without a usable owner action is kept as `unknown`."""
     if verdict not in (*VERDICTS, "fixed") or by not in BY:
         raise ValueError(f"not a verdict: {verdict} by {by}")
+    action = owner_action_of(owner_action) if verdict == "needs_owner" else ""
+    if verdict == "needs_owner" and not action:
+        verdict = "unknown"
     found = Verdict(verdict=verdict, reason=clean_text(reason, REASON_CHARS), fingerprint=fingerprint,
                     at=now.astimezone(UTC).isoformat(timespec="seconds"), by=by,
-                    evidence=[clean_text(str(e), 120) for e in evidence][:EVIDENCE_MAX])  # fmt: skip
+                    evidence=[clean_text(str(e), 120) for e in evidence][:EVIDENCE_MAX],
+                    owner_action=action)  # fmt: skip
     store.kv_set(KEY + cause, json.dumps(found.to_json()), now=now)
     return found
 
 
-def no_answer(store: Store, cause: str, *, fingerprint: str, by: str, now: datetime, failed: bool) -> Verdict:
+def no_answer(store: Store, cause: str, *, fingerprint: str, by: str, now: datetime, failed: bool, why: str = "",
+              detail: str = "") -> Verdict:  # fmt: skip
     """A check that gave no answer for this cause: counted, so it asks as before once `MAX_TRIES` is reached.
     `failed` (AI off, capped, the run failed): it asks as before at once."""
     earlier = current(store, cause, fingerprint)
@@ -142,7 +176,7 @@ def no_answer(store: Store, cause: str, *, fingerprint: str, by: str, now: datet
         return earlier
     tries = MAX_TRIES if failed else (earlier.tries if earlier is not None else 0) + 1
     found = Verdict(verdict="unknown", reason="", fingerprint=fingerprint, by=by, tries=tries, failed=failed,
-                    at=now.astimezone(UTC).isoformat(timespec="seconds"))  # fmt: skip
+                    why=why, detail=detail, at=now.astimezone(UTC).isoformat(timespec="seconds"))  # fmt: skip
     store.kv_set(KEY + cause, json.dumps(found.to_json()), now=now)
     return found
 
@@ -172,10 +206,6 @@ def reopen(store: Store, cause: str, *, fingerprint: str, now: datetime) -> Verd
     return found
 
 
-def forget(store: Store, cause: str, now: datetime) -> None:
-    store.kv_set(KEY + cause, "", now=now)
-
-
 def health_fingerprint(key: str, summary: str) -> str:
     """A health item's evidence for a verdict: its key and its summary (a count that changes is a new question)."""
     return hashlib.sha256(f"{key}|{summary}".encode()).hexdigest()[:16]
@@ -199,7 +229,7 @@ def guarded(*, severity: str = "warning", key: str = "", domain: str | None = No
 
 
 def closes(verdict: Verdict | None, *, guard: bool, listed: bool = False, deadline: datetime | None = None,
-           now: datetime, deterministic: bool = False) -> str:  # fmt: skip
+           now: datetime) -> str:  # fmt: skip
     """What a verdict may do to its item: `close` (resolved, in History with the reason), `quiet` (Coming up with
     the reason: a repair Home Assistant still lists, or a deadline within `CLOSE_MARGIN` that only model text
     vouches for) or `none` (no closing verdict, or a guarded cause)."""
@@ -207,6 +237,6 @@ def closes(verdict: Verdict | None, *, guard: bool, listed: bool = False, deadli
         return "none"
     if listed:
         return "quiet"
-    if deadline is not None and deadline - now <= CLOSE_MARGIN and not deterministic:
+    if deadline is not None and deadline - now <= CLOSE_MARGIN:
         return "quiet"
     return "close"

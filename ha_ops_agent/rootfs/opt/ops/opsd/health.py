@@ -1,4 +1,4 @@
-"""Deterministic health snapshot: collection plus pure derivation functions."""
+"""The deterministic health snapshot: collection and pure derivation functions (spec health.md H5-H9)."""
 
 import asyncio
 import logging
@@ -10,11 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from opsd import policy
+from opsd import policy, safegit
 from opsd.access import access_kind, acts_on_the_house
 from opsd.config import Options, Paths
 from opsd.fingerprint import fingerprint, normalize
-from opsd.safegit import git_argv, git_env, status_lines
+from opsd.safegit import status_lines
 from opsd.supervisor import ApiError
 
 _LOGGER = logging.getLogger(__name__)
@@ -505,9 +505,7 @@ def git_status(repo: Path) -> dict[str, Any]:
     """Local-only git facts (no network): dirty paths and ahead/behind origin/main."""
 
     def run(*args: str) -> str:
-        return subprocess.run(
-            git_argv(repo, *args), capture_output=True, text=True, timeout=30, check=True, env=git_env()
-        ).stdout
+        return safegit.output(repo, *args, timeout=30).decode(errors="replace")
 
     try:
         # Never `git status`: it can run a filter driver from the repository config (`safegit.status_lines`).
@@ -544,9 +542,11 @@ async def collect(
     release_age: Callable[[str, str], float | None] | None = None,
     seen_age: Callable[[str, str], float | None] | None = None,
     run_config_check: bool = True,
+    classify_updates: bool = True,
     meminfo_path: Path = Path("/proc/meminfo"),
 ) -> Snapshot:
-    """Gather everything; a failing source is recorded in `errors`, never fatal."""
+    """Gather everything; a failing source is recorded in `errors`, never fatal. Without `classify_updates` the
+    pending updates are listed only (no HACS lookups, no release ages)."""
     now = now or datetime.now(UTC)
     snap = Snapshot(taken_at=now.isoformat(timespec="seconds"))
 
@@ -565,7 +565,6 @@ async def collect(
     os_info = await guarded("os_info", {}, api.supervisor("/os/info"))
     snap.core = {
         "version": core_info.get("version"),
-        "state": core_info.get("state"),
         "supervisor_version": sup_info.get("version"),
         "os_version": os_info.get("version"),
         "api_up": False,
@@ -618,47 +617,12 @@ async def collect(
     except OSError as err:
         snap.errors.append(f"meminfo: {err}")
 
-    addon_slugs = _addon_update_entities(states, addons.get("addons", []))
-    core_age: float | None = None
-    policy_core_entity = "update.home_assistant_core_update"
-    core_update = next((s for s in states if s.get("entity_id") == policy_core_entity), None)
-    if core_update and core_release_age and core_update.get("state") == "on":
-        latest = core_update.get("attributes", {}).get("latest_version")
-        if latest:
-            core_age = await guarded("core_release_age", None, asyncio.to_thread(core_release_age, latest))
-    hacs: dict[str, dict[str, Any]] = {}
-    pending = {s.get("entity_id") for s in states if s.get("state") == "on"}
-    for entry in registry:
-        # One small lookup per pending HACS update (the full repository list is megabytes).
-        if entry.get("platform") != "hacs" or entry.get("entity_id") not in pending or not entry.get("unique_id"):
-            continue
-        repo_id = str(entry["unique_id"])
-        raw = await guarded("hacs_repository", None, api.ws("hacs/repository/info", repository_id=repo_id))
-        try:
-            if raw is not None:
-                hacs[repo_id] = hacs_repo(raw)
-        except ValueError as err:
-            snap.errors.append(f"hacs_repository: {err}")
-    # Release ages for everything else: GitHub for HACS repositories, else how long the
-    # agent has seen the version pending (a lower bound). Unknown means WAIT.
-    ages: dict[str, float | None] = {}
-    by_entity = {e.get("entity_id"): e for e in registry}
-    for st in states:
-        entity_id = str(st.get("entity_id", ""))
-        if not entity_id.startswith("update.") or st.get("state") != "on" or entity_id == policy_core_entity:
-            continue
-        latest = str((st.get("attributes") or {}).get("latest_version") or "")
-        repo = hacs.get(str(by_entity.get(entity_id, {}).get("unique_id")), {}).get("full_name")
-        age: float | None = None
-        if release_age is not None and repo and latest:
-            age = await guarded("release_age", None, asyncio.to_thread(release_age, str(repo), latest))
-        if age is None and seen_age is not None and latest:
-            age = seen_age(entity_id, latest)
-        ages[entity_id] = age
-    if core_update is not None and core_age is None and seen_age is not None and core_update.get("state") == "on":
-        latest = str((core_update.get("attributes") or {}).get("latest_version") or "")
-        core_age = seen_age(policy_core_entity, latest) if latest else None
-    snap.updates = derive_updates(states, registry, options, addon_slugs, core_age, hacs_repos=hacs, ages=ages)
+    if not classify_updates:
+        # The daily check only needs what is pending (to tell a stale plan); the update planner classifies.
+        snap.updates = pending_updates(states)
+    else:
+        snap.updates = await _classified_updates(states, registry, addons.get("addons", []), options, api, guarded,
+                                                 core_release_age, release_age, seen_age)  # fmt: skip
 
     if run_config_check and snap.core["api_up"]:
         try:
@@ -707,3 +671,72 @@ def _addon_update_entities(states: Iterable[dict[str, Any]], addons: Iterable[di
         if title and title in by_name:
             mapping[entity_id] = by_name[title]
     return mapping
+
+
+def pending_updates(states: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The pending updates (state `on`), unclassified: enough to tell whether the update plan is stale."""
+    found = []
+    for st in states:
+        entity_id = str(st.get("entity_id", ""))
+        if entity_id.startswith("update.") and st.get("state") == "on":
+            attrs = st.get("attributes") or {}
+            found.append({"entity_id": entity_id, "title": attrs.get("title") or attrs.get("friendly_name"),
+                          "installed": attrs.get("installed_version"),
+                          "latest": attrs.get("latest_version")})  # fmt: skip
+    return sorted(found, key=lambda u: u["entity_id"])
+
+
+async def _classified_updates(  # noqa: PLR0917
+    states: list[dict[str, Any]],
+    registry: list[dict[str, Any]],
+    addons: list[dict[str, Any]],
+    options: Options,
+    api: HealthAPI,
+    guarded: Callable[[str, Any, Awaitable[Any]], Awaitable[Any]],
+    core_release_age: Callable[[str], float | None] | None,
+    release_age: Callable[[str, str], float | None] | None,
+    seen_age: Callable[[str, str], float | None] | None,
+) -> list[dict[str, Any]]:
+    """The pending updates with their policy tier and release ages, for the update planner."""
+    addon_slugs = _addon_update_entities(states, addons)
+    core_age: float | None = None
+    policy_core_entity = "update.home_assistant_core_update"
+    core_update = next((s for s in states if s.get("entity_id") == policy_core_entity), None)
+    if core_update and core_release_age and core_update.get("state") == "on":
+        latest = core_update.get("attributes", {}).get("latest_version")
+        if latest:
+            core_age = await guarded("core_release_age", None, asyncio.to_thread(core_release_age, latest))
+    hacs: dict[str, dict[str, Any]] = {}
+    pending = {s.get("entity_id") for s in states if s.get("state") == "on"}
+    for entry in registry:
+        # One small lookup per pending HACS update (the full repository list is megabytes).
+        if entry.get("platform") != "hacs" or entry.get("entity_id") not in pending or not entry.get("unique_id"):
+            continue
+        repo_id = str(entry["unique_id"])
+        found = await guarded("hacs_repository", None, _hacs_info(api, repo_id))
+        if found is not None:
+            hacs[repo_id] = found
+    # Release ages for everything else: GitHub for HACS repositories, else how long the
+    # agent has seen the version pending (a lower bound). Unknown means WAIT.
+    ages: dict[str, float | None] = {}
+    by_entity = {e.get("entity_id"): e for e in registry}
+    for st in states:
+        entity_id = str(st.get("entity_id", ""))
+        if not entity_id.startswith("update.") or st.get("state") != "on" or entity_id == policy_core_entity:
+            continue
+        latest = str((st.get("attributes") or {}).get("latest_version") or "")
+        repo = hacs.get(str(by_entity.get(entity_id, {}).get("unique_id")), {}).get("full_name")
+        age: float | None = None
+        if release_age is not None and repo and latest:
+            age = await guarded("release_age", None, asyncio.to_thread(release_age, str(repo), latest))
+        if age is None and seen_age is not None and latest:
+            age = seen_age(entity_id, latest)
+        ages[entity_id] = age
+    if core_update is not None and core_age is None and seen_age is not None and core_update.get("state") == "on":
+        latest = str((core_update.get("attributes") or {}).get("latest_version") or "")
+        core_age = seen_age(policy_core_entity, latest) if latest else None
+    return derive_updates(states, registry, options, addon_slugs, core_age, hacs_repos=hacs, ages=ages)
+
+
+async def _hacs_info(api: HealthAPI, repo_id: str) -> dict[str, Any]:
+    return hacs_repo(await api.ws("hacs/repository/info", repository_id=repo_id))

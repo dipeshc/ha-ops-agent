@@ -1,30 +1,9 @@
-"""Rebase a custom-integration fork onto Home Assistant Core: built by the daemon, applied only when approved.
+"""Rebase a custom-integration fork onto Home Assistant Core (spec proposals.md C11-C14, updates.md U26-U33,
+approvals.md A17).
 
-A fork is a custom integration with the domain of a Core integration (`custom_components/<domain>/` shadowing
-`homeassistant/components/<domain>/`). The AI only names the fork, the reason, and which of the fork's own
-changes to keep (`fork.propose`, verb `propose-rebase`); it never supplies file content. The daemon builds
-everything else from two sources it trusts:
-
-1. **Base**: Core's files for the exact installed Core version (`opsd.coresource`: GitHub's contents API and raw
-   file host, each file checked against the git blob SHA the listing gives for that tag).
-2. **The fork's delta**: the Core release the fork was copied from is the newest tag among the installed one and
-   the `.0` releases of the last six months (`coresource.window_tags`) whose files differ least from the fork's.
-   The fork's own changes are the unified-diff hunks from that release to the fork (`fork_hunks`, numbered
-   `<file>#<n>`). Only the hunks the AI keeps are applied onto the base, each by its exact old text plus context,
-   which must occur exactly once (`apply_hunks`); anything else refuses, never guesses.
-
-The result covers the files the fork, the base and the fork's origin all have; every other file of the fork stays
-as it is. It must parse (`ast.parse`), keep the fork's domain in `manifest.json` (which gets `version` set to the
-Core version, as a custom integration needs one), import nothing that neither the base nor the fork imports,
-reference only modules the fork has, add no file, and stay within `MAX_RESULT_BYTES`.
-
-The proposal is a record in the store's key-value table (`PROPOSAL_KEY`) plus the result's bytes under
-`/data/fork-rebase/<id>/new/` (root-only). Its approval (`approvals`, kind `fork_rebase`) binds the proposal,
-the domain, the Core version, the fork's origin, the kept hunks, the SHA-256 of the result's bytes and of the
-fork's current files (`binding`, recomputed from disk by `binding_now`). It is applied only through the update
-pipeline (`updates.UpdateManager`, a job of kind `fork_rebase`): an encrypted backup, the old files snapshotted
-(`ForkFiles`), the new ones written, Core's config check, a Core restart inside its approved scope, the health
-diff, and a restore with a second restart on any failure or regression.
+The AI only names the fork, the reason and which of the fork's own changes to keep; the daemon builds every file
+from Core's verified source (`opsd.coresource`) and those hunks, refusing rather than guessing, and the result is
+applied only through the update pipeline after the admin's approval.
 """
 
 import ast
@@ -46,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from opsd import maintenance, reload, selfguard
+from opsd import maintenance, reload, safefs, selfguard
 from opsd.api import LiveAPI
 from opsd.capabilities import FORK_KEEP_RE, Args, CapabilityError
 from opsd.conversation import clean_text, fence
@@ -61,7 +40,6 @@ from opsd.coresource import (
     domain_fd,
     installed_core_version,
     listed,
-    read_at,
     read_custom,
     valid_domain,
     valid_file,
@@ -70,7 +48,7 @@ from opsd.coresource import (
 )
 from opsd.jsonstore import write_json_atomic
 from opsd.runctx import ExecContext
-from opsd.store import Store, StoreError
+from opsd.store import Store
 from opsd.supervisor import ApiError
 
 _LOGGER = logging.getLogger(__name__)
@@ -82,7 +60,6 @@ MAX_DIFF_BYTES = 32 * 1024
 PROPOSAL_KEY = "fork:proposal:"
 FILES_DIR = "fork-rebase"
 PROPOSAL_ID_RE = re.compile(r"[0-9a-f]{16}")
-HUNK_ID_RE = re.compile(r"([A-Za-z0-9_.-]{1,64})#([1-9][0-9]{0,2})")
 # What the AI may pass as `--keep`: hunk ids, comma-separated, or `none` (the registry's pattern).
 KEEP_RE = FORK_KEEP_RE
 JOB_KIND = "fork_rebase"
@@ -405,47 +382,11 @@ def _dir(data: Path, proposal_id: str) -> Path:
     return data / FILES_DIR / proposal_id
 
 
-def _private_dir(path: Path) -> Path:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
-    return path
-
-
-def _read_regular(path: Path, limit: int = MAX_FILE_BYTES) -> bytes | None:
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        data = os.read(fd, limit + 1)
-    finally:
-        os.close(fd)
-    return None if len(data) > limit else data
-
-
-def _write_private(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    try:
-        view = memoryview(data)
-        while view:
-            view = view[os.write(fd, view) :]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
-
-
 def load(store: Store, proposal_id: str) -> dict[str, Any] | None:
     if not PROPOSAL_ID_RE.fullmatch(proposal_id):
         return None
-    try:
-        raw = json.loads(store.kv_get(PROPOSAL_KEY + proposal_id) or "null")
-    except StoreError, ValueError:
-        return None
-    return raw if isinstance(raw, dict) and raw.get("id") == proposal_id and raw.get("state") in STATES else None
+    raw = store.kv_json(PROPOSAL_KEY + proposal_id)
+    return raw if raw is not None and raw.get("id") == proposal_id and raw.get("state") in STATES else None
 
 
 def proposals(store: Store) -> list[dict[str, Any]]:
@@ -478,13 +419,13 @@ def save(store: Store, data: Path, made: Build, *, reason: str, by: str, run_id:
          now: datetime) -> dict[str, Any]:  # fmt: skip
     """Record a proposal and its result's bytes; it supersedes any open proposal for the same fork."""
     proposal_id = secrets.token_hex(8)
-    folder = _private_dir(_dir(data, proposal_id) / "new")
-    _private_dir(folder.parent.parent)
+    folder = safefs.private_dir(_dir(data, proposal_id) / "new")
+    safefs.private_dir(folder.parent.parent)
     os.chmod(folder.parent, 0o700)
     for name, content in made.files.items():
         if not valid_file(name):
             raise RebaseRefused(f"not a file name: {name[:40]}")
-        _write_private(folder / name, content)
+        safefs.write_private(folder / name, content)
     kept = [h for h in made.hunks if h.id in made.keep]
     record = {
         "id": proposal_id, "domain": made.domain, "core": made.core, "origin": made.origin, "keep": made.keep,
@@ -517,7 +458,7 @@ def prune(store: Store, data: Path, *, now: datetime) -> None:
 
 
 def binding(record: Mapping[str, Any]) -> dict[str, Any]:
-    """What an approval of this proposal is about (`approvals.fork_hash`)."""
+    """What an approval of this proposal is about (`approvals.binding_hash`)."""
     return {"proposal": record["id"], "domain": record["domain"], "core": record["core"], "origin": record["origin"],
             "keep": list(record["keep"]), "result": record["result"], "fork": record["fork"]}  # fmt: skip
 
@@ -527,7 +468,7 @@ def new_files(data: Path, record: Mapping[str, Any]) -> dict[str, bytes] | None:
     folder = _dir(data, str(record["id"])) / "new"
     found: dict[str, bytes] = {}
     for name, sums in (record.get("files") or {}).items():
-        content = _read_regular(folder / name) if valid_file(str(name)) else None
+        content = safefs.read_or_none(folder / name, MAX_FILE_BYTES) if valid_file(str(name)) else None
         if content is None or sha256(content) != (sums or {}).get("new"):
             return None
         found[str(name)] = content
@@ -541,7 +482,8 @@ def current_files(custom_components: Path, record: Mapping[str, Any]) -> dict[st
     try:
         with domain_fd(custom_components, str(record["domain"])) as root:
             for name in record.get("files") or {}:
-                content = read_at(root, str(name)) if valid_file(str(name)) else None
+                ok = valid_file(str(name))
+                content = safefs.read_or_none(str(name), MAX_FILE_BYTES, dir_fd=root) if ok else None
                 if content is None:
                     return None
                 found[str(name)] = content
@@ -576,14 +518,9 @@ class Saved:
 
 
 class ForkFiles:
-    """Snapshot, write and restore one proposal's files in `custom_components/<domain>/`.
-
-    Every access goes through a descriptor of the domain's directory reached from the config directory with
-    `O_DIRECTORY | O_NOFOLLOW` at each level (`coresource.domain_fd`), so swapping `custom_components` or the
-    domain's directory for a link never redirects a read or a write. Within it: regular files only (`stat` without
-    following links), each written to a fresh randomly named temporary file (`O_CREAT | O_EXCL | O_NOFOLLOW`),
-    written in full, given the old file's mode and owner, fsynced and renamed over the old one (both names relative
-    to the same descriptor), then the directory fsynced; a failed write removes its temporary file."""
+    """Snapshot, write and restore one proposal's files in `custom_components/<domain>/`, every access through
+    the domain's directory descriptor (`coresource.domain_fd`) and `opsd.safefs`, keeping each file's mode and
+    owner."""
 
     def __init__(self, data: Path, custom_components: Path) -> None:
         self.data = data
@@ -610,7 +547,7 @@ class ForkFiles:
         if meta_path.exists():
             return
         domain = str(record["domain"])
-        _private_dir(folder)
+        safefs.private_dir(folder)
         meta: dict[str, Any] = {}
         with self._root(domain) as root:
             for name in record["files"]:
@@ -618,10 +555,10 @@ class ForkFiles:
                 info = os.stat(str(name), dir_fd=root, follow_symlinks=False)
                 if not stat.S_ISREG(info.st_mode):
                     raise RebaseRefused(f"{name} is not a regular file")
-                content = read_at(root, str(name))
+                content = safefs.read_or_none(str(name), MAX_FILE_BYTES, dir_fd=root)
                 if content is None:
                     raise RebaseRefused(f"{name} could not be read")
-                _write_private(folder / str(name), content)
+                safefs.write_private(folder / str(name), content)
                 meta[str(name)] = {"mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid,
                                    "sha": sha256(content)}  # fmt: skip
         write_json_atomic(meta_path, meta, mode=0o600)
@@ -635,7 +572,7 @@ class ForkFiles:
             return None
         found: dict[str, tuple[bytes, Saved]] = {}
         for name, info in meta.items() if isinstance(meta, dict) else []:
-            content = _read_regular(folder / name) if valid_file(str(name)) else None
+            content = safefs.read_or_none(folder / name, MAX_FILE_BYTES) if valid_file(str(name)) else None
             if content is None or not isinstance(info, dict) or sha256(content) != info.get("sha"):
                 return None
             found[str(name)] = (content, Saved(int(info["mode"]), int(info["uid"]), int(info["gid"]), str(info["sha"])))
@@ -649,24 +586,7 @@ class ForkFiles:
             info = None
         if info is not None and not stat.S_ISREG(info.st_mode):
             raise RebaseRefused(f"{name} is not a regular file (never written through a link)")
-        tmp = f".ops-{secrets.token_hex(8)}.tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)
-        try:
-            try:
-                view = memoryview(content)
-                while view:
-                    view = view[os.write(fd, view) :]
-                os.fchmod(fd, saved.mode & 0o777)
-                if os.geteuid() == 0:
-                    os.fchown(fd, saved.uid, saved.gid)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.replace(tmp, name, src_dir_fd=root, dst_dir_fd=root)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp, dir_fd=root)
-            raise
+        safefs.replace_at(root, name, content, mode=saved.mode, uid=saved.uid, gid=saved.gid)
 
     def _put(self, record: Mapping[str, Any], files: Mapping[str, tuple[bytes, Saved]]) -> None:
         domain = str(record["domain"])
@@ -674,7 +594,6 @@ class ForkFiles:
             for name in sorted(files):
                 content, meta = files[name]
                 self._write(root, domain, name, content, meta)
-            os.fsync(root)
 
     def write(self, record: Mapping[str, Any], files: Mapping[str, bytes]) -> None:
         """Write the rebased files (after `snapshot`), keeping each old file's mode and owner."""
@@ -697,16 +616,6 @@ class ForkFiles:
         saved = self.saved(record)
         now = current_files(self.custom, record)
         return saved is not None and now is not None and all(sha256(now[n]) == s.sha for n, (_, s) in saved.items())
-
-    def untouched(self, record: Mapping[str, Any]) -> bool:
-        """The fork's files on disk are exactly the ones the proposal was built from (nothing was written)."""
-        now = current_files(self.custom, record)
-        files = record.get("files") or {}
-        return (
-            now is not None
-            and set(now) == set(files)
-            and all(sha256(now[n]) == (files[n] or {}).get("old") for n in files)
-        )
 
 
 # ------------------------------------------------------------------ the capability
@@ -950,18 +859,6 @@ def settle_pushes(store: Store, repo: Any, *, now: datetime) -> int:
     except Exception:  # noqa: BLE001 - a git or store failure leaves the status as it was
         _LOGGER.info("push status not checked")
     return settled
-
-
-def exec_internal(_ctx: ExecContext, _args: Args) -> Any:
-    raise CapabilityError("fork.apply is a daemon executor and cannot be requested")
-
-
-def proposal_summary(record: Mapping[str, Any]) -> str:
-    kept = ", ".join(record.get("keep") or []) or "none"
-    return (
-        f"{record['domain']} onto Core {record['core']} (fork origin {record['origin']}); kept hunks: {kept};"
-        f" files: {', '.join(sorted(record.get('files') or {}))}"
-    )
 
 
 def valid_record(record: Mapping[str, Any]) -> bool:

@@ -1,18 +1,8 @@
-"""Paths and add-on options.
+"""Paths and add-on options (spec configuration.md C1-C6).
 
-Options are grouped one level deep (`agent.mode`, `updates.window`, ...),
-as in `config.yaml`.
-
-Every value is checked here as well as by the Supervisor's schema. A value
-that fails a check keeps its default and is recorded in `problems`; with
-any problem the agent fails closed (no act mode, no automatic updates, no
-AI runs) and the daily health check raises an item until it is fixed.
-
-The house profile (`opsd.profile`, `ops/profile.yaml` in the HA config)
-rides along as `Options.profile`; a refused profile is a problem too. Where
-an option and the profile meet, the properties below combine them: the
-option wins for the push target and the reload allowlist, and lists that
-only tighten (`need_approval`) are joined.
+Every value is checked here as well as by the Supervisor's schema; a bad value keeps its default and is a problem,
+and with any problem the agent fails closed. The house profile rides along as `Options.profile`; where an option and
+the profile meet, the properties below combine them.
 """
 
 import json
@@ -90,10 +80,6 @@ class Paths:
         return self.data / "open-items.json"
 
     @property
-    def lock_file(self) -> Path:
-        return self.data / "run.lock"
-
-    @property
     def runs_dir(self) -> Path:
         return self.data / "runs"
 
@@ -148,11 +134,6 @@ class Paths:
     def store_file(self) -> Path:
         """SQLite: audit log, tasks, budget ledger, issued actions (root only)."""
         return self.data / "ops.db"
-
-    @property
-    def store_copy(self) -> Path:
-        """The store as it was before the upgrade from schema 18, kept 14 days (root only, like the store)."""
-        return self.data / "ops.db.v18.bak"
 
     @property
     def prompts_dir(self) -> Path:
@@ -241,16 +222,11 @@ class AgentOptions:
 
 
 @dataclass(frozen=True, slots=True)
-class LlmOptions:
-    # `none`: deterministic alerts only.
-    provider: str = field(default="claude", metadata=_one_of("claude", "none"))
-
-
-@dataclass(frozen=True, slots=True)
 class ClaudeOptions:
     token: str = field(default="", repr=False, metadata=_SECRET)
-    # Subscription tier that sizes the run-time budget: auto (pro, the smallest), pro, max5, max20.
-    plan: str = field(default="auto", metadata=_one_of("auto", "pro", "max5", "max20"))
+    # Subscription tier that sizes the run-time budget. `auto` (from earlier versions) is still accepted, so an
+    # existing install keeps valid options; like any value without hours it is read as pro (`budget.Caps`).
+    plan: str = field(default="pro", metadata=_one_of("pro", "max5", "max20", "auto"))
     model_standard: str = field(default="claude-sonnet-5-5", metadata=_MODEL)
     # Empty: `model_standard`.
     model_fast: str = field(default="", metadata=_MODEL_OR_EMPTY)
@@ -355,7 +331,6 @@ class RuntimeProblems:
 
 GROUPS: dict[str, type[Any]] = {
     "agent": AgentOptions,
-    "llm": LlmOptions,
     "claude": ClaudeOptions,
     "chat": ChatOptions,
     "notify": NotifyOptions,
@@ -413,7 +388,6 @@ class Options:
     """Add-on options from the Supervisor (`/data/options.json`), grouped as in `config.yaml`."""
 
     agent: AgentOptions = field(default_factory=AgentOptions)
-    llm: LlmOptions = field(default_factory=LlmOptions)
     claude: ClaudeOptions = field(default_factory=ClaudeOptions)
     chat: ChatOptions = field(default_factory=ChatOptions)
     notify: NotifyOptions = field(default_factory=NotifyOptions)

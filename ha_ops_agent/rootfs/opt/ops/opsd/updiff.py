@@ -1,23 +1,7 @@
-"""Before/after health for updates: a light probe and the regression rule.
+"""Before/after health for updates: a light probe and the regression rule (spec updates.md U15, U18).
 
-The probe reads only what the rule needs (Core state, entity states, the
-entity registry, config entries, repairs), so it can run every minute or
-so while an update settles. The rule is deliberately strict, because a
-false "healthy" leaves the house broken at 04:00 while a false regression
-only costs a rollback to the version that was running a minute ago:
-
-- Core not running, or the API unreachable;
-- any custom integration (`custom_components/`) with more unavailable
-  entities or failed entries than before, or with all of its entities gone;
-- a new failed config entry (any integration);
-- a new unavailable entity in a key domain (locks, lights, covers, ...),
-  or five or more new unavailable entities elsewhere;
-- a new repair of severity error or critical (warnings are reported only;
-  HACS's own "restart required" repair is expected after an install);
-- a watched entity (the house profile's `updates.watched_entities`: here both
-  Bluetooth locks and the alarm) that was available and is not;
-- an add-on that was running and is not (add-on updates only);
-- a probe that could not read something (fail closed).
+Deliberately strict: a false "healthy" leaves the house broken at night, a false regression only costs a rollback
+to the version that ran a minute ago. Anything the probe cannot read fails the comparison closed.
 """
 
 import logging
@@ -41,8 +25,7 @@ DOWN_STATES = frozenset({"unavailable", "unknown", "missing"})
 @dataclass(frozen=True, slots=True)
 class HealthPoint:
     at: str
-    core_state: str | None = None
-    core_version: str | None = None
+    # Core counts as running when its API answers with the entity states.
     api_up: bool = False
     # entity_id -> platform
     unavailable: dict[str, str] = field(default_factory=dict)
@@ -80,7 +63,6 @@ async def probe(api: HealthAPI, custom_domains: Iterable[str], *, watched: Itera
             errors.append(f"{name}: {type(err).__name__}: {str(err)[:160]}")
             return default
 
-    core = await read("core_info", {}, api.supervisor("/core/info"))
     states: list[dict[str, Any]] = await read("states", [], api.core_rest("/states"))
     registry: list[dict[str, Any]] = await read("entity_registry", [], api.ws("config/entity_registry/list"))
     entries: list[dict[str, Any]] = await read("config_entries", [], api.ws("config_entries/get"))
@@ -92,14 +74,8 @@ async def probe(api: HealthAPI, custom_domains: Iterable[str], *, watched: Itera
     repairs = {
         key: f"{info.get('severity')}|{info.get('translation_key')}" for key, info in derive_repairs(raw_issues).items()
     }
-    # The Supervisor's `/core/info` has no `state` (as of Supervisor 2026.10):
-    # Core counts as running when its API answers with the entity states.
-    reported = core.get("state") if isinstance(core, dict) else None
-    core_state = str(reported) if reported else ("running" if states else "not responding")
     return HealthPoint(
         at=(now or datetime.now(UTC)).isoformat(timespec="seconds"),
-        core_state=core_state,
-        core_version=str(core.get("version")) if isinstance(core, dict) and core.get("version") else None,
         api_up=bool(states),
         unavailable={e: str(v["platform"]) for e, v in unavailable.items()},
         custom={
@@ -139,8 +115,8 @@ def compare(
     notes: list[str] = []
     if after.errors:
         regressions.append("health could not be read: " + "; ".join(after.errors[:3]))
-    if after.core_state != "running" or not after.api_up:
-        regressions.append(f"Core is not running (state {after.core_state}, API up: {after.api_up})")
+    if not after.api_up:
+        regressions.append("Core is not running (its API does not answer)")
 
     for domain, was in sorted(before.custom.items()):
         now = after.custom.get(domain)

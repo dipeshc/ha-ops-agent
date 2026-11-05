@@ -1,17 +1,7 @@
-"""Usage observability and the kill switch for AI runs.
+"""Usage observability and the kill switch's live side (spec budget.md B8, B11-B13).
 
-- Sensors (REST-set like `sensor.ops_agent`, re-published with it):
-  `sensor.ops_agent_ai` (state: enabled or why AI is blocked; attributes:
-  the agent's run time per window and its caps, the account's measured
-  utilisation, runs, tokens and cost today per profile, the last run) and
-  `sensor.ops_agent_runs_today` (`state_class: total` with a daily
-  `last_reset`, so HA long-term statistics work).
-- Deterministic notices (never written by the AI), at most once per reason
-  per day, only when the kill switch was refused or recreated (a run held by
-  the budget is shown in the panel and the chat card, never pushed).
-- Kill switch: `input_boolean.ops_agent_ai_enabled`, created through the
-  websocket if missing (no YAML), watched on the daemon's one Core
-  websocket. Off stops the running AI process at once.
+Publishes `sensor.ops_agent_ai` and `sensor.ops_agent_runs_today`, sends the deterministic kill-switch notices, and
+creates and watches the AI switch helper over the daemon's Core websocket; off stops the running AI process.
 """
 
 import asyncio
@@ -37,15 +27,6 @@ _LOGGER = logging.getLogger(__name__)
 
 NOTICE_TAG = "ha-ops-usage"
 _SWITCH_ID = SWITCH_ENTITY.split(".", 1)[1]
-_REASONS = {
-    "ai_disabled": "the AI kill switch is off",
-    "usage_limited": "The AI provider reported a usage limit; waiting before trying again",
-    "run_cap_reached": "today's run limit for this kind of run is reached",
-    "share_cap": "the agent's run-time budget for this window is used up",
-    "share_reserve": "chat has used half of the agent's run-time budget; the rest is kept for monitoring",
-    "account_busy": "the subscription is nearly at its limit from other use; the agent yields",
-    "cost_cap": "today's AI cost cap (limits.daily_max_usd) is reached",
-}
 
 
 def _pct(value: float | None) -> float | None:

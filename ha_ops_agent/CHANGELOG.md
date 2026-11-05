@@ -1,5 +1,100 @@
 # Changelog
 
+## 0.24.0
+
+A simplification release: features nobody used are removed, mechanisms that
+did the same thing twice are merged, and the bugs that fell out of that are
+fixed. The store moves to schema 20 in one upgrade at the first start (see
+Upgrading). Keep "Create backup" on when you update: 0.23 refuses a schema-20
+store, so going back means restoring that backup.
+
+- **Removed: dashboard migrations.** The agent never writes a dashboard any
+  more: no `dashboard.save` capability, no dashboard approvals, no dashboard
+  backups. A finding that affects a dashboard card gets a plan with the
+  steps you make by hand. The house profile key `dashboards.generated` is
+  gone: a profile that still has it is refused (the agent fails closed), so
+  delete that key before you update.
+- **Removed: approval requests from chat.** A conversation can recommend
+  what to approve, but no longer asks for an approval or offers a "Back up
+  now?" card; you approve on the item, and Back up now stays in the panel.
+- **Removed: the read-only item of the old single chat** (conversations
+  live on items since 0.22.0), and the Marketplace suggestion among the
+  maintenance findings.
+- **Removed: the `llm.provider` option.** A saved value is ignored; the AI
+  switch is the one off switch. `claude.plan` now defaults to `pro`; a
+  saved `auto` is still accepted and read as `pro`.
+- **One chat limit.** The separate daily chat-message cap and its card and
+  push are gone; the 20 chat runs a day are the limit (a message past it
+  waits and is retried automatically, as before). Back up now no longer has
+  a one-hour gap; at most 3 a day and none while a complete backup is under
+  3 hours old still apply.
+- **Triage gives verdicts, never acks.** The agent can no longer acknowledge
+  a health item; the daemon snoozes a warning for at most 7 days on a "not
+  affected" or "fixed" verdict, and never a critical, access, Assist,
+  Core-down or custom-integration item.
+- **Fewer moving parts, same guarantees.** One approval mechanism for
+  changes, reboots and fork rebases; one config check (the Supervisor's);
+  Core counts as up when its API answers; one push notifier with one budget
+  per class; one safe-file module for the files it writes into your
+  configuration; no lock file for the health check. The agent reads less (no `lovelace/resources`, no add-on list for
+  maintenance) and its allowlist is tighter: `lovelace/config/save`,
+  `lovelace/resources`, Core's REST `check_config` and the
+  `approval.request`, `dashboard.save` and `baseline.ack` capabilities are
+  gone.
+- **Fixed: a maintenance check that could not run read like a chat failure.**
+  When the daily scan's own check was refused by its run cap (now listed as
+  `maintenance_plan`, 3 a day), turned off or failed, the finding said "Plan a
+  fix queued: Sorry, that run failed". It now names the real reason ("the
+  agent's check waits for its daily allowance (next try ...)"), asks you to
+  do nothing, and the scan retries by itself; Plan a fix keeps its wording.
+- **Fixed: a log finding lingered a week after its fix.** When the warning is
+  gone from the Core log and the integration's code changed since it was seen
+  (a custom one's version or source, or the Core version), the finding
+  resolves at once instead of after 7 days.
+- **Fixed: a failed config write left a temporary file** next to the live
+  file, and the directory was not synced after a write.
+- **Fixed: an item push held through quiet hours was lost** when the morning
+  send hit the daily push budget; the item book now holds it itself and
+  sends it when the budget renews.
+- **Fixed: the release-note cache grew without bound.** Cached evidence not
+  written for 30 days is pruned with the store. GitHub's 403 and 429 back
+  off the same way for every fetch.
+- **Fixed: "it needs you" without saying what.** A "needs you" verdict now
+  carries what you must do or decide, and the item in Needs you quotes it;
+  one that names nothing (or "no fix needed") counts as unknown and never
+  reaches you on its own.
+- **Fixed: a Core release you are not installing asked you.** A Core minor's
+  breaking changes never enter Needs you or push on their own: they stay in
+  Coming up, and while a Core update into that minor is pending they show
+  on the update's item (with the agent's check) instead. Named removals
+  with a deadline still ask as before.
+- **The agent can read an integration's plain settings.** `opsctl entries`
+  shows each entry's settings for a short allowlist of keys (country,
+  workdays, time zone, scan interval, ...), each value held to the shape
+  its key allows (a country code, a time zone name, weekday names or
+  dates, a few words) and withheld when it looks like a secret, address or
+  coordinate; credentials, hosts and everything else are never shown.
+- **History.** The *Questions* filter lists questions by their own kind,
+  and the chat's activity context shows them as questions, not
+  investigations.
+- **Upgrading.** The upgrade to schema 20 runs once, in one transaction; a
+  failure leaves the store at 19 untouched. It drops what the removed
+  features left (chat approval requests and dashboard approvals, dashboard
+  maintenance state, the old single chat's item and turns, unused counters
+  and run columns), voids an approval that was still waiting for a
+  confirmation ("never confirmed"), gives an item push held for quiet hours
+  back to the item book, keeps a finding hidden or planned under the 0.22
+  fingerprint hidden and planned, drops a stored finding it cannot read
+  (logged) rather than fail at every start, and keeps everything else. It then
+  deletes `ops.db.v18.bak`, `run.lock` and `selftest.json`. No copy of the
+  store is taken: the add-on backup before the update is the way back.
+  `/data/maintenance/dashboards/` (backups of dashboards 0.23 changed) is
+  left for you to delete. The daily count of agent pushes starts from zero
+  once, on the upgrade day.
+- **What to watch.** The first start's log shows the upgrade (or why the
+  store was refused); a house profile with `dashboards.generated` shows as a
+  profile problem on the System sheet.
+
 ## 0.23.0
 
 The agent keeps you out of the loop unless it genuinely needs you. Anything

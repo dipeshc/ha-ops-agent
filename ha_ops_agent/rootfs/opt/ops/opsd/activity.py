@@ -1,24 +1,8 @@
-"""The activity log: what the agent did, on its items and in History.
+"""The activity log: what the agent did, as item records (spec items-and-pushes.md I16).
 
-Daily checks, follow-ups, reminders, update plans, installs and rollbacks,
-investigations, approval outcomes, health items and local-patch status are
-each one entry here, never messages in a conversation (0.22.0: the agent's
-own notes never post into one). A no-op is one compact line. `post` and
-`chat` are kept for overlays and callers that pass them; the daemon sets no
-`post`.
-
-The chat prompt gets the last week of entries (capped), fenced as data: the
-daemon writes them, but titles and details can carry model or third-party
-text.
-
-Every entry is an item record (`opsd.items`); there is no separate log. An
-entry about a process (an update, a change) names that item's key and
-becomes an event on its timeline; any other entry is its own standalone item
-`a-<n>`: resolved and quiet when routine, in Needs you (with an
-acknowledgement) when it needs the admin, a failure when it reports one.
-Entries written for the agent's own pushes (`notice`, `followup`) keep the
-model's words in the item's `agent` field only. The chat's context is the
-item timeline of the last week.
+An entry about a process (an update, a change) is an event on that item's timeline; any other entry is its own
+standalone item `a-<n>` (quiet when routine, in Needs you with an acknowledgement when it needs the admin). The
+agent's own words stay under `agent`. The chat prompt gets the last week of the timeline, fenced as data.
 """
 
 import logging
@@ -37,9 +21,6 @@ _LOGGER = logging.getLogger(__name__)
 CONTEXT_DAYS = 7
 CONTEXT_ENTRIES = 40
 CONTEXT_DETAIL_CHARS = 200
-
-# `(entry, text or None) -> turn id`: an optional hook for an entry that needs the admin (the daemon sets none).
-Post = Callable[[dict[str, Any], str | None], int | None]
 
 _KIND = {"backup": "backup", "reload": "reload", "updates": "window", "approval": "update", "change": "proposal",
          "investigation": "investigation", "reminder": "reminder", "followup": "reminder"}  # fmt: skip
@@ -91,13 +72,11 @@ SUPERSEDED = "resolved: a later backup succeeded"
 
 
 class ActivityLog:
-    def __init__(self, store: Store, hub: Hub, *, post: Post | None = None,
-                 clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    def __init__(self, store: Store, hub: Hub, *, clock: Callable[[], datetime] = lambda: datetime.now(UTC),
                  context_days: int = CONTEXT_DAYS) -> None:  # fmt: skip
         self._store = store
         self._context_days = context_days
         self._hub = hub
-        self.post = post
         self._clock = clock
 
     def _superseded_backups(self, now: datetime) -> None:
@@ -125,11 +104,9 @@ class ActivityLog:
         *,
         needs_admin: bool = False,
         ref: dict[str, Any] | None = None,
-        chat_text: str | None = None,
         item: str | None = None,
-        chat: bool | None = None,
     ) -> dict[str, Any] | None:
-        """One entry (and the `post` hook when it needs the admin and one is set). Never raises.
+        """One entry. Never raises.
 
         `item`: the key of the process item this entry is about (its timeline gets the entry); without
         one the entry is its own item.
@@ -160,13 +137,6 @@ class ActivityLog:
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.error("activity entry not written", extra={"error": str(err)[:200], "kind": kind})
             return None
-        if (needs_admin if chat is None else chat) and self.post is not None:
-            try:
-                turn = self.post(entry, chat_text)
-                if turn is not None:
-                    entry["turn_id"] = turn
-            except (StoreError, sqlite3.Error) as err:
-                _LOGGER.error("activity chat message not posted", extra={"error": str(err)[:200]})
         self._hub.publish("activity", None, {"id": entry["id"]})
         return entry
 

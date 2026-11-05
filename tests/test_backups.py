@@ -142,8 +142,6 @@ async def test_back_up_now_works_in_observe_mode_and_is_verified(tmp_path: Path)
     assert backups.last()["state"] == "ok" and notes[0][0][1] == "Backup (Back up now): done"
     audit = [r for r in store.audit_rows(limit=10) if r["capability"] == "backup.create"]
     assert audit and audit[0]["outcome"] == "ok" and json.loads(audit[0]["args"])["by"] == "admin"
-    # One start an hour.
-    assert backups.next_manual_at() is not None
     store.close()
 
 
@@ -201,7 +199,7 @@ async def test_back_up_now_in_the_panel_runs_directly_and_is_rate_limited(p: Pan
     await p.d._backup_task
     assert ops.created == 1 and len(h.pushes()) == before  # the admin's own backup: no push
     status, _, view = await p.request("GET", "/api/updates")
-    assert view["backup"]["last"]["state"] == "ok" and view["backup"]["next_at"]
+    assert view["backup"]["last"]["state"] == "ok"
     status, _, body = await p.request("POST", "/api/backups/now", body={})
     assert status == 429 and body["message"] == "Latest backup 0 min ago."
     assert view["backup"]["blocked"] == "Latest backup 0 min ago."
@@ -260,29 +258,6 @@ async def test_a_failed_self_heal_pushes_and_raises_an_item(h: Harness) -> None:
 
 
 # ---------------------------------------------------------------- 2. chat proposal
-
-
-async def test_chat_can_ask_for_a_backup_but_never_runs_one(h: Harness) -> None:  # noqa: F811
-    from tests.test_full_chat import ask, daemon, turns
-
-    d = daemon(h)
-    ops = FakeOps()
-    install_ops(d, ops)
-    h.in_run_requests = [{"verb": "request-approval", "args": {"entity": "backup"}}]
-    h.claude_reply = {"reply": "I asked you to back up now.", "summary": "asked"}
-    thread = await ask(d, "can you back up now?")
-    [asked] = h.in_run_responses
-    assert asked["ok"] and "Nothing runs until the admin taps Back up now" in asked["output"]
-    assert ops.created == 0 and d.store is not None
-    [proposal] = d.store.proposals()
-    assert proposal["entity_id"] == "backup.now"
-    card = turns(d, thread)[-1]
-    assert card.status == "proposal" and card.meta["actions"] == ["backup"] and card.text.startswith("Back up now?")
-    # A finished backup closes the request.
-    assert d.start_backup(by="panel:u-admin", admin=True)
-    assert d._backup_task is not None
-    await d._backup_task
-    assert d.store.proposals() == []
 
 
 async def test_at_most_three_standalone_backups_a_day(tmp_path: Path) -> None:

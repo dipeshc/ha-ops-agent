@@ -1,41 +1,9 @@
-"""Inbound events from the admin's phone, verified before anything acts on them.
+"""Inbound events from the admin's phone, verified before anything acts on them (spec chat.md T12-T14a).
 
-The Companion app reports a tap on a notification button (or a text reply)
-as a `mobile_app_notification_action` event on Core's bus, which the
-daemon's persistent websocket subscription receives. An event becomes an
-`Event` on the queue only if all of these hold, otherwise it is refused and
-audited (refusals are rate-limited):
-
-1. Its `context.user_id` is the admin's HA user id. HA sets the context from
-   the authenticated connection that fired the event, so another user
-   cannot claim to be the admin. The admin's id is taken from the
-   registration of the configured admin device and confirmed as an active
-   administrator; if either step fails, every event is refused.
-2. Its action id has the agent's shape and was issued by this daemon on a
-   push to the admin's device (`issued_actions`), is unexpired, and has not
-   been used: it is consumed in the same transaction, so a replay fails.
-3. If the event names a source device (`sourceDeviceID` or
-   `sourceDevicePermanentID`), it must be the admin's: the registration's
-   device id or the device's slug. An event that names another device is
-   refused.
-
-Observed behaviour: the iOS Companion app sends only
-`action` in this event's data (plus `reply_text` for a text reply, by the
-same code path; not yet seen in the recorder), with no source device at
-all, and `context.user_id` set to the admin. Requiring `sourceDeviceID`
-therefore refused every real tap. What a tap proves is "the admin's HA
-user fired an event naming an unguessable, single-use action id that this
-daemon put on a push to the admin's device" - not which device tapped.
-
-Everything accepted here carries the `admin-chat` origin, never `admin`:
-code running inside Core with an admin token can fire these events with the
-admin's user id, so the policy engine lets them only read, manage reminders
-and notify. Approvals and every other high-impact action need the ingress
-panel request (ingress admin-user check, CSRF token); no tap grants one.
-
-Verified live: `context.user_id` is populated and `action` carries the id.
-Still unverified: `reply_text` on a real reply, and the
-`sourceDevicePermanentID` field name on other platforms.
+A `mobile_app_notification_action` event becomes an `Event` only when it is the admin's (the confirmed active
+admin's user id), carries a single-use action id this daemon issued on a push to the admin's device (consumed in the
+same transaction), and names no other device. Refusals are audited (rate-limited). Everything accepted carries the
+`admin-chat` origin: code inside Core could forge these events, so policy limits what they may cause.
 """
 
 import hmac
@@ -48,19 +16,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from opsd.conversation import clean_text
 from opsd.events import Event, EventQueue, Priority
 from opsd.notify import slugify
 from opsd.policy import Origin
-from opsd.rpc import RejectionLimiter
 from opsd.runctx import Principal
 from opsd.store import Store, StoreError
+from opsd.ws import RejectionLimiter
 
 _LOGGER = logging.getLogger(__name__)
 
 EVENT_TYPE = "mobile_app_notification_action"
 ACTION_RE = re.compile(r"OPS_(REPLY|SNOOZE|DONE)_[0-9a-f]{32}")
 MAX_REPLY_CHARS = 2000
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _EVENT_FOR_KIND = {
     "REPLY": ("user.message", Priority.USER),
     "SNOOZE": ("user.action", Priority.USER),
@@ -127,7 +95,7 @@ def is_active_admin(users: Any, user_id: str) -> bool:
 def _clean_reply(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    text = _CONTROL.sub("", value).strip()[:MAX_REPLY_CHARS]
+    text = clean_text(value, MAX_REPLY_CHARS)
     return text or None
 
 
@@ -176,7 +144,6 @@ def verify_action(
         },
         principal=Principal(Origin.ADMIN_CHAT, user_id=admin.user_id, channel="companion"),
         dedupe_key=f"action:{action}",
-        at=now,
     )
 
 

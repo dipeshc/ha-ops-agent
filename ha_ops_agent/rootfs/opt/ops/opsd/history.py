@@ -1,18 +1,8 @@
-"""`ha.history` (`opsctl history`): one entity's past states, read-only.
+"""`ha.history` (`opsctl history`): one entity's past states, read-only (spec capabilities.md K4).
 
-- `raw`: state changes over the window (`history/history_during_period`,
-  no attributes), at most `MAX_POINTS`; longer series are thinned evenly,
-  always keeping the first and last change.
-- `hourly` / `daily`: mean, min and max per period. Long-term statistics
-  (`recorder/statistics_during_period`) when the entity has them, else the
-  same aggregates computed from the state history (sample mean). Binary
-  states count as 1/0, so the mean is the fraction of samples that were on.
-
-Privacy rules (refused domains, id patterns and phone sensors; state, unit
-and friendly name only) are in `privacy.py`. Raw mode covers at most 7
-days. The websocket reply is capped at 8 MiB and the output is bounded well
-under the RPC output limit (`bounded` thins further if a series of long
-states still does not fit). Only available inside an agent run.
+`raw` state changes (thinned to `MAX_POINTS`, at most 7 days) or `hourly`/`daily` aggregates (long-term statistics,
+else computed from the history). Privacy rules are in `privacy.py`; the reply is bounded under the RPC output limit.
+Only available inside an agent run.
 """
 
 import asyncio

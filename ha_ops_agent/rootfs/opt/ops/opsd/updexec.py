@@ -1,47 +1,8 @@
-"""Update executors: backups, installs and rollbacks on HA's own mechanisms.
+"""Update executors: backups, installs, rollbacks and the OS flow on Home Assistant's own mechanisms (spec
+updates.md U14, U17, U19, os-update.md, capabilities.md).
 
-These are the daemon's own powers. Their registry rows are `internal`, so
-they are never on the socket, the CLI, the guard's verb list or a prompt:
-nothing the AI produces can call them. Every call still goes through
-`policy.decide` (code tier, the update rule as tier resolver, the
-`agent-self` origin, `observe` mode, option tightening) and the audit log,
-and refuses on anything but "execute".
-
-Native mechanisms, by target (API shapes checked read-only against a live
-install where noted):
-
-- Backup: Core's backup manager, `backup/generate_with_automatic_settings`
-  (ws). It uses the admin's automatic backup settings, including the
-  encryption key, so the agent never handles the key; the result (from
-  ws `backup/info`) must include Home Assistant, its database and every
-  installed add-on, and be encrypted on the local agent (`hassio.local`).
-  Its retention is Core's own (the automatic backup settings).
-- Core: install with Supervisor `POST /core/update {"version", "backup":
-  false}`; roll back with the same call and the previous version, but only
-  when the recorder schema did not change (read from the database file,
-  read-only). Otherwise, or when it cannot be read, the rollback is
-  escalated to the admin (restore the backup, which needs the key).
-- Add-on: install with Supervisor `POST /store/addons/<slug>/update
-  {"backup": false}`. Restoring an add-on from an encrypted backup needs the
-  key, so an add-on regression is escalated to the admin, never rolled back
-  by the agent. (The version the Supervisor reports after a restore may lag
-  the entity briefly; the agent never restores, so it accepts that.)
-- HACS: install with Core `update.install {"entity_id", "version"}` (HACS
-  entities support specific versions: `supported_features` 23); roll back
-  with `update.install` and the previous version. An integration then
-  needs a Core restart (`/core/check` first).
-- HAOS (approval only): install with Supervisor `POST /os/update
-  {"version"}`. Since Supervisor 2026.07.0 (supervisor#6982, "Make
-  /os/update stop auto-rebooting after OS update") that call only installs
-  the bundle into the other RAUC slot: it logs "Install of Home Assistant
-  Operating System <v> success; reboot required", sets `version_pending`
-  in `/os/info` (supervisor#7006) and raises the `reboot_required` issue.
-  The host keeps running the old version until it reboots. The admin's
-  approval covers that reboot, so the daemon then calls `POST /host/reboot
-  {}` itself, once, in the same run and window (never `force`). Both calls
-  pass `selfguard` only inside `approved_os_flow`. The OS is never rolled
-  back by the agent: a boot back into the old slot (RAUC fallback) is
-  escalated.
+Daemon-internal: never on the socket, the CLI or a prompt. Every call still passes `policy.decide_for` and the
+audit log, and the approve tier is lifted only by a consumed approval (`Approvals.proves_update`).
 """
 
 import asyncio
@@ -61,13 +22,12 @@ from opsd.capabilities import CAPABILITIES, Capability
 from opsd.config import Options
 from opsd.policy import (
     NEVER_RELOAD_DOMAINS,
-    SELF_UPDATE_ENTITY,
     Decision,
     Origin,
     PolicyTier,
     Resolution,
     UpdateFeature,
-    decide,
+    decide_for,
     resolve_update,
     same_version,
 )
@@ -297,7 +257,7 @@ class LiveUpdateOps:
         await self._sup(selfguard.OS_UPDATE_PATH, "POST", {"version": version}, limit_s=LONG_CALL_S)
 
     async def os_info(self) -> dict[str, Any]:
-        """`version` (running), `version_pending` (installed, waits for a reboot), `boot` and `boot_slots`."""
+        """`version` (running), `version_pending` (installed, waits for a reboot) and `boot`."""
         data = await self._sup("/os/info")
         return data if isinstance(data, dict) else {}
 
@@ -343,11 +303,6 @@ class LiveUpdateOps:
 def outcome_unknown(err: ApiError) -> bool:
     """A timeout or dropped connection: the Supervisor may still be working on it."""
     return err.status is None
-
-
-def resolve_install(decision: Decision) -> Resolution:
-    """`update.install`'s tier resolver: the update rule for this update, as planned and re-checked."""
-    return resolve_update(decision)
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,24 +384,16 @@ class Executors:
         not apply. `admin`: the admin asked in the panel, so observe mode does not hold it back.
         """
         cap = self._registry.get(name)
-        if cap is None or not cap.enabled or not cap.internal:
+        if cap is None or not cap.internal:
             raise ExecutorRefused(f"{name} is not a daemon executor")
         # The admin's switch, checked here too (the pipeline checks it first). A rollback
         # only returns to the version that was running, so it is not gated by it.
         if gate_updates and name != "update.rollback" and not self._options.auto_updates_on:
             raise ExecutorRefused("automatic updates are off (add-on option updates.auto_install)")
-        tighten = {n: PolicyTier.APPROVE for n in self._options.capabilities.require_approval}
-        tighten.update({n: PolicyTier.NEVER for n in self._options.capabilities.never})
-        verdict = decide(
-            capability=cap.name,
-            default_tier=cap.tier,
-            effects=cap.effects,
-            origin=Origin.AGENT_SELF,
-            allowed_origins=cap.origins,
-            acting=self._options.acting or admin,
+        verdict = decide_for(
+            cap, self._options.capabilities, origin=Origin.AGENT_SELF, acting=self._options.acting or admin,
             resolution=resolution,
-            tighten=tighten,
-        )
+        )  # fmt: skip
         store = self._store
         if store is None:
             raise ExecutorRefused("audit log unavailable")
@@ -486,7 +433,7 @@ class Executors:
             raise ExecutorRefused(str(err)[:200]) from err
         if job.kind not in EXECUTABLE_KINDS:
             raise ExecutorRefused(f"{job.kind} updates are never executed by the agent")
-        if not ENTITY_RE.fullmatch(job.entity_id) or job.entity_id == SELF_UPDATE_ENTITY:
+        if not ENTITY_RE.fullmatch(job.entity_id) or job.entity_id == selfguard.SELF_UPDATE_ENTITY:
             raise ExecutorRefused("not an installable update entity")
         for version in (job.from_version, job.to_version):
             if not VERSION_RE.fullmatch(version):
@@ -550,7 +497,7 @@ class Executors:
         args = {"entity": job.entity_id, "kind": job.kind, "from": job.from_version, "to": job.to_version}
         if approved:
             args["approval"] = str(job.target.get("approval"))
-        audit_id = self._authorize("update.install", args, resolve_install(decision), approved=approved)
+        audit_id = self._authorize("update.install", args, resolve_update(decision), approved=approved)
         match job.kind:
             case "core":
                 return await self._call(audit_id, self.ops.update_core(job.to_version))
@@ -588,7 +535,7 @@ class Executors:
         args = {"entity": job.entity_id, "step": "restart", "purpose": purpose[:40]}
         install = purpose == "install"
         audit_id = self._authorize("update.install" if install else "update.rollback", args,
-                                   resolve_install(decision) if install else None,
+                                   resolve_update(decision) if install else None,
                                    approved=install and self._approved(job))  # fmt: skip
         try:
             await self.ops.core_check()
@@ -698,7 +645,7 @@ class Executors:
             raise ExecutorRefused(f"the host does not run {job.from_version} (it runs {info.get('version')})")
         args = {"entity": job.entity_id, "kind": "os", "step": "reboot", "from": job.from_version,
                 "to": job.to_version, "approval": str(job.target.get("approval")) if approved else "auto"}  # fmt: skip
-        audit_id = self._authorize("update.install", args, resolve_install(decision), approved=approved)
+        audit_id = self._authorize("update.install", args, resolve_update(decision), approved=approved)
         with selfguard.approved_os_flow(selfguard.HOST_REBOOT_PATH):
             return await self._call(audit_id, self.ops.reboot_host())
 
@@ -716,18 +663,3 @@ class Executors:
         if job.kind == "core":
             return await self._call(audit_id, self.ops.update_core(job.from_version))
         return await self._call(audit_id, self.ops.install_entity(job.entity_id, job.from_version))
-
-
-# The registry rows' executor references (daemon-internal entry points).
-
-
-async def exec_backup(executors: Executors) -> tuple[str, str | None]:
-    return await executors.backup()
-
-
-async def exec_install(executors: Executors, job: UpdateJob, decision: Decision) -> str:
-    return await executors.install(job, decision)
-
-
-async def exec_rollback(executors: Executors, job: UpdateJob) -> str:
-    return await executors.rollback(job)

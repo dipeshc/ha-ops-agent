@@ -6,6 +6,7 @@ import pytest
 
 from opsd import notify as notify_mod
 from opsd.baseline import Item
+from opsd.channels import BudgetClass, Message
 from opsd.health import Snapshot
 from opsd.notify import Notifier, Push, extract_registration, relay_payload
 from opsd.triage import build_prompt, validate_result
@@ -80,26 +81,26 @@ def make_notifier(tmp_path: Path, calls: list[Any], relays: list[Any], *, core_f
 def test_rate_limits(tmp_path: Path) -> None:
     calls: list[Any] = []
     n = make_notifier(tmp_path, calls, [])
-    results = [n.send(Push("t", f"m{i}", urgent=i == 4), core_up=True, now=NOW) for i in range(5)]
+    results = [n.send(Message("t", f"m{i}", urgent=i == 4), core_up=True, now=NOW) for i in range(5)]
     assert results == ["sent", "sent", "sent", "rate_limited", "rate_limited"]
     # Safety pushes (deterministic) have their own reserve; replies to the admin their own budget.
-    assert n.send(Push("t", "reply", kind="user"), core_up=True, now=NOW) == "sent"
-    assert n.send(Push("t", "safety", urgent=True, kind="safety"), core_up=True, now=NOW) == "sent"
-    assert n.send(Push("t", "next day"), core_up=True, now=NOW + timedelta(days=1)) == "sent"
+    assert n.send(Message("t", "reply", budget_class=BudgetClass.USER), core_up=True, now=NOW) == "sent"
+    assert n.send(Message("t", "safety", urgent=True, budget_class=BudgetClass.SAFETY), core_up=True, now=NOW) == "sent"
+    assert n.send(Message("t", "next day"), core_up=True, now=NOW + timedelta(days=1)) == "sent"
     assert calls[0][1] == "mobile_app_admin_phone" and calls[0][2]["data"]["tag"] == "ha-ops"
 
 
 def test_relay_fallback(tmp_path: Path) -> None:
     relays: list[Any] = []
     n = make_notifier(tmp_path, [], relays, core_fails=True)
-    assert n.send(Push("t", "m"), core_up=True, now=NOW) == "failed"  # no cached registration yet
+    assert n.send(Message("t", "m"), core_up=True, now=NOW) == "failed"  # no cached registration yet
     entries_file = tmp_path / "core.config_entries"
     write_json(entries_file, ENTRIES)
     assert not n.cache_registration(entries_file, None)  # no verified admin: the cache is left alone
     assert not (tmp_path / "push.json").exists()
     assert n.cache_registration(entries_file, "u-admin", "d-admin")
     assert (tmp_path / "push.json").stat().st_mode & 0o777 == 0o600
-    assert n.send(Push("t", "m", urgent=True), core_up=False, now=NOW) == "relayed"
+    assert n.send(Message("t", "m", urgent=True), core_up=False, now=NOW) == "relayed"
     assert relays[0][0]["push_token"] == "tok"
 
 
@@ -110,10 +111,10 @@ def test_a_withdrawal_clears_by_tag_outside_the_budget(tmp_path: Path) -> None:
     relays: list[Any] = []
     n = make_notifier(tmp_path, calls, relays)
     for i in range(3):
-        assert n.send(Push("t", f"m{i}"), core_up=True, now=NOW) == "sent"
+        assert n.send(Message("t", f"m{i}"), core_up=True, now=NOW) == "sent"
     assert n.clear("m-0123456789ab", core_up=True) == "sent"
     assert calls[-1][2] == {"message": "clear_notification", "data": {"tag": "m-0123456789ab"}}
-    assert n.send(Push("t", "over"), core_up=True, now=NOW) == "rate_limited"
+    assert n.send(Message("t", "over"), core_up=True, now=NOW) == "rate_limited"
     assert n.clear("", core_up=True) == "failed"
     entries_file = tmp_path / "core.config_entries"
     write_json(entries_file, ENTRIES)
@@ -124,13 +125,17 @@ def test_a_withdrawal_clears_by_tag_outside_the_budget(tmp_path: Path) -> None:
 
 def test_triage_verdicts_are_kept_only_for_keys_handed_to_the_run() -> None:
     raw = {"result": "ok", "summary": "s", "verdicts": [
-        {"key": "entry:abc", "verdict": "needs_owner", "reason": "the hub lost power"},
+        {"key": "entry:abc", "verdict": "needs_owner", "reason": "the hub lost power",
+         "owner_action": "Plug the hub back in"},
+        {"key": "log:ghi", "verdict": "needs_owner", "reason": "no action named", "owner_action": "No action needed"},
         {"key": "entry:abc", "verdict": "not_affected", "reason": "a second one for the same key"},
         {"key": "entry:other", "verdict": "fixed", "reason": "not handed to the run"},
         {"key": "log:abc", "verdict": "approve_it", "reason": "not a verdict"},
         {"key": "log:def", "verdict": "fixed", "reason": ""}]}  # fmt: skip
-    found = validate_result(raw, {"entry:abc", "log:abc", "log:def"})
+    found = validate_result(raw, {"entry:abc", "log:abc", "log:def", "log:ghi"})
     assert found.verdicts == {"entry:abc": ("needs_owner", "the hub lost power")}
+    # A `needs_owner` that names nothing for the admin to do is no verdict.
+    assert found.owner_actions == {"entry:abc": "Plug the hub back in"}
 
 
 def items() -> list[Item]:

@@ -1,5 +1,5 @@
-"""An item's conversation goes with its item (the earlier one chat is never pruned),
-summaries have no capabilities, and purged threads leave the live replay buffer."""
+"""An item's conversation goes with its item, summaries have no capabilities, and purged threads leave the live
+replay buffer."""
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta

@@ -1,26 +1,18 @@
-"""The config change an update needs, as a one-tap proposal.
+"""The config change a held Core update needs, as a one-tap proposal (spec updates.md U23).
 
-When the update rule finds that a Core update needs a change in this house's config (Home Assistant's
-own notes name an integration the house uses, or a repair says something breaks in that version), the
-update waits and the capability-free release-note review may write the change as exact-text edits. The
-daemon turns them into an ordinary proposal on `refs/ops/proposals/<id>` (`changes.build_proposal`: the
-path allowlist, the content rules, the fail-closed YAML allowlist, five a day, five open), recorded for
-exactly that update (`requested_by` = `update-fix:<entity>@<version>`). The admin approves it in one
-step on its item, and the normal change pipeline checks the config, reloads, commits and pushes. Once it
-is applied the update is no longer held by it, and installs in the next window. Nothing here applies
-anything; the admin can always approve the update itself instead.
+The release-note review may write exact-text edits; the daemon turns them into an ordinary proposal through the
+usual rules (`changes.build_proposal`), recorded for exactly that update. Nothing here applies anything.
 """
 
 import os
 import re
-import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from opsd import configcheck
+from opsd import configcheck, safefs
 from opsd.changepaths import fix_path
 from opsd.changes import ChangeRefused, FileChange, build_proposal
 from opsd.config import Options
@@ -137,21 +129,8 @@ def macro_consumer(root: Path, *, admin_notify: str = "") -> str | None:
 
 def _read_scanned(path: Path) -> str | None:
     """A scanned file's text: never through a link, a regular file only, at most `SCAN_MAX_BYTES` (else None)."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        data = os.read(fd, SCAN_MAX_BYTES + 1)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-    if len(data) > SCAN_MAX_BYTES:
-        return None
-    return data.decode("utf-8", errors="replace")
+    data = safefs.read_or_none(path, SCAN_MAX_BYTES)
+    return data.decode("utf-8", errors="replace") if data is not None else None
 
 
 def propose(store: Store, repo: Repo, options: Options, *, item: Mapping[str, Any], why: str, edits: list[Edit],

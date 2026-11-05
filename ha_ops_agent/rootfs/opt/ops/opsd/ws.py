@@ -217,6 +217,31 @@ EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 _STREAM_ERRORS = (WebSocketError, CommandError, OSError, TimeoutError, asyncio.IncompleteReadError, ValueError)
 
 
+class RejectionLimiter:
+    """At most `per_minute` admitted per rolling minute; the rest are counted (`suppressed`) until taken."""
+
+    def __init__(self, per_minute: int, clock: Callable[[], float] = time.monotonic) -> None:
+        self._per_minute = per_minute
+        self._clock = clock
+        self._window = clock()
+        self._count = 0
+        self.suppressed = 0
+
+    def allow(self) -> bool:
+        now = self._clock()
+        if now - self._window >= 60:
+            self._window, self._count = now, 0
+        self._count += 1
+        if self._count > self._per_minute:
+            self.suppressed += 1
+            return False
+        return True
+
+    def take_suppressed(self) -> int:
+        count, self.suppressed = self.suppressed, 0
+        return count
+
+
 class EventStream:
     """A persistent `subscribe_events` connection that reconnects with backoff.
 
@@ -253,24 +278,17 @@ class EventStream:
         self._max_backoff = max_backoff
         self._ping_interval = ping_interval
         self._idle_timeout = idle_timeout
-        self._max_events = max_events_per_min
         self._sleep = backoff_sleep
         self._clock = clock
-        self._window = clock()
-        self._in_window = 0
-        self.dropped = 0
+        self.limit = RejectionLimiter(max_events_per_min, clock)
         self.connected = False
 
     def _admit(self) -> bool:
-        now = self._clock()
-        if now - self._window >= 60:
-            if self.dropped:
-                _LOGGER.warning("inbound events dropped by rate limit", extra={"dropped": self.dropped})
-            self._window, self._in_window, self.dropped = now, 0, 0
-        self._in_window += 1
-        if self._in_window > self._max_events:
-            self.dropped += 1
+        if not self.limit.allow():
             return False
+        dropped = self.limit.take_suppressed()
+        if dropped:
+            _LOGGER.warning("inbound events dropped by rate limit", extra={"dropped": dropped})
         return True
 
     async def _ping(self, ws: HAWebSocket) -> None:

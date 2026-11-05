@@ -198,14 +198,15 @@ async def test_core_down_item(fake_ha: FakeHA, paths: Paths, meminfo: Path) -> N
     assert "core:down" in keys
 
 
-async def test_new_update_reported_once(fake_ha: FakeHA, paths: Paths, meminfo: Path) -> None:
+async def test_a_new_update_is_no_health_item(fake_ha: FakeHA, paths: Paths, meminfo: Path) -> None:
+    """Pending updates are the update planner's items; the check keeps only their unclassified list."""
     s1 = await snap(fake_ha, paths, meminfo)
     baseline = seed(s1, NOW)
     fake_ha.states[-1]["attributes"]["latest_version"] = "2026.10.5"
-    s2 = await snap(fake_ha, paths, meminfo)
-    items = diff(s2, baseline, NOW)
-    assert [i.key for i in items] == ["update:update.home_assistant_core_update@2026.10.5"]
-    assert diff(s2, advance(baseline, s2, NOW), NOW) == []
+    s2 = await collect(fake_ha, paths, make_options(), now=NOW, meminfo_path=meminfo, classify_updates=False)
+    assert diff(s2, baseline, NOW) == []
+    assert s2.updates == [{"entity_id": "update.home_assistant_core_update", "title": s2.updates[0]["title"],
+                           "installed": "2026.10.3", "latest": "2026.10.5"}]  # fmt: skip
 
 
 async def test_ack_expiry_and_accept(fake_ha: FakeHA, paths: Paths, meminfo: Path) -> None:

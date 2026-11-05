@@ -1,8 +1,7 @@
-"""The panel's JSON API, on the daemon side (`panel.py` has already checked the admin and CSRF).
+"""The panel's JSON API on the daemon side (spec panel.md routes, N10-N19); `panel.py` checked admin and CSRF.
 
-Every input is validated here again by shape (ids, lengths, enums); the
-handlers call the same store and assistant methods the push channel uses,
-so the panel has no powers of its own: messages run as `admin-chat`.
+Every input is validated again by shape; the handlers call the same store and assistant methods as the push
+channel, so the panel has no powers of its own (messages run as `admin-chat`).
 """
 
 import asyncio
@@ -16,15 +15,16 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from opsd import __version__, diagnostics, proposals
+from opsd import __version__, diagnostics
 from opsd.approvals import LIVE, ApprovalError, approvable
+from opsd.budget import RUNS_PER_DAY
 from opsd.changes import ChangeRefused, propose_fact
-from opsd.conversation import CHAT_TURNS_PER_DAY
+from opsd.conversation import clean_text
 from opsd.items import ACTION_RE, ITEM_ID_RE, REMIND, ItemBook, thread_of
 from opsd.panel import MAX_CHAT_CHARS
 from opsd.policy import Origin, same_version
 from opsd.runctx import Principal
-from opsd.store import EARLIER_KEY, MAX_FACT_CHARS, QUESTION_PREFIX, Store, StoreError
+from opsd.store import MAX_FACT_CHARS, Store, StoreError
 
 if TYPE_CHECKING:
     from opsd.assistant import Assistant
@@ -39,10 +39,8 @@ HISTORY_FILTERS: dict[str, tuple[str, ...] | None] = {
     "needs": None,
     "changes": ("proposal", "update", "reload"),
     "checks": ("check", "backup"),
-    "questions": None,
+    "questions": ("question",),
 }
-# The Questions filter: the questions the admin asked, and the earlier one chat.
-QUESTION_KEYS = (QUESTION_PREFIX, EARLIER_KEY)
 USER_ACK_DAYS = {"snooze": 7, "accept": 30}
 # What a finding offers for the proposal its plan made (`items.Composer._linked`).
 _LINKED_ACTIONS = frozenset({"approve_rebase", "approve_rebase_now", "apply", "revert", "reject"})
@@ -50,7 +48,6 @@ _CLIENT_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
 # What a conversation takes, under `api/items/<id>/<verb>`.
 _CONVERSATION_POSTS = frozenset({"messages", "retry", "autoretry", "read", "cancel", "remember"})
 _DIGITS_RE = re.compile(r"[0-9]{1,12}")
-_CONTROL_KEEP_NL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 MAX_FACTS_PER_DAY = 50
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\+00:00)?")
 _APPROVAL_RE = re.compile(r"[0-9a-f]{32}")
@@ -117,9 +114,9 @@ class PanelHandlers:
             return None
         return found[1] if found is not None else None
 
-    def _conversation(self, ident: str) -> tuple[dict[str, Any], str, bool] | None:
-        """(the item, its thread, whether it takes messages): an item's own conversation, a question's, or the
-        earlier one chat (read only). None for an unknown item or a thread the store does not have."""
+    def _conversation(self, ident: str) -> tuple[dict[str, Any], str] | None:
+        """(the item, its thread): an item's own conversation or a question's. None for an unknown item or a thread
+        the store does not have."""
         store, book = self._d.store, self._d.items
         if store is None or book is None or not ITEM_ID_RE.fullmatch(ident):
             return None
@@ -127,12 +124,9 @@ class PanelHandlers:
         if record is None:
             return None
         thread = thread_of(record)
-        writable = thread is not None
-        if thread is None:
-            thread = store.chat_id() if record.get("key") == EARLIER_KEY else ""
-        if not thread or store.get_thread(thread) is None:
+        if thread is None or store.get_thread(thread) is None:
             return None
-        return record, thread, writable
+        return record, thread
 
     async def handle(
         self, method: str, parts: tuple[str, ...], query: Mapping[str, str], body: dict[str, Any] | None, user: str
@@ -211,10 +205,7 @@ class PanelHandlers:
             status = "waiting"
         else:
             status = "ready"
-        try:
-            used = d.store.count(d.day(now), "chat_turns") if d.store is not None else 0
-        except StoreError, sqlite3.Error:
-            used = 0
+        chat = (view.get("profiles_today") or {}).get("chat") or {}
         return {
             "status": status,
             "ai": {"on": control.get("ai_switch") == "on", "state": ai_state,
@@ -224,7 +215,7 @@ class PanelHandlers:
                                                "cost_today_usd", "daily_max_usd", "today", "last_run")},
             "run": {"profile": current.profile, "thread": current.thread_id} if current is not None else None,
             "queue": queued,
-            "chat": {"used": used, "cap": CHAT_TURNS_PER_DAY},
+            "chat": {"used": int(chat.get("runs") or 0), "cap": RUNS_PER_DAY["chat"]},
             "options": d.options_notice(),
             "held": d.held_view(now),
             # The house's time zone: the panel shows task times in it, whatever the browser's zone.
@@ -245,31 +236,12 @@ class PanelHandlers:
         except StoreError, sqlite3.Error:
             return None
 
-    def _item_mark(self, key: str) -> dict[str, Any]:
-        """For the older views: the item a record belongs to, and whether it is in Needs you (read, not inferred)."""
-        found = self._d.store.item_by_key(key) if self._d.store is not None else None
-        if found is None:
-            return {"item": None, "item_state": None, "needs": False}
-        return {"item": found["id"], "item_state": found["state"], "needs": bool(found["needs"])}
-
     def ops(self) -> dict[str, Any]:
-        d = self._d
-        # Item details carry raw log samples; the panel shows them, so they get the same redaction as pushes.
-        redactor = d.redactor()
-        return {
-            "items": [redactor.redact_obj(i.to_json()) | self._item_mark(f"health:{i.key}") for i in d.open_items()],
-            "needs_count": self._needs_count(),
-            "history": list(reversed(d.history()[-30:])),
-            "status": d.status_view(),
-            "profile": d.profile_view(),
-        }
+        """The System sheet's status and house profile."""
+        return {"status": self._d.status_view(), "profile": self._d.profile_view()}
 
     async def _run(self, kind: str, args: dict[str, Any], user: str) -> Result:
-        """A high-impact action: the admin's one panel request (ingress admin header and CSRF token) runs it.
-
-        Approvals stay bound to the exact plan item, its hash and the item revision the admin saw (a phone
-        confirmation would add no second factor, so there is none).
-        """
+        """A high-impact action: the admin's one panel request (ingress admin header and CSRF token) runs it."""
         try:
             done = await self._d.panel_action(kind, args, user)
         except Exception:
@@ -457,9 +429,9 @@ class PanelHandlers:
         before = _uncursor(raw) if raw is not None else None
         if raw is not None and before is None:
             return _bad("bad_cursor")
-        rows = self._store.items_page(kinds=HISTORY_FILTERS[name], needs_only=name == "needs", before=before,
-                                      limit=PAGE_HISTORY + 1,
-                                      prefixes=QUESTION_KEYS if name == "questions" else None)  # fmt: skip
+        rows = self._store.items_page(
+            kinds=HISTORY_FILTERS[name], needs_only=name == "needs", before=before, limit=PAGE_HISTORY + 1
+        )
         more = len(rows) > PAGE_HISTORY
         rows = rows[:PAGE_HISTORY]
         cursor = _cursor(str(rows[-1]["at"]), str(rows[-1]["id"])) if more and rows else None
@@ -533,7 +505,7 @@ class PanelHandlers:
             if d.changes is None:
                 return 503, {"error": "store_unavailable"}
             shown = [str(x) for x in (found.get("change") or {}).get("shown") or []]
-            approval = await d.changes.request(change_id, "apply" if action == "apply" else "revert", user, shown)
+            approval = await d.changes.approve(change_id, "apply" if action == "apply" else "revert", user, shown)
             return await self._run("approve_change", {"approval": approval["id"]}, user)
         if key.startswith("maint:"):
             return await self._act_maintenance(found, action, user)
@@ -566,7 +538,7 @@ class PanelHandlers:
         source = found.get("source") or {}
         entity, version = str(source.get("entity")), str(source.get("version"))
         if action == "reboot_window":
-            approval = updates.request_reboot(int(source.get("job") or 0), user=user)
+            approval = updates.approve_reboot(int(source.get("job") or 0), user=user)
             return await self._run("approve_reboot", {"approval": approval["id"]}, user)
         latest = next(iter(self._store.recent_update_runs(limit=1)), None)
         item = next((i for i in (latest or {}).get("plan", []) if i.get("entity_id") == entity
@@ -576,18 +548,15 @@ class PanelHandlers:
         run = int(latest["id"])
         if action == "reject":
             updates.approvals.reject_update(item, plan_run=run, user=user)
-            proposals.settle(self._store, entity, now=datetime.now(UTC), detail="rejected")
             self._d.hub.publish("updates", None, {})
             return 200, {}
         when = "now" if action == "approve_now" else "window"
-        approval = updates.approvals.request(item, plan_run=run, user=user, when=when)
-        proposals.settle(self._store, entity, now=datetime.now(UTC), detail="approval requested in the panel")
+        approval = await updates.approve(item, plan_run=run, user=user, when=when)
         return await self._run("approve_update", {"approval": approval["id"]}, user)
 
     async def _act_maintenance(self, found: Mapping[str, Any], action: str, user: str) -> Result:
         """A maintenance item: plan a fix (an investigation on the item itself), stop it, a reminder, hide it until
-        it changes, reject its dashboard plan, or approve that plan (the daemon re-checks it); and the actions of a
-        proposal its plan made (`_act_linked`)."""
+        it changes; and the actions of a proposal its plan made (`_act_linked`)."""
         d = self._d
         manager = d.maintenance
         source = found.get("source") or {}
@@ -627,12 +596,6 @@ class PanelHandlers:
         elif action == "reopen":
             # The admin overrides the agent's "not affected": the finding behaves as without a verdict.
             done = manager.reopen(finding)
-        elif action == "reject":
-            done = manager.reject_dashboard(finding)
-        elif action == "apply_dashboard":
-            shown = [str(x) for x in (found.get("change") or {}).get("shown") or []]
-            approval = await d.request_dashboard(finding, user, shown)
-            return await self._run("approve_dashboard", {"approval": approval["id"]}, user)
         else:
             done = False
         return (200, {}) if done else (409, {"error": "not_available", "message": "Not open any more."})
@@ -653,7 +616,7 @@ class PanelHandlers:
         if d.changes is None:
             return 503, {"error": "store_unavailable"}
         shown = [str(x) for x in (found.get("change") or {}).get("shown") or []]
-        approval = await d.changes.request(change_id, action, user, shown)
+        approval = await d.changes.approve(change_id, action, user, shown)
         return await self._run("approve_change", {"approval": approval["id"]}, user)
 
     async def _act_fork(self, found: Mapping[str, Any], action: str, user: str) -> Result:
@@ -668,7 +631,7 @@ class PanelHandlers:
             return 409, {"error": "not_available", "message": "That action is not offered any more."}
         shown = [str(x) for x in (found.get("change") or {}).get("shown") or []]
         when = "now" if action == "approve_rebase_now" else "window"
-        approval = await d.request_fork(proposal, user, shown, when)
+        approval = await d.approve_fork(proposal, user, shown, when)
         return await self._run("approve_fork", {"approval": approval["id"]}, user)
 
     def _remind_at(self, action: str, finding: str) -> datetime | None:
@@ -702,7 +665,7 @@ class PanelHandlers:
         found = self._conversation(ident)
         if found is None:
             return 404, {"error": "no_such_item"}
-        _record, thread, writable = found
+        _record, thread = found
         before = query.get("before")
         before_id = _int(before) if before is not None else None
         if before is not None and before_id is None:
@@ -714,16 +677,13 @@ class PanelHandlers:
             "turns": [t.to_json() for t in turns],
             "more": more,
             "in_flight": self._assistant.live_status(thread),
-            "read_only": not writable,
         }
 
-    async def _conversation_post(self, verb: str, found: tuple[dict[str, Any], str, bool], body: dict[str, Any],
+    async def _conversation_post(self, verb: str, found: tuple[dict[str, Any], str], body: dict[str, Any],
                                  user: str) -> Result:  # fmt: skip
-        record, thread, writable = found
+        record, thread = found
         if verb == "read":
             return self.read(thread, body)
-        if not writable:
-            return 409, {"error": "read_only", "message": "The earlier conversation is read only; ask on Ask."}
         match verb:
             case "messages":
                 return await self.message(record, thread, body, user)
@@ -774,8 +734,6 @@ class PanelHandlers:
             case "client_id_used":
                 return 409, {"error": "client_id_used", "message": "That message id was used for another message;"
                              " send it again."}  # fmt: skip
-            case "cap":
-                return 429, {"error": "chat_cap", "message": "Today's message limit is reached; try again tomorrow."}
         return 503, {"error": "busy", "message": "Not sent: the agent is busy.", "turn": turn}
 
     async def ask(self, body: dict[str, Any], user: str) -> Result:
@@ -787,7 +745,7 @@ class PanelHandlers:
         text, client_id = str(body["text"]), str(body["client_id"])
         principal = Principal(Origin.ADMIN_CHAT, user_id=user, channel="panel")
         record, sent = await self._assistant.ask(text, principal=principal, channel="panel", client_id=client_id)
-        if record is None and sent.result in ("client_id_used", "cap"):
+        if record is None and sent.result == "client_id_used":
             return self._sent(sent.result, None, 0)
         if record is None:
             return 503, {"error": "busy", "message": "Not sent: the question could not be stored."}
@@ -845,7 +803,7 @@ class PanelHandlers:
             return 404, {"error": "no_such_turn"}
         if not isinstance(raw, str) or len(raw) > MAX_FACT_CHARS:
             return 413, {"error": "too_long", "message": f"At most {MAX_FACT_CHARS} characters."}
-        text = _CONTROL_KEEP_NL.sub("", raw).strip()
+        text = clean_text(raw, MAX_FACT_CHARS)
         if not text:
             return _bad("empty", "Write the fact to remember.")
         now = datetime.now(UTC)

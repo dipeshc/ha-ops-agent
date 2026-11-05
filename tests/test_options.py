@@ -125,7 +125,6 @@ def test_load_reads_options_json(paths: Paths) -> None:
         ({"claude": {"model_standard": "--dangerously-skip-permissions"}}, "claude.model_standard must be in the form"),
         ({"claude": {"model_standard": "Claude Sonnet"}}, "claude.model_standard must be in the form"),
         ({"claude": {"token": 12345}}, "claude.token must be text"),
-        ({"llm": {"provider": "openai"}}, "llm.provider must be one of claude, none"),
         ({"limits": {"log_level": "trace"}}, "limits.log_level must be one of debug, info, warning, error"),
         ({"updates": {"never": "update.a"}}, "updates.never must be a list of strings"),
     ],
@@ -163,15 +162,19 @@ def test_invalid_options_raise_a_health_item() -> None:
     assert item.key == "options:invalid" and item.severity == "warning" and "agent.mode" in item.summary
 
 
-async def test_state_reports_the_provider_and_invalid_options(p: Panel) -> None:  # noqa: F811
+async def test_state_reports_invalid_options(p: Panel) -> None:  # noqa: F811
     _, _, state = await p.request("GET", "/api/state")
     assert state["options"] is None
     p.d.options = Options.from_mapping({"agent": {"mode": "ACT"}})
     _, _, state = await p.request("GET", "/api/state")
     assert state["options"]["problems"] == ["agent.mode must be one of observe, act"]
-    p.d.options = Options.from_mapping({"llm": {"provider": "none"}})
-    _, _, state = await p.request("GET", "/api/state")
-    assert state["options"]["provider"] == "AI is off: llm.provider is none"
+
+
+def test_a_removed_llm_provider_option_still_loads() -> None:
+    """`llm.provider` was removed in 0.24.0 (the AI switch is the one off switch): an options.json that still has it
+    loads cleanly, and `none` no longer turns the AI off."""
+    options = Options.from_mapping({"agent": {"mode": "act"}, "llm": {"provider": "none"}})
+    assert options.valid and options.acting and not hasattr(options, "llm")
 
 
 def test_activity_days_option_reaches_the_activity_log(tmp_path: Path) -> None:

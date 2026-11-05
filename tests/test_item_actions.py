@@ -48,7 +48,7 @@ def assert_actionable(book: ItemBook) -> list[dict[str, Any]]:
     assert items
     for item in items:
         # Every item takes questions in its own conversation; "Ask the agent" is no longer an action.
-        assert item["conversation"] == "open" and "ask" not in [a["id"] for a in item["actions"]], item["title"]
+        assert "ask" not in [a["id"] for a in item["actions"]], item["title"]
         assert item["actions"] or item["need"] or item["state"] == "running", item["title"]
     return items
 
@@ -130,7 +130,7 @@ async def test_asking_about_an_item_runs_in_its_own_conversation(h: Harness, loc
         other = d.store.item_by_key(f"maint:{DEPRECATION.key}")
         assert item is not None and other is not None
         view = (await panel.request("GET", f"/api/items/{item['id']}"))[2]
-        assert view["item"]["conversation"] == "open" and "ask" not in [a["id"] for a in view["item"]["actions"]]
+        assert "ask" not in [a["id"] for a in view["item"]["actions"]]
         h.claude_reply = {"reply": "Keep it until Core's version has the weather entity.", "summary": "s"}
         # The client cannot steer the message elsewhere: the thread and the item come from the URL's item record.
         body = {"text": "What should I do about it?", "client_id": "ask-0001", "item": other["id"],
@@ -145,7 +145,7 @@ async def test_asking_about_an_item_runs_in_its_own_conversation(h: Harness, loc
         # The item's text is data inside the fence: no tag of its own survives.
         assert block.count("<") == 1
         status, _, convo = await panel.request("GET", f"/api/items/{item['id']}/thread")
-        assert status == 200 and [t["role"] for t in convo["turns"]] == ["admin", "agent"] and not convo["read_only"]
+        assert status == 200 and [t["role"] for t in convo["turns"]] == ["admin", "agent"]
         # The other item's conversation is its own, and empty.
         status, _, empty = await panel.request("GET", f"/api/items/{other['id']}/thread")
         assert status == 200 and empty["turns"] == []
@@ -183,10 +183,8 @@ async def test_plan_a_fix_runs_on_the_finding_itself(h: Harness, local_ingress: 
         assert [a["id"] for a in running["actions"]] == ["stop"]
         assert d.store.item_by_key(f"task:{task.id}") is None
         assert [r["id"] for r in d.items.home()["running"]] == [item["id"]]
-        # One plan per item at a time, and the admin's own Plan a fix allowance counts it (never the investigations
-        # the agent starts in chat).
-        today = d.day(datetime.now(UTC))
-        assert d.store.count(today, "cap:plan_fix") == 1 and d.store.count(today, "cap:task.investigate") == 0
+        # One plan per item at a time; the agent's own investigation quota is never used by the admin's tap.
+        assert d.store.count(d.day(datetime.now(UTC)), "cap:task.investigate") == 0
         act = {"action": "plan_fix", "revision": running["revision"]}
         status, _, _again = await panel.request("POST", f"/api/items/{item['id']}/act", body=act)
         assert status == 409
@@ -241,13 +239,68 @@ async def test_a_plan_a_fix_verdict_closes_its_finding(h: Harness, local_ingress
         assert done is not None and done["state"] == "done"
         assert done["gist"] == "checked: not affected here: set up from the UI here"
         assert [a["id"] for a in done["actions"]] == ["reopen"]
-        # Reopened by the admin; planning it again today is the same request (its quota unit goes back).
+        # Reopened by the admin; planning it again today is the same request.
         status, _, body = await panel.request("POST", f"/api/items/{item['id']}/act",
                                               body={"action": "reopen", "revision": done["revision"]})  # fmt: skip
         assert status == 200 and body["item"]["state"] == "proposed"
         again = {"action": "plan_fix", "revision": body["item"]["revision"]}
         status, _, body = await panel.request("POST", f"/api/items/{item['id']}/act", body=again)
         assert status == 409 and "already planned today" in body["message"]
+    finally:
+        await panel.server.stop()
+
+
+LIVE_PLAN = ("Checked (it needs you): Hue, Matter: not affected. Sun: automations/garden.yaml has a sun trigger with "
+             "offset and no offset_type. Workday country is not readable here. No fix needed. Nothing in this config "
+             "needs a change for Core {minor}, so I proposed nothing. The file uses the older `platform: sun` form, "
+             "so it is probably not changed.")  # fmt: skip
+
+
+async def test_a_no_fix_needed_plan_never_lands_in_needs_you(h: Harness, local_ingress: None) -> None:  # noqa: F811
+    """The live case: a Plan a fix on a Core minor's breaking changes that says "No fix needed". Checked
+    `needs_owner` with no owner action, it is `unknown` and stays out of Needs you; checked `not_affected`, a "No
+    fix needed" plan closes its finding."""
+    minor = f"{NOW.year + 1}.3"
+    notes = [{"id": f"c{n}", "domain": d, "title": f"{d} change", "text": "Something changes.", "places": []}
+             for n, d in enumerate(("sun", "workday", "matter", "hue"))]  # fmt: skip
+    core = Finding(key="ccddeeff00112233", variant="deprecation", signal="notes", what=f"changes with {minor}",
+                   removal=minor, sources=["src"], affected=["integration sun", "integration workday"],
+                   detail={"minor": minor, "changes": ["c0", "c1", "c2", "c3"], "notes": notes,
+                           "integrations": ["sun", "workday", "matter", "hue"]})  # fmt: skip
+    far = Finding(key="aabbccddeeff0022", variant="deprecation", signal="notes", what=f"removed in {NOW.year + 1}.6",
+                  domain="acme_pump", removal=f"{NOW.year + 1}.6", named_removal=True,
+                  affected=["integration acme_pump"], sources=["src"], quote="Acme Pump: YAML removed")  # fmt: skip
+    d, panel = await started(h)
+    try:
+        assert d.store is not None and d.assistant is not None
+        store_findings(d.store, core, far)
+        await d.items_flush()
+        for finding, verdict in ((core, {"verdict": "needs_owner", "reason": "Workday country is not readable here",
+                                         "evidence": ["automations/garden.yaml"], "owner_action": None}),
+                                 (far, {"verdict": "not_affected", "reason": "No fix needed: nothing here uses it",
+                                        "evidence": ["configuration.yaml"], "owner_action": None})):  # fmt: skip
+            item = d.store.item_by_key(f"maint:{finding.key}")
+            assert item is not None
+            act = {"action": "plan_fix", "revision": item["revision"]}
+            status, _, _body = await panel.request("POST", f"/api/items/{item['id']}/act", body=act)
+            assert status == 200
+            h.claude_reply = {"reply": LIVE_PLAN.format(minor=minor), "summary": "s", "next": None,
+                              "verdict": verdict}  # fmt: skip
+            for due in d.store.claim_due(datetime.now(UTC) + timedelta(seconds=1)):
+                await d.assistant.on_task_fired(due)
+            await d.assistant.drain()
+            await d.items_flush()
+        checked = d.store.item_by_key(f"maint:{core.key}")
+        assert checked is not None and not checked["needs"] and checked["state"] != "waiting"
+        assert checked["need"] is None and "No fix needed" in checked["agent"]["text"]
+        kept = maintenance.verdict_of(d.store, core)
+        assert kept is not None and kept.verdict == "unknown"
+        closed = d.store.item_by_key(f"maint:{far.key}")
+        assert closed is not None and closed["state"] == "done" and not closed["needs"]
+        assert closed["gist"] == "checked: not affected here: No fix needed: nothing here uses it"
+        assert d.store.needs_count() == 0
+        # The admin asked for the plans: "Plan ready" is all he hears, never a need.
+        assert [p["title"].startswith("Agent: Plan ready") for p in h.pushes()] == [True, True]
     finally:
         await panel.server.stop()
 
@@ -290,7 +343,7 @@ async def test_a_capped_plan_waits_queued_and_retries_by_itself(h: Harness, loca
 
 async def test_a_not_affected_verdict_closes_a_finding_whose_plan_waits(h: Harness, local_ingress: None) -> None:  # noqa: F811
     """A verdict closes the finding even while a capped Plan a fix waits for it; the queued plan is cancelled, the
-    item's history says why, and the admin's Plan a fix allowance gets the tap back."""
+    item's history says why."""
     import dataclasses
 
     from opsd import verdicts
@@ -316,8 +369,6 @@ async def test_a_not_affected_verdict_closes_a_finding_whose_plan_waits(h: Harne
         await d.items_flush()
         queued = d.store.item(item["id"])
         assert queued is not None and queued["state"] == "scheduled"
-        today = d.day(datetime.now(UTC))
-        assert d.store.count(today, "cap:plan_fix") == 1
         verdicts.record(
             d.store,
             f"maint:{far.key}",
@@ -331,33 +382,13 @@ async def test_a_not_affected_verdict_closes_a_finding_whose_plan_waits(h: Harne
         closed = d.store.item(item["id"])
         assert closed is not None and closed["state"] == "done" and closed["gist"].startswith("checked: not affected")
         assert d._cancel_queued_plan(item["id"], maintenance.NOTHING_TO_PLAN)
-        assert d.store.open_investigations() == [] and d.store.count(today, "cap:plan_fix") == 0
+        assert d.store.open_investigations() == []
         events = [e["text"] for e in d.store.item_events(item["id"])]
         assert "Plan a fix cancelled: checked: not affected here, nothing to plan" in events
         await d.items_flush()
         assert d.store.item(item["id"])["state"] == "done"  # type: ignore[index]
     finally:
         await panel.server.stop()
-
-
-def test_a_waiting_plan_stored_before_0_23_is_worded_now(tmp_path: Path) -> None:
-    """A capped plan's line is composed when shown, from its reason code and retry time: text an earlier version
-    stored ("Today's limit for chat runs ... will not be retried automatically. Next try ...") is never shown."""
-    store = Store.open(tmp_path / "ops.db")
-    ItemBook(store, Hub(), tz=lambda: UTC, clock=lambda: NOW, context=lambda: Context(acting=True))
-    store_findings(store, SUGGESTION)
-    item = store.item_by_key(f"maint:{SUGGESTION.key}")
-    assert item is not None
-    retry = NOW + timedelta(hours=7)
-    old = "Today's limit for chat runs is reached. It will not be retried automatically. Next try Fri 00:00."
-    store.create_task(kind="followup", title="Plan a fix: x", owner="admin", created_by="panel:u", next_fire_at=retry,
-                      payload={"investigation": True, "plan_fix": True, "item": item["id"], "max_steps": 2,
-                               "step": 0, "waiting": old, "waits": 1}, thread_id=f"item:{item['id']}",
-                      idempotency_key="plan_fix:old", now=NOW)  # fmt: skip
-    gist = store.item(item["id"])["gist"]  # type: ignore[index]
-    assert "chat runs" not in gist and "will not be retried" not in gist and "Next try" not in gist
-    assert gist == f"Plan a fix queued: a usage limit held it. Retrying automatically at {retry:%a %H:%M}."
-    store.close()
 
 
 async def test_stop_on_a_running_plan_cancels_it(h: Harness, local_ingress: None) -> None:  # noqa: F811
@@ -541,7 +572,7 @@ async def test_a_question_is_an_item_that_opens_at_once(h: Harness, local_ingres
         status, _, sent = await panel.request("POST", "/api/ask", body=body)
         item = sent["item"]
         assert status == 202 and item["kind"] == "question" and item["state"] == "running"
-        assert item["title"] == "How are the acme lock batteries?" and item["conversation"] == "open"
+        assert item["title"] == "How are the acme lock batteries?"
         assert sent["turn"]["thread"] == f"ask:{item['id']}"
         # The same client id is the same question, never a second one.
         status, _, again = await panel.request("POST", "/api/ask", body=body)
@@ -660,11 +691,6 @@ async def test_ask_checks_its_limits_before_it_makes_a_question(h: Harness, loca
         status, _, body = await panel.request("POST", f"/api/items/{item['id']}/messages",
                                               body={"text": "x", "client_id": "shared-01"})  # fmt: skip
         assert status == 200 and body["duplicate"]
-        # The day's message limit reached: 429, and no question left Running.
-        for _ in range(30):
-            d.store.bump(d.day(datetime.now(UTC)), "chat_turns")
-        status, _, body = await panel.request("POST", "/api/ask", body={"text": "third", "client_id": "fresh-001"})
-        assert status == 429 and body["error"] == "chat_cap"
         assert d.store.items_all(prefix="ask:") == []
     finally:
         await panel.server.stop()
@@ -682,36 +708,6 @@ def plan_change(store: Store, item: str, run: str, *, state: str = "open") -> di
                                state=state, requested_by="admin-chat:u", now=NOW, run_id=run,
                                expires_at=NOW + timedelta(days=7), files=files,
                                diff="+++ b/automations/acme_pump.yaml\n+x")  # fmt: skip
-
-
-async def test_reject_on_a_finding_with_its_own_dashboard_need_rejects_the_dashboard(
-    h: Harness,  # noqa: F811
-    local_ingress: None,  # noqa: F811
-) -> None:
-    d, panel = await started(h)
-    try:
-        assert d.store is not None
-        store_findings(d.store, NEAR, installed=f"{NOW.year}.1.0")
-        bound = {"url_path": "acme-pump", "paths": ["views[0].cards[1]"], "changes": 1, "after": "c" * 64}
-        d.store.kv_set(maintenance.DASHBOARD_KEY + NEAR.key, json.dumps({"url_path": "acme-pump", "binding": bound}),
-                       now=NOW)  # fmt: skip
-        finding = d.store.item_by_key(f"maint:{NEAR.key}")
-        assert finding is not None and finding["need"]["primary"]["id"] == "apply_dashboard"
-        change = plan_change(d.store, finding["id"], "run-pump-1")
-        await d.items_flush()
-        finding = d.store.item(finding["id"])
-        own = d.store.item_by_key(f"change:{change['id']}")
-        assert finding is not None and own is not None and "linked" not in finding["source"]
-        assert own["needs"] and own["need"]["primary"]["id"] == "apply"
-        status, _, _ = await panel.request("POST", f"/api/items/{finding['id']}/act",
-                                           body={"action": "reject", "revision": finding["revision"]})  # fmt: skip
-        assert status == 200
-        # The dashboard plan is gone; the config change is still open on its own item.
-        assert not maintenance.dashboard_plan(d.store, NEAR.key)
-        row = d.store.change(change["id"])
-        assert row is not None and row["state"] == "open"
-    finally:
-        await panel.server.stop()
 
 
 async def test_an_urgent_change_failure_asks_on_its_own_item_while_the_finding_asks(tmp_path: Path) -> None:

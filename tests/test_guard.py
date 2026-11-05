@@ -252,11 +252,9 @@ def test_a_profile_cannot_make_secrets_or_the_agent_readable(entry: str) -> None
 @pytest.mark.parametrize(
     "command",
     [
-        "opsctl ack --key 'entities:acme_solar' --days 1 --reason 'user notified'",
-        "opsctl ack --key update:update.home_assistant_core_update@2026.10.4 --days 3",
         "opsctl notify --title 'Acme Solar down' --message 'All lights unavailable' --urgent",
         "opsctl notify --title x --message '- Acme Solar failed\\n- rollback recommended'",
-        "opsctl help ack",
+        "opsctl help notify",
         "opsctl remind --at +2h --title 'Replace smoke alarm batteries' --reply",
         "opsctl remind --kind followup --at 2026-01-27T09:00 --title 'Re-check fridge'",
         "opsctl tasks",

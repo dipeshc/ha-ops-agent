@@ -1,18 +1,8 @@
-"""Privilege separation: the AI runs as `ops` and sees only a filtered export.
+"""Privilege separation: the AI runs as `ops` and sees only a filtered, root-owned export (spec privsep.md V1-V7).
 
-The OS enforces the boundary, not the hook:
-- the HA config is mounted below `/mnt/ha` (root, 0700), so `ops` cannot
-  traverse to it;
-- `/data` is 0711 and everything in it except `claude-ops/` is root-only;
-- the AI's cwd is `/run/ops-claude/config`, a root-owned, read-only copy of
-  the files that pass the guard's readability rules (with the house profile's
-  documents), rebuilt before every run: the tracked ones when git is on; when
-  it is off, only a strict allowlist of config files on disk, each redacted
-  (`disk_allowed`);
-- the Supervisor token only exists in root processes' environments, which a
-  different uid cannot read.
-`isolation_problems` re-checks the sensitive paths with the real permission
-bits before every AI run; any exposure blocks the run.
+The OS enforces the boundary: the config is not traversable by `ops`, `/data` is root-only but `claude-ops/`, and
+the export is rebuilt before every run (tracked readable files with git, a redacted disk allowlist without).
+`isolation_problems` re-checks the real permission bits before every run; any exposure blocks it.
 """
 
 import grp
@@ -21,16 +11,16 @@ import pwd
 import re
 import shutil
 import stat
-import subprocess
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from opsd import safefs
 from opsd.config import OPS_USER, Paths
 from opsd.guard import READS, Reads, denied, readable_rel
 from opsd.redact import Redactor, build_redactor
-from opsd.safegit import git_argv, git_env
+from opsd.safegit import output
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +84,6 @@ def sensitive_paths(paths: Paths) -> list[Path]:
         paths.ssh_key,
         paths.state_file,
         paths.store_file,
-        paths.store_copy,
         paths.ha_config,
         paths.ha_config / "secrets.yaml",
         paths.ha_config / ".storage",
@@ -122,11 +111,8 @@ MAX_EXPORT_FILES = 5000
 
 
 def tracked_readable_files(repo: Path, reads: Reads | None = None) -> list[str]:
-    done = subprocess.run(
-        git_argv(repo, "ls-files", "-z", "--cached"), capture_output=True, timeout=60, env=git_env(), check=True
-    )
     names: list[str] = []
-    for raw in done.stdout.split(b"\0"):
+    for raw in output(repo, "ls-files", "-z", "--cached").split(b"\0"):
         if not raw:
             continue
         name = raw.decode(errors="replace")
@@ -173,14 +159,11 @@ def disk_files(root: Path, reads: Reads | None = None) -> list[str]:
 
 def _copy_redacted(source: Path, destination: Path, redactor: Redactor, budget: list[int]) -> None:
     """One git-off file: text only, at most `MAX_DISK_FILE_BYTES`, within the total budget, redacted."""
-    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return
-        data = os.read(fd, MAX_DISK_FILE_BYTES + 1)
-    finally:
-        os.close(fd)
-    if len(data) > MAX_DISK_FILE_BYTES or len(data) > budget[0]:
+        data = safefs.read_regular(source, MAX_DISK_FILE_BYTES)
+    except safefs.NotRegular, safefs.TooLarge:
+        return
+    if len(data) > budget[0]:
         return
     try:
         text = data.decode("utf-8")

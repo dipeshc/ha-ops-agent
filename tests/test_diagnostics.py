@@ -96,14 +96,14 @@ async def test_an_api_key_never_leaves_in_the_export_or_the_state(
 
 async def test_a_missing_store_is_reported_not_raised(h: Harness) -> None:  # noqa: F811
     d = h.daemon(claude__token=TOKEN)
-    d.store, d.store_error = None, f"locked by {TOKEN}"
+    d.services, d.store_error = None, f"locked by {TOKEN}"
     out = diagnostics.build(d)
     assert out["store"] == {"available": False, "error": "locked by ***"}
 
 
 def test_every_option_group_is_summarised_and_secrets_are_set_or_unset() -> None:
     summary = diagnostics.options_summary(make_options(claude__token=""))
-    assert set(summary) == {"agent", "llm", "claude", "chat", "notify", "health", "updates", "capabilities", "usage",
+    assert set(summary) == {"agent", "claude", "chat", "notify", "health", "updates", "capabilities", "usage",
                             "limits"}  # fmt: skip
     assert summary["claude"]["token"] == "unset" and summary["notify"]["service"] == "unset"
 

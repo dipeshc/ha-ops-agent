@@ -2,8 +2,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "assessments",
-    "summary"
+    "assessments"
   ],
   "properties": {
     "assessments": {
@@ -85,13 +84,20 @@
               "needs_owner",
               "unknown"
             ]
+          },
+          "owner_action": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "maxLength": 160
+              }
+            ]
           }
         }
       }
-    },
-    "summary": {
-      "type": "string",
-      "maxLength": 300
     }
   }
 }

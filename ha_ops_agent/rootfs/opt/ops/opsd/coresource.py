@@ -1,29 +1,8 @@
-"""Home Assistant Core's own source for one integration, and `opsctl core-compare` (`ha.core_compare`).
+"""Home Assistant Core's own source for one integration, and `opsctl core-compare` (spec capabilities.md K13).
 
-Read-only. The daemon (never the AI, whose sandbox has no network) fetches a Core integration's files for an
-exact release tag:
-
-- the file list from the GitHub contents API,
-  `https://api.github.com/repos/home-assistant/core/contents/homeassistant/components/<domain>?ref=<tag>`;
-- each file from `https://raw.githubusercontent.com/home-assistant/core/<tag>/homeassistant/components/<domain>/<file>`,
-  checked against the git blob SHA the listing gives for it.
-
-Only those two hosts, through the hardened fetch (`evidence.fetch_text`: HTTPS, TLS verified, no redirect to
-another host). The domain matches `[a-z0-9_]{1,64}`, a file name `[A-Za-z0-9_.-]{1,64}` and never `..`; the tag
-for `core-compare` is the live installed Core version, never model input. A file is at most 256 KiB, a listing
-at most 40 files. GitHub's "slow down" (403/429) stops these calls for a while (`BACKOFF_KEY`, separate from the
-release-note fetches). The blob SHA check is a consistency check between GitHub's two hosts (the raw file is the one
-the listing names), not a supply-chain control: both come from GitHub over TLS.
-
-Cache: under `/data/core-source/` (root-only, directories 0700, files 0600): each listing by tag and domain (a tag
-never changes), and each file by its blob SHA (verified again when read). Listings of other tags than the ones in
-use, and files older than `BLOB_KEEP`, are pruned.
-
-`core-compare <domain>` compares `/config/custom_components/<domain>/` (top-level files, read as root, never
-through a symlink) with Core's files for the running version: a unified diff per file and a summary (files only in
-the custom integration, only in Core, changed lines per file). Everything is redacted, fenced as untrusted data and
-capped (`MAX_DIFF_BYTES`, cut with a clear marker). When Core has no such integration it says so: a pure custom
-integration.
+Read-only, fetched by the daemon only (the AI's sandbox has no network) from GitHub's contents API and raw host
+for an exact release tag, each file checked against the listing's blob SHA, cached root-only under
+`/data/core-source/`. Every byte shown to the AI is redacted, fenced and capped.
 """
 
 import contextlib
@@ -42,12 +21,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from opsd import evidence
+from opsd import evidence, safefs
 from opsd.capabilities import Args, CapabilityError
 from opsd.conversation import fence
 from opsd.jsonstore import write_json_atomic
 from opsd.runctx import ExecContext
-from opsd.store import Store, StoreError
+from opsd.store import Store
 from opsd.supervisor import ApiError
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,7 +36,6 @@ RAW_HOST = "raw.githubusercontent.com"
 LISTING_URL = "https://api.github.com/repos/home-assistant/core/contents/homeassistant/components/{domain}?ref={tag}"
 RAW_URL = "https://raw.githubusercontent.com/home-assistant/core/{tag}/homeassistant/components/{domain}/{name}"
 TREE_URL = "https://github.com/home-assistant/core/tree/{tag}/homeassistant/components/{domain}"
-DOMAIN_RE = re.compile(r"[a-z0-9_]{1,64}")
 FILE_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 # A Core release tag (`2026.10.3`, or a beta `2026.11.0b2`); a dev build has no tag to compare with.
 TAG_RE = re.compile(r"20\d{2}\.(?:[1-9]|1[0-2])\.\d{1,3}(?:b\d{1,2})?")
@@ -88,7 +66,7 @@ class CoreSourceError(RuntimeError):
 
 
 def valid_domain(domain: str) -> bool:
-    return bool(DOMAIN_RE.fullmatch(domain))
+    return bool(evidence.DOMAIN_RE.fullmatch(domain))
 
 
 def valid_file(name: str) -> bool:
@@ -183,12 +161,6 @@ def clean_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "?", name)[:64] or "?"
 
 
-def _private_dir(path: Path) -> Path:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
-    return path
-
-
 class CoreSource:
     """Fetches and caches Core's files (see the module docstring)."""
 
@@ -196,32 +168,15 @@ class CoreSource:
                  clock: Callable[[], datetime] = lambda: datetime.now(UTC),
                  deadline_s: float = DEADLINE_S) -> None:  # fmt: skip
         self._root = data_dir / CACHE_DIR
-        self._store = store
         self._clock = clock
+        self._backoff = evidence.GithubBackoff(store, BACKOFF_KEY, clock)
         self._deadline = time.monotonic() + deadline_s
         self.fetched = 0
 
     # ------------------------------------------------------------ GitHub
 
-    def _backing_off(self) -> bool:
-        if self._store is None:
-            return False
-        try:
-            until = self._store.kv_get(BACKOFF_KEY)
-            return bool(until) and self._clock() < datetime.fromisoformat(until)
-        except StoreError, ValueError, OSError:
-            return False
-
-    def _note_failure(self, err: evidence.FetchError) -> None:
-        if err.status not in (403, 429) or self._store is None:
-            return
-        try:
-            self._store.kv_set(BACKOFF_KEY, (self._clock() + evidence.BACKOFF).isoformat(), now=self._clock())
-        except (StoreError, OSError) as store_err:
-            _LOGGER.warning("backoff not recorded", extra={"error": str(store_err)[:120]})
-
     def _get(self, url: str, host: str, *, max_bytes: int, raw: bool) -> str:
-        if self._backing_off():
+        if self._backoff.active():
             raise CoreSourceError("GitHub asked to slow down; try again in half an hour")
         remaining = self._deadline - time.monotonic()
         if remaining <= 1:
@@ -231,7 +186,7 @@ class CoreSource:
             text = evidence.fetch_text(url, timeout=min(FETCH_TIMEOUT_S, remaining), hosts=frozenset({host}),
                                        max_bytes=max_bytes, raw=raw)  # fmt: skip
         except evidence.FetchError as err:
-            self._note_failure(err)
+            self._backoff.note(err)
             raise
         self.fetched += 1
         return text
@@ -263,8 +218,8 @@ class CoreSource:
                 found = parse_listing(text, tag, domain)
             except (ValueError, TypeError) as err:
                 raise CoreSourceError(f"GitHub's file list is unreadable: {str(err)[:120]}") from err
-        _private_dir(path.parent.parent)
-        _private_dir(path.parent)
+        safefs.private_dir(path.parent.parent)
+        safefs.private_dir(path.parent)
         write_json_atomic(path, found.to_json(), mode=0o600)
         return found
 
@@ -277,10 +232,7 @@ class CoreSource:
         if entry is None or not valid_file(name):
             raise CoreSourceError(f"Core's {listing.domain} at {listing.tag} has no file {clean_name(name)}")
         path = self._blob_path(entry.sha)
-        try:
-            data = _read_file(path, MAX_FILE_BYTES)
-        except OSError:
-            data = None
+        data = safefs.read_or_none(path, MAX_FILE_BYTES)
         if data is None or blob_sha(data) != entry.sha:
             url = RAW_URL.format(tag=listing.tag, domain=listing.domain, name=name)
             try:
@@ -292,9 +244,9 @@ class CoreSource:
                 raise CoreSourceError(
                     f"Core's {name} at {listing.tag} does not match the blob SHA GitHub's listing gives for it"
                 )
-            _private_dir(path.parent.parent)
-            _private_dir(path.parent)
-            _write_private(path, data)
+            safefs.private_dir(path.parent.parent)
+            safefs.private_dir(path.parent)
+            safefs.write_private(path, data)
         else:
             os.utime(path)
         try:
@@ -336,31 +288,6 @@ def window_tags(installed: str, months: int = WINDOW_MONTHS) -> list[str]:
     return tags
 
 
-def _read_file(path: Path, limit: int) -> bytes | None:
-    """A regular file, never through a symlink, at most `limit` bytes; None otherwise."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        data = os.read(fd, limit + 1)
-    finally:
-        os.close(fd)
-    return None if len(data) > limit else data
-
-
-def _write_private(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    try:
-        view = memoryview(data)
-        while view:
-            view = view[os.write(fd, view) :]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
-
-
 # ------------------------------------------------------------------ the custom integration
 
 
@@ -374,38 +301,31 @@ class LocalFiles:
     skipped: dict[str, str] = field(default_factory=dict)
 
 
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-
-
 @contextlib.contextmanager
 def domain_fd(custom_components: Path, domain: str) -> Iterator[int]:
     """A descriptor of `custom_components/<domain>`, reached by walking from the config directory one level at a
-    time with `O_DIRECTORY | O_NOFOLLOW` (`changes.LiveFiles` does the same): a link swapped in for
+    time (`safefs.open_dir`): a link swapped in for
     `custom_components` or the domain's directory at any moment is never followed. Every read and write of the
     integration's files goes through this descriptor. CoreSourceError when it is not a plain directory with a
     regular `manifest.json`."""
     if not valid_domain(domain):
         raise CoreSourceError("an integration domain is lowercase letters, digits and underscores")
-    opened: list[int] = []
+    try:
+        fd = safefs.open_dir(custom_components.parent, [custom_components.name, domain])
+    except FileNotFoundError as err:
+        raise CoreSourceError(f"there is no custom integration {domain} on this install") from err
+    except OSError as err:
+        raise CoreSourceError(f"custom_components/{domain} is not a plain directory (never a link)") from err
     try:
         try:
-            opened.append(os.open(custom_components.parent, _DIR_FLAGS))
-            opened.append(os.open(custom_components.name, _DIR_FLAGS, dir_fd=opened[-1]))
-            opened.append(os.open(domain, _DIR_FLAGS, dir_fd=opened[-1]))
-        except FileNotFoundError as err:
-            raise CoreSourceError(f"there is no custom integration {domain} on this install") from err
-        except OSError as err:
-            raise CoreSourceError(f"custom_components/{domain} is not a plain directory (never a link)") from err
-        try:
-            manifest = os.stat("manifest.json", dir_fd=opened[-1], follow_symlinks=False)
+            manifest = os.stat("manifest.json", dir_fd=fd, follow_symlinks=False)
         except OSError as err:
             raise CoreSourceError(f"there is no custom integration {domain} on this install") from err
         if not stat.S_ISREG(manifest.st_mode):
             raise CoreSourceError(f"custom_components/{domain} is not a plain directory with a manifest")
-        yield opened[-1]
+        yield fd
     finally:
-        for fd in reversed(opened):
-            os.close(fd)
+        os.close(fd)
 
 
 def custom_dir(custom_components: Path, domain: str) -> Path:
@@ -413,26 +333,6 @@ def custom_dir(custom_components: Path, domain: str) -> Path:
     otherwise. The path is only for messages: file access goes through `domain_fd`."""
     with domain_fd(custom_components, domain):
         return custom_components / domain
-
-
-def read_at(dir_fd: int, name: str, limit: int = MAX_FILE_BYTES) -> bytes | None:
-    """A regular file in the directory `dir_fd`, never through a link, at most `limit` bytes; None otherwise."""
-    try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        chunks: list[bytes] = []
-        size = 0
-        while size <= limit and (chunk := os.read(fd, min(1 << 16, limit + 1 - size))):
-            chunks.append(chunk)
-            size += len(chunk)
-    finally:
-        os.close(fd)
-    data = b"".join(chunks)
-    return None if len(data) > limit else data
 
 
 def read_custom(custom_components: Path, domain: str) -> LocalFiles:
@@ -461,7 +361,7 @@ def read_custom(custom_components: Path, domain: str) -> LocalFiles:
             if len(found.files) >= MAX_FILES:
                 found.skipped[name] = f"more than {MAX_FILES} files"
                 continue
-            data = read_at(root, name)
+            data = safefs.read_or_none(name, MAX_FILE_BYTES, dir_fd=root)
             if data is None:
                 found.skipped[name] = f"not a regular file of at most {MAX_FILE_BYTES // 1024} KiB"
                 continue

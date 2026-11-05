@@ -1,4 +1,4 @@
-"""Baseline of accepted state, and the diff that decides whether the AI runs."""
+"""Baseline of accepted state, and the diff that decides whether the AI runs (spec health.md H10-H13a)."""
 
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
@@ -17,9 +17,8 @@ BACKUP_ANY_MAX_AGE_H = 26
 DISK_FREE_MIN_PCT = 15.0
 MEM_AVAILABLE_MIN_MB = 600
 SWAP_USED_MAX_PCT = 50.0
-# Items the daemon pushes itself (once per distinct drift) and never hands to triage.
+# The vacuums overlay's room drift: never triaged, pushed by the item book (once per distinct drift).
 VACUUM_ROOMS_KIND = "vacuum_rooms"
-DAEMON_PUSHED_KINDS = frozenset({VACUUM_ROOMS_KIND})
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +43,6 @@ class Baseline:
     repairs: list[str] = field(default_factory=list)
     resolution: list[str] = field(default_factory=list)
     log_fps: dict[str, dict[str, Any]] = field(default_factory=dict)
-    updates_seen: dict[str, str] = field(default_factory=dict)
     custom_ok: dict[str, bool] = field(default_factory=dict)
     boot_timestamp: int | None = None
     oom_seen: int = 0
@@ -183,7 +181,6 @@ def seed(snapshot: Snapshot, now: datetime, *, expected_unavailable: frozenset[s
         repairs=sorted(set(snapshot.repairs) - set(excluded["critical_repairs"])),
         resolution=sorted(snapshot.resolution.get("issues", [])),
         log_fps={fp: {"count": v["count"], "last_seen": snapshot.taken_at} for fp, v in snapshot.log_errors.items()},
-        updates_seen={u["entity_id"]: str(u["latest"]) for u in snapshot.updates},
         custom_ok=dict.fromkeys(snapshot.custom_integrations, True),
         boot_timestamp=snapshot.boot_timestamp,
         oom_seen=len(snapshot.oom_kills),
@@ -235,15 +232,8 @@ def diff(
     items: list[Item] = []
     custom = set(snapshot.custom_integrations)
 
-    if snapshot.core.get("state") not in (None, "running") or not snapshot.core.get("api_up", True):
-        items.append(
-            Item(
-                "core:down",
-                "core",
-                "critical",
-                f"Core state {snapshot.core.get('state')}, API up: {snapshot.core.get('api_up')}",
-            )
-        )
+    if not snapshot.core.get("api_up", True):
+        items.append(Item("core:down", "core", "critical", "Core's API is not answering"))
 
     # Newly unavailable entities, grouped per integration. Recent flips are
     # skipped so a device rebooting during the check does not count, except
@@ -353,19 +343,6 @@ def diff(
                     dict(info),
                 )
             )
-
-    for update in snapshot.updates:
-        if baseline.updates_seen.get(update["entity_id"]) == str(update["latest"]):
-            continue
-        items.append(
-            Item(
-                f"update:{update['entity_id']}@{update['latest']}",
-                "update",
-                "info",
-                f"{update['title']} {update['installed']} -> {update['latest']} ({update['tier']}: {update['reason']})",
-                dict(update),
-            )
-        )
 
     items.extend(_assist_items(snapshot, baseline))
     items.extend(_vacuum_room_items(snapshot, baseline))
@@ -570,9 +547,8 @@ def advance(baseline: Baseline, snapshot: Snapshot, now: datetime) -> Baseline:
     """Fold a processed snapshot into the baseline.
 
     Recovered entities, entries and repairs drop out (so a recurrence counts
-    as new), updates are remembered so each version is reported once, log
-    fingerprints are refreshed and expire after 30 days unseen, and expired
-    acks are removed.
+    as new), log fingerprints are refreshed and expire after 30 days unseen,
+    and expired acks are removed.
     """
     log_fps = dict(baseline.log_fps)
     for fp, info in snapshot.log_errors.items():
@@ -587,7 +563,6 @@ def advance(baseline: Baseline, snapshot: Snapshot, now: datetime) -> Baseline:
         repairs=sorted(set(baseline.repairs) & set(snapshot.repairs)),
         resolution=sorted(set(baseline.resolution) & set(snapshot.resolution.get("issues", []))),
         log_fps=log_fps,
-        updates_seen={u["entity_id"]: str(u["latest"]) for u in snapshot.updates},
         # Only a user ack may record a custom integration as known-broken.
         custom_ok={
             d: True if _custom_ok(i) else baseline.custom_ok.get(d, True)
@@ -621,8 +596,8 @@ def apply_ack(
 ) -> Baseline:
     """Ack an item for `days`; `accept` folds permanent conditions into the baseline.
 
-    The AI may only snooze a critical item for a few days and may never
-    accept one; that takes the user (via the admin panel).
+    Only the admin (`by="user"`) may accept a critical item or snooze one beyond a few days. The ack keeps the
+    item, so it can be shown resolved and overridden by the admin.
     """
     days = max(1, min(30, days))
     if item.severity == "critical" and by != "user":
@@ -636,6 +611,7 @@ def apply_ack(
         "acked_at": now.isoformat(timespec="seconds"),
         "by": by,
         "accepted": accept,
+        "item": item.to_json(),
     }
     if not accept:
         return baseline

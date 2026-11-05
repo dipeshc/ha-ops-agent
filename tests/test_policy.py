@@ -243,7 +243,6 @@ def test_chat_origin_only_reads_schedules_and_notifies() -> None:
     for bad in (
         GIT,
         frozenset({Effect.MUTATE_HA}),
-        frozenset({Effect.AGENT_STATE}),
         frozenset({Effect.READ, Effect.MUTATE_HA}),
     ):
         v = verdict(bad)

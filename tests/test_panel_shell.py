@@ -254,7 +254,7 @@ def test_conversation_cards_are_text_with_fixed_actions() -> None:
         {"status": "investigation", "text": f"{EVIL}. Step 1 of 2.", "meta": {"task": 7, "actions": ["cancel"]}},
         {"status": "investigation", "text": "Done.", "meta": {"task": 7, "actions": [], "done": True}},
     ]  # fmt: skip
-    state = "{conv: {item: 'q-1', thread: 'ask:q-1', turns: [], loaded: true, readOnly: false}}"
+    state = "{conv: {item: 'q-1', thread: 'ask:q-1', turns: [], loaded: true}}"
     backup, running, done = _run(
         _views(state) + f"console.log(JSON.stringify({json.dumps(cards)}.map((t) => dump(V.card(t)))));"
     )
@@ -274,15 +274,14 @@ def test_a_conversation_renders_text_only_with_link_cards_and_its_composer() -> 
         {"id": 3, "thread": "item:m-1", "role": "system", "status": "link", "text": f"Investigation: {EVIL}",
          "at": "2026-01-30T09:01:00Z", "meta": {"item": "r-0123456789ab"}},
     ]  # fmt: skip
-    conv = {"item": "m-1", "thread": "item:m-1", "turns": turns, "loaded": True, "readOnly": False, "more": False}
+    conv = {"item": "m-1", "thread": "item:m-1", "turns": turns, "loaded": True, "more": False}
     item = {"id": "m-1", "kind": "maintenance", "title": "t"}
     question = {"id": "q-1", "kind": "question", "title": "q"}
     program = _views(json.dumps({"conv": conv, "drafts": {}})) + (
         f"const a = V.convo({json.dumps(item)}); const q = V.convo({json.dumps(question)});"
-        " S.conv.readOnly = true; const ro = V.convo({id: 'q-0', kind: 'question', title: 'x'});"
         " const links = []; const find = (n) => { if (n.attrs && n.attrs.class === 'link') links.push(n);"
         " (n.kids || []).forEach(find); }; find(a); links[0].on.click();"
-        " console.log(JSON.stringify({a: dump(a), q: dump(q), ro: dump(ro), calls}));"
+        " console.log(JSON.stringify({a: dump(a), q: dump(q), calls}));"
     )
     out = _run(program)
     tree = out["a"]
@@ -296,14 +295,6 @@ def test_a_conversation_renders_text_only_with_link_cards_and_its_composer() -> 
     assert [n["attrs"].get("role") for n in _find(tree, lambda n: n["attrs"].get("class") == "msgs")] == ["log"]
     assert [n["attrs"].get("aria-label") for n in _find(out["q"], lambda n: n["tag"] == "textarea")] == [
         "Ask a follow-up"]  # fmt: skip
-    # The earlier one chat is read only: no composer.
-    assert _find(out["ro"], lambda n: n["tag"] == "textarea") == [] and "read only" in _text(out["ro"])
-
-
-@needs_node
-def test_ask_never_lists_the_earlier_conversation() -> None:
-    load = re.search(r"async function loadAsks\(\) \{.*?\n\}\n", BODY, re.S)
-    assert load is not None and 'filter((t) => t.conversation !== "read_only")' in load.group(0)
 
 
 @needs_node

@@ -15,7 +15,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from opsd.safegit import UnsafeRepoConfigError, git_argv, git_env, status_lines
+from opsd import safegit
+from opsd.safegit import UnsafeRepoConfigError, status_lines
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,15 +48,13 @@ class Repo:
 
     def _env(self) -> dict[str, str]:
         # GIT_SSH_COMMAND wins over the repo's core.sshCommand (the SSH add-on's key).
-        return git_env(
-            {
-                "GIT_SSH_COMMAND": (
-                    f"ssh -i {self.ssh_key} -o IdentitiesOnly=yes -o BatchMode=yes "
-                    f"-o UserKnownHostsFile={self.known_hosts} -o GlobalKnownHostsFile=/dev/null "
-                    "-o StrictHostKeyChecking=yes -o UpdateHostKeys=no"
-                )
-            }
-        )
+        return {
+            "GIT_SSH_COMMAND": (
+                f"ssh -i {self.ssh_key} -o IdentitiesOnly=yes -o BatchMode=yes "
+                f"-o UserKnownHostsFile={self.known_hosts} -o GlobalKnownHostsFile=/dev/null "
+                "-o StrictHostKeyChecking=yes -o UpdateHostKeys=no"
+            )
+        }
 
     def run(self, *args: str) -> str:
         return self.raw(*args).decode(errors="replace")
@@ -63,14 +62,8 @@ class Repo:
     def raw(self, *args: str, data: bytes | None = None, env: dict[str, str] | None = None) -> bytes:
         """One git command; bytes in and out (blobs are not always text)."""
         try:
-            done = subprocess.run(
-                git_argv(self.path, *args),
-                input=data,
-                capture_output=True,
-                timeout=self.timeout,
-                env={**self._env(), **(env or {})},
-                check=False,
-            )
+            done = safegit.run(self.path, *args, data=data, timeout=self.timeout,
+                               env={**self._env(), **(env or {})})  # fmt: skip
         except (subprocess.TimeoutExpired, FileNotFoundError, UnsafeRepoConfigError) as err:
             raise GitError(f"git {args[0]}: {err}") from err
         if done.returncode != 0:

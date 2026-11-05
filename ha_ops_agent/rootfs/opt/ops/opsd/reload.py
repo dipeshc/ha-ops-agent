@@ -1,30 +1,8 @@
-"""Reload one integration's config entries, the agent's own first repair.
+"""Reload one integration's config entries, the agent's own first repair (spec reload.md L1-L6).
 
-The agent may reload an integration whenever it judges that it is needed: for a config
-entry stuck in `setup_retry`, when the admin asks in the chat, or before an overlay's
-check that reads an integration's cache. A reload changes no
-configuration; at worst one integration's entities are unavailable for a few seconds.
-
-Everything that bounds the power lives here, in code, and fails closed:
-
-- Allowlist: only a domain in the admin's `capabilities.reloadable_domains`, else the house
-  profile's `reload.domains` (none without a profile).
-- Never, even if allowlisted: `DENY_DOMAINS` (locks, the alarm, anything that opens the
-  house, Bluetooth, the bridges and the plumbing the house and the agent depend on), the
-  house profile's `reload.deny`, a domain the admin blocks with
-  `integration.reload.<domain>` in `capabilities.never`, and any domain whose entities
-  include a lock, an alarm panel, a cover that is not positively a
-  blind/shade/curtain/awning/shutter, or a switch/button/valve named after a garage,
-  gate, door or lock (checked live against the registry and the states).
-- At most one reload per domain every 10 minutes (persisted in the store's `kv`; a corrupt state refuses),
-  on top of the capability's daily quota, which is only taken once every check passed.
-- Never while one of the integration's vacuums is cleaning, returning or paused.
-- Never an integration whose entries report `supports_unload: false`: Core cannot unload them, so a reload
-  leaves the entry `failed_unload` until Core restarts.
-- One overall deadline below the 120 s RPC timeout; a partial reload is reported.
-
-The domain is the only input. Entry ids are resolved here from Core, never taken from
-the caller.
+Every bound lives here and fails closed: the allowlist, the never-lists (code, profile, options), live checks that
+the integration opens nothing in the house, one reload per domain per 10 minutes, no reload while a vacuum works or
+of an entry Core cannot unload, and one overall deadline. The domain is the only input.
 """
 
 import asyncio
@@ -416,8 +394,5 @@ async def exec_reload(ctx: ExecContext, args: Args) -> dict[str, Any]:
     domain = args.text("domain")
     options = ctx.options
     async with LiveAPI(ctx.client) as api:
-        result = await reload_domain(api, ctx.env.store, domain, allowed=options.reloadable,
-                                     never=options.capabilities.never, deny=options.profile.reload.deny)  # fmt: skip
-    if ctx.run is not None:
-        ctx.run.effects.notes.append(result["message"][:300])
-    return result
+        return await reload_domain(api, ctx.env.store, domain, allowed=options.reloadable,
+                                   never=options.capabilities.never, deny=options.profile.reload.deny)  # fmt: skip

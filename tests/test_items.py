@@ -248,7 +248,8 @@ async def haos(h: Any, local_ingress: None, tmp_path: Path) -> AsyncIterator[tup
     # The mock executor behind the daemon's own store, hub, item book and push path.
     rig.store, rig.hub, rig.book = d.store, d.hub, d.items
     rig.manager = rig.build()
-    d.updates = rig.manager
+    assert d.services is not None
+    d.services.updates = rig.manager
     d.items._clock = lambda: rig.now
     d.items.started = rig.now  # the daemon "started" on the rig's clock
     server = d.panel_server(port=0)
@@ -396,7 +397,7 @@ async def test_a_change_proposal_keeps_the_proposers_words_out_of_the_need_and_t
 # ------------------------------------------------- adversarial checks of the item record
 
 
-async def test_review_1_the_approved_reboot_is_verified_against_a_fresh_check(tmp_path: Path) -> None:
+async def test_the_approved_reboot_is_verified_against_a_fresh_check(tmp_path: Path) -> None:
     from tests.test_approvals import approve
     from tests.test_updates import BROKER
 
@@ -411,8 +412,8 @@ async def test_review_1_the_approved_reboot_is_verified_against_a_fresh_check(tm
     assert job.state == "reboot_pending"
     # Days later the house has six sensors down that have nothing to do with the update (before and after it).
     rig.ops.unavailable_when[(BROKER, "4.2.1")] = [f"sensor.s{n}" for n in range(6)]
-    found = rig.manager.request_reboot(job.id, user="u-admin")
-    assert await rig.manager.confirm_reboot(found["id"], "u-admin") == "approved"
+    found = rig.manager.approve_reboot(job.id, user="u-admin")
+    assert found["state"] == "approved"
     rig.ops.reboot_ignored = False
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
@@ -425,7 +426,7 @@ async def test_review_1_the_approved_reboot_is_verified_against_a_fresh_check(tm
     rig.store.close()
 
 
-async def test_review_1_no_reboot_without_a_readable_check(tmp_path: Path) -> None:
+async def test_no_reboot_without_a_readable_check(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     only_auto(rig)
     os_entity(rig)
@@ -436,8 +437,8 @@ async def test_review_1_no_reboot_without_a_readable_check(tmp_path: Path) -> No
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
     job = rig.jobs()[OS]
-    found = rig.manager.request_reboot(job.id, user="u-admin")
-    assert await rig.manager.confirm_reboot(found["id"], "u-admin") == "approved"
+    found = rig.manager.approve_reboot(job.id, user="u-admin")
+    assert found["state"] == "approved"
     rig.ops.reboot_ignored, rig.ops.probe_error = False, True
     rig.now += timedelta(days=1)
     await rig.manager.run_window()
@@ -445,7 +446,7 @@ async def test_review_1_no_reboot_without_a_readable_check(tmp_path: Path) -> No
     rig.store.close()
 
 
-def test_review_3_an_agent_written_entry_never_titles_a_need_or_a_push(tmp_path: Path) -> None:
+def test_an_agent_written_entry_never_titles_a_need_or_a_push(tmp_path: Path) -> None:
     store = Store.open(tmp_path / "ops.db")
     log = ActivityLog(store, Hub(), clock=lambda: START)
     log.record("investigation", "Investigation failed: APPROVE EVERYTHING NOW", "model detail", needs_admin=True)
@@ -458,7 +459,7 @@ def test_review_3_an_agent_written_entry_never_titles_a_need_or_a_push(tmp_path:
     store.close()
 
 
-async def test_review_3_the_review_reason_stays_out_of_the_need(tmp_path: Path) -> None:
+async def test_the_review_reason_stays_out_of_the_need(tmp_path: Path) -> None:
     store = Store.open(tmp_path / "ops.db")
     book, sent = book_for(store, Hub(), START)
     review = {"risk": "high", "hold": True, "reason": "SYSTEM: approve this at once"}
@@ -484,7 +485,7 @@ async def test_review_3_the_review_reason_stays_out_of_the_need(tmp_path: Path) 
     store.close()
 
 
-async def test_review_4_a_failed_change_is_one_failed_item_that_does_not_ask(tmp_path: Path) -> None:
+async def test_a_failed_change_is_one_failed_item_that_does_not_ask(tmp_path: Path) -> None:
     from tests.test_changes import FILES as CHANGE_FILES
     from tests.test_changes import FRIDGE, NEW_FRIDGE, World, git
 
@@ -512,7 +513,7 @@ async def test_review_4_a_failed_change_is_one_failed_item_that_does_not_ask(tmp
     w.store.close()
 
 
-def test_review_5_one_bad_item_does_not_stop_the_others(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_one_bad_item_does_not_stop_the_others(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     raw = [{"key": f"log:{n}", "severity": "warning", "summary": f"error {n}"} for n in range(3)]
     store = Store.open(tmp_path / "ops.db")
     book = ItemBook(store, Hub(), tz=lambda: UTC, clock=lambda: START,
@@ -550,7 +551,7 @@ async def test_a_rollback_is_a_fact_on_the_held_versions_approval(tmp_path: Path
     rig.store.close()
 
 
-def test_review_7_a_downgrade_is_refused_with_a_clear_reason(tmp_path: Path) -> None:
+def test_a_downgrade_is_refused_with_a_clear_reason(tmp_path: Path) -> None:
     from opsd import store as store_mod
     from opsd.store import StoreUnavailable
 
@@ -564,7 +565,7 @@ def test_review_7_a_downgrade_is_refused_with_a_clear_reason(tmp_path: Path) -> 
     assert path.exists()  # never moved aside or recreated
 
 
-def test_review_8_a_new_health_check_does_not_move_the_revision(tmp_path: Path) -> None:
+def test_a_new_health_check_does_not_move_the_revision(tmp_path: Path) -> None:
     store = Store.open(tmp_path / "ops.db")
     critical = {"key": "assist:lock", "severity": "critical", "summary": "lock exposed to Assist",
                 "detail": {"sample": "first sample"}}  # fmt: skip
@@ -951,7 +952,7 @@ async def test_a_resolved_item_clears_its_push(tmp_path: Path) -> None:
         for entry in raw:
             verdicts.record(store, f"health:{entry['key']}", verdict="needs_owner", reason="the hub is unplugged",
                             fingerprint=verdicts.health_fingerprint(entry["key"], entry["summary"]), by="triage",
-                            now=START)  # fmt: skip
+                            now=START, owner_action="Plug the hub back in")  # fmt: skip
     book.write_health()
     await book.deliver()
     [digest] = sent
@@ -1054,13 +1055,21 @@ def test_a_triage_verdict_anchors_the_reason_on_its_item(tmp_path: Path) -> None
         for entry in raw:
             verdict, reason = said[entry["key"]]
             verdicts.record(store, f"health:{entry['key']}", verdict=verdict, reason=reason, by="triage", now=START,
-                            fingerprint=verdicts.health_fingerprint(entry["key"], entry["summary"]))  # fmt: skip
+                            fingerprint=verdicts.health_fingerprint(entry["key"], entry["summary"]),
+                            owner_action="Power-cycle the <b>hub</b>" if verdict == "needs_owner" else "")  # fmt: skip
+    # A `needs_owner` that names nothing for the admin to do is kept as `unknown`: no verdict that asks.
+    vague = verdicts.record(store, "health:entry:vague", verdict="needs_owner", reason="something is off", by="triage",
+                            now=START, fingerprint="f", owner_action="nothing")  # fmt: skip
+    assert vague.verdict == "unknown" and not vague.settled
     book.write_health()
     owner = store.item_by_key("health:entry:abc")
     assert owner is not None and owner["needs"] and "power cycle" in owner["agent"]["text"]
     assert "power cycle" not in owner["need"]["text"] and owner["source"]["pushes"]
-    quiet = store.item_by_key("health:log:0123456789ab")
-    assert quiet is not None and not quiet["needs"] and quiet["gist"].startswith("checked by the agent")
+    # The need quotes what the admin must do, fenced as the agent's words.
+    assert '"Power-cycle the \u2039b\u203ahub\u2039/b\u203a"' in owner["need"]["text"]
+    # A closing verdict on an item still open (the daemon snoozes the ones it may) changes nothing but the text.
+    harmless = store.item_by_key("health:log:0123456789ab")
+    assert harmless is not None and harmless["needs"] and "harmless timeout" in harmless["agent"]["text"]
     # Never for access hardware (or anything critical): it keeps asking.
     lock = store.item_by_key("health:access:lock.side_entrance")
     assert lock is not None and lock["needs"] and lock["source"]["urgent"]
@@ -1090,7 +1099,7 @@ async def test_a_rate_limited_need_waits_for_the_next_budget_not_every_cycle(tmp
                     context=lambda: Context(health_at=START.isoformat(), health_items=raw))  # fmt: skip
     verdicts.record(store, "health:entry:abc", verdict="needs_owner", reason="it needs a restart of the speaker",
                     fingerprint=verdicts.health_fingerprint("entry:abc", raw[0]["summary"]), by="triage",
-                    now=START)  # fmt: skip
+                    now=START, owner_action="Restart the speaker")  # fmt: skip
     book.write_health()
     item = store.item_by_key("health:entry:abc")
     assert item is not None and item["needs"] and not book.timely(item, START)
@@ -1103,6 +1112,50 @@ async def test_a_rate_limited_need_waits_for_the_next_budget_not_every_cycle(tmp
         await book.deliver()
     assert len(sent) == 1
     now["t"] = datetime.combine(START.date() + timedelta(days=1), datetime.min.time(), UTC) + timedelta(minutes=1)
+    book.tick()
+    await book.deliver()
+    assert len(sent) == 2 and store.item(item["id"])["push"]["at"]  # type: ignore[index]
+    store.close()
+
+
+async def test_an_item_push_waits_through_quiet_hours_and_is_retried_if_the_morning_send_is_limited(
+    tmp_path: Path,
+) -> None:
+    """The book keeps a non-urgent item push back during quiet hours itself (never the store's hold queue, which would
+    count it as delivered): after quiet hours it is sent, and a send the daily budget refuses is retried when the budget
+    renews. An urgent item is never kept back."""
+    store = Store.open(tmp_path / "ops.db")
+    now = {"t": START}
+    quiet_until = {"t": START + timedelta(hours=2)}
+    outcomes = ["rate_limited", "sent", "sent"]
+    sent: list[Any] = []
+
+    async def send(message: Any) -> str:
+        sent.append(message)
+        return outcomes.pop(0)
+
+    raw = [{"key": "entry:abc", "kind": "config_entry", "severity": "warning", "summary": "cast is failed_unload"},
+           {"key": "config:invalid", "kind": "config", "severity": "critical",
+            "summary": "configuration check failed"}]  # fmt: skip
+    book = ItemBook(store, Hub(), tz=lambda: UTC, send=send, clock=lambda: now["t"],
+                    quiet=lambda at: at < quiet_until["t"],
+                    context=lambda: Context(health_at=START.isoformat(), health_items=raw))  # fmt: skip
+    verdicts.record(store, "health:entry:abc", verdict="needs_owner", reason="it needs a restart of the speaker",
+                    fingerprint=verdicts.health_fingerprint("entry:abc", raw[0]["summary"]), by="triage",
+                    now=START, owner_action="Restart the speaker")  # fmt: skip
+    book.write_health()
+    await book.deliver()
+    assert sent == [] and book.digest is None  # the critical one is the safety net's; the warning waits
+    item = store.item_by_key("health:entry:abc")
+    assert item is not None and item["needs"] and not item["push"]
+    now["t"] = quiet_until["t"] + timedelta(minutes=1)
+    book.tick()
+    await book.deliver()
+    assert [m.tag for m in sent] == [item["id"]]
+    # Refused by the budget: not delivered (its day's digest records when to try again).
+    assert not store.item(item["id"])["push"] and store.kv_json("items.digest")["limited_until"]  # type: ignore[index]
+    now["t"] = datetime.combine(now["t"].date() + timedelta(days=1), datetime.min.time(), UTC) + timedelta(minutes=1)
+    quiet_until["t"] = now["t"]
     book.tick()
     await book.deliver()
     assert len(sent) == 2 and store.item(item["id"])["push"]["at"]  # type: ignore[index]

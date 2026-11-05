@@ -74,12 +74,9 @@ commands and triggers.
 
 - `tests/test_selfguard.py`: the agent never targets itself, the Supervisor or
   the host through any Supervisor, Core REST or websocket call, update job,
-  reload or proposal path, except the single-use approved OS update flow;
-  `tests/test_dashboards.py`: a dashboard is saved only inside the
-  single-use scope of an approved plan, never a default, generated or
-  malformed one (`docs/spec/selfguard.md`, `docs/spec/maintenance.md`).
-  Run whenever a call site, a URL-building function or a dashboard save
-  changes.
+  reload or proposal path, except the single-use approved OS update flow
+  and Core restart, and never writes a dashboard (`docs/spec/selfguard.md`).
+  Run whenever a call site or a URL-building function changes.
 - `tests/test_privsep.py` and `tests/test_guard.py`: the AI process runs as
   the unprivileged `ops` account, reaches only the secret-free export and the
   drafts directory, never a secrets file or directory in any letter case, and
@@ -137,8 +134,8 @@ commands and triggers.
   messages say "the agent", "the AI" or "the model". Name a provider or a
   product (Claude, Claude Code, Anthropic) only where the behaviour is
   genuinely provider-specific: the runner module for that provider, its
-  token or API-key handling, its managed settings, and the `llm.provider`
-  option values. `docs/spec/ai-runner.md` owns that section.
+  token or API-key handling, its managed settings, and the `claude.*`
+  options. `docs/spec/ai-runner.md` owns that section.
 - **Untrusted text is data.** Any new prompt, push or log path that carries
   device names, logs, release notes or chat text fences it as data; it is
   never interpolated into instructions.

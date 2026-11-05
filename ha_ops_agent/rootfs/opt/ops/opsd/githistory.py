@@ -14,8 +14,9 @@ import re
 import subprocess
 from pathlib import Path, PurePosixPath
 
+from opsd import safegit
 from opsd.guard import Reads, readable_rel, searchable
-from opsd.safegit import UnsafeRepoConfigError, git_argv, git_env, status_lines
+from opsd.safegit import UnsafeRepoConfigError, status_lines
 
 REV_RE = re.compile(r"(HEAD|[0-9a-f]{7,40})(~[0-9]{1,3}|\^{1,3})?")
 PATH_RE = re.compile(r"[A-Za-z0-9_@+][A-Za-z0-9._@+/-]{0,200}")
@@ -29,16 +30,14 @@ class HistoryError(ValueError):
 
 def _git(repo: Path, *args: str) -> str:
     try:
-        done = subprocess.run(
-            git_argv(repo, *args), capture_output=True, text=True, timeout=TIMEOUT_S, env=git_env(), check=False
-        )
+        done = safegit.run(repo, *args, timeout=TIMEOUT_S)
     except subprocess.TimeoutExpired as err:
         raise HistoryError("git timed out") from err
     except UnsafeRepoConfigError as err:
         raise HistoryError(str(err)) from err
     if done.returncode != 0:
-        raise HistoryError(f"git {args[0]} failed: {done.stderr.strip()[:200]}")
-    return done.stdout
+        raise HistoryError(f"git {args[0]} failed: {done.stderr.decode(errors='replace').strip()[:200]}")
+    return done.stdout.decode(errors="replace")
 
 
 def check_rev(value: str) -> str:

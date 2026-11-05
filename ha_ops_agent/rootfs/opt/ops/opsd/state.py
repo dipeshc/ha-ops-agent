@@ -15,7 +15,6 @@ class AgentState:
     last_run_status: str | None = None
     core_down_since: str | None = None
     core_down_notified: bool = False
-    pending_items: int = 0
 
     @classmethod
     def load(cls, path: Path) -> AgentState:

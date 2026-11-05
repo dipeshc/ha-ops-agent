@@ -1,17 +1,8 @@
-"""Whether the AI may run right now: the kill switch and the usage-limit backoff.
+"""Whether the AI may run right now: the kill switch and the usage-limit backoff (spec budget.md B10-B13).
 
-- Kill switch: the UI helper `input_boolean.ops_agent_ai_enabled` (created
-  by the daemon over the websocket, no YAML). Off stops the running AI
-  process and refuses new runs. Deterministic health checks, liveness and
-  safety pushes never consult it.
-  Turning it on counts only when the verified admin did it (the state's
-  `context.user_id`) or the daemon itself (first creation, a panel resume
-  by the admin); anyone else's "on" is turned back off, audited and
-  notified. Once the helper exists, an unknown, unavailable or missing
-  state counts as off (fail closed); a deleted helper is recreated off.
-- Backoff: a subscription usage or rate limit blocks runs until Claude Code's
-  reset time, or for 1, 2, 4 ... 24 hours. No retry loop.
-State lives in the store, so it survives restarts. Every change is audited.
+The switch is the helper `input_boolean.ops_agent_ai_enabled`; only the verified admin or the daemon may turn it
+on, and an unknown or missing state counts as off once it exists. State lives in the store and every change is
+audited. Deterministic checks and safety pushes never consult it.
 """
 
 import logging
@@ -59,13 +50,9 @@ class AiControl:
             self._store.kv_set(key, value, now=now)
 
     def _audit(self, what: str, by: str, detail: str, now: datetime) -> None:
-        if self._store is None:
-            return
-        try:
-            self._store.audit(at=now, run_id=None, principal=by, channel="ai-control", capability=f"ai.{what}",
-                              args={}, tier=None, decision=what, outcome=what, detail=detail[:300])  # fmt: skip
-        except (StoreError, sqlite3.Error) as err:
-            _LOGGER.error("audit write failed", extra={"error": str(err)[:200]})
+        if self._store is not None:
+            self._store.audit_safe(at=now, run_id=None, principal=by, channel="ai-control", capability=f"ai.{what}",
+                                   args={}, tier=None, decision=what, outcome=what, detail=detail[:300])  # fmt: skip
 
     # --------------------------------------------------------------- state
 

@@ -1,26 +1,8 @@
-"""Capability registry: every power the AI can request, declared once.
+"""Capability registry: every power the AI can request, declared once (spec capabilities.md K1-K6).
 
-A `Capability` row generates everything that used to be hand-copied: the
-RPC request schema (`parse_request`), the `opsctl` argparse tree
-(`build_parser`), the guard hook's verb allowlist (`cli_verbs`) and the
-capability table in each run profile's system prompt (`capability_table`).
-Executors are referenced as `"opsd.module:function"` and resolved only in
-the daemon, so the guard hook and `opsctl` (which import this module) stay
-small and never load daemon-side code.
-
-Adding a capability means adding a row here, an executor, and tests. Each
-row ships `enabled=False` until it has had an independent security review
-and a live self-test.
-
-`requires` names what a row needs on this install: `git` (proposals, the
-git reads) or a house overlay (`opsd.house`). Without it the row is left out
-of the prompts and the daemon refuses it (`unavailable`).
-
-`internal=True` rows (the update executors) are powers of the
-daemon itself: they never appear in the socket schema, the `opsctl` parser,
-the guard's verb list or any prompt, so the AI cannot request them at all.
-The daemon still runs them through `policy.decide` (tier, origin, mode) and
-the audit log, exactly like a socket request (see `updexec.Executors`).
+The RPC schema, the `opsctl` parser, the guard hook's verb list and the prompts' capability tables are generated
+from these rows. Executors are `"opsd.module:function"` references resolved only in the daemon, so the guard hook
+and `opsctl` never load daemon code. `internal=True` rows are the daemon's own powers, never reachable by the AI.
 """
 
 import argparse
@@ -51,8 +33,6 @@ FACT_RE = re.compile(r"[^\x00-\x1f\x7f]{1,500}")
 UPDATE_ENTITY_RE = re.compile(r"update\.[a-z0-9_]{1,128}")
 SUPPRESS_VERIFIER_RE = re.compile(r"[a-z_]{1,40}")
 SUPPRESS_VALUE_RE = re.compile(r"[a-z0-9_.]{1,140}")
-# An update entity, or `backup` ("Back up now").
-APPROVAL_SUBJECT_RE = re.compile(r"update\.[a-z0-9_]{1,128}|backup")
 # Hunk ids of a fork's own changes (opsd.forkrebase.KEEP_RE), or `none`.
 FORK_KEEP_RE = re.compile(r"none|[A-Za-z0-9_.-]{1,64}#[1-9][0-9]{0,2}(?:,[A-Za-z0-9_.-]{1,64}#[1-9][0-9]{0,2}){0,39}")
 AT_RE = re.compile(r"\+\d{1,4}[mhd]|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
@@ -105,7 +85,8 @@ class Capability:
     name: str
     verb: str
     summary: str
-    executor: str
+    # `opsd.module:function`; None for an internal row (the daemon calls its own code, never through a ref).
+    executor: str | None = None
     args: Mapping[str, Arg] = field(default_factory=dict)
     tier: PolicyTier = PolicyTier.AUTO
     effects: frozenset[Effect] = frozenset({Effect.READ})
@@ -115,9 +96,6 @@ class Capability:
     validator: str | None = None
     # `(ExecContext, Args) -> Resolution`; refines the tier for these arguments.
     tier_resolver: str | None = None
-    # The executor still runs in `observe` mode because it only records.
-    report_only_executor: bool = False
-    enabled: bool = True
     # Daemon-only: never reachable over the socket (see the module docstring).
     internal: bool = False
     # A refusal from the executor (CapabilityError, raised before any side effect) gives the
@@ -127,6 +105,10 @@ class Capability:
     requires: frozenset[str] = frozenset()
     # `(arg, value)`: a call with that argument value takes no quota unit (its executor bounds it itself).
     quota_free: tuple[str, str] | None = None
+    # What the panel shows while a run uses it (required for every AI-reachable row), and, for a read,
+    # its name in a reply's Sources footer. Fixed text, never model text or arguments.
+    step: str = ""
+    source: str = ""
 
     @property
     def read_only(self) -> bool:
@@ -166,19 +148,40 @@ class Args:
         return dict(self.values)
 
 
-_READ = frozenset({Effect.READ})
-
 REGISTRY: tuple[Capability, ...] = (
-    Capability("agent.status", "status", "agent state and the last runs", "opsd.queries:cmd_status"),
-    Capability("agent.baseline", "baseline", "accepted baseline and active acks", "opsd.queries:cmd_baseline"),
+    Capability(
+        "agent.status",
+        "status",
+        "agent state and the last runs",
+        "opsd.queries:cmd_status",
+        step="Checking the agent's status",
+        source="agent status",
+    ),
+    Capability(
+        "agent.baseline",
+        "baseline",
+        "accepted baseline and active acks",
+        "opsd.queries:cmd_baseline",
+        step="Reading the health baseline",
+        source="health baseline",
+    ),
     Capability(
         "health.snapshot",
         "health",
         "fresh health snapshot (or --diff against the baseline)",
         "opsd.queries:cmd_health",
         {"diff": Arg(bool, False, help="only the items that are new since the baseline")},
+        step="Reading the latest health check",
+        source="health check",
     ),
-    Capability("ha.repairs", "repairs", "Core repairs and Supervisor resolution issues", "opsd.queries:cmd_repairs"),
+    Capability(
+        "ha.repairs",
+        "repairs",
+        "Core repairs and Supervisor resolution issues",
+        "opsd.queries:cmd_repairs",
+        step="Checking repairs",
+        source="repairs",
+    ),
     Capability(
         "ha.entities",
         "entities",
@@ -190,17 +193,42 @@ REGISTRY: tuple[Capability, ...] = (
             "entity": Arg(str, None, pattern=NAME_RE),
             "limit": Arg(int, 200, minimum=1, maximum=1000),
         },
+        step="Reading entity states",
+        source="entity states",
     ),
-    Capability("ha.integrations", "integrations", "custom integration health", "opsd.queries:cmd_integrations"),
+    Capability(
+        "ha.integrations",
+        "integrations",
+        "custom integration health",
+        "opsd.queries:cmd_integrations",
+        step="Checking integrations",
+        source="custom integrations",
+    ),
     Capability(
         "ha.entries",
         "entries",
-        "config entries (no credentials)",
+        "config entries with their non-secret settings",
         "opsd.queries:cmd_entries",
         {"failed": Arg(bool, False), "domain": Arg(str, None, pattern=NAME_RE)},
+        step="Checking integrations",
+        source="config entries",
     ),
-    Capability("ha.updates", "updates", "pending updates with their policy tier", "opsd.queries:cmd_updates"),
-    Capability("ha.backups", "backups", "backups, newest first", "opsd.queries:cmd_backups"),
+    Capability(
+        "ha.updates",
+        "updates",
+        "pending updates with their policy tier",
+        "opsd.queries:cmd_updates",
+        step="Checking updates",
+        source="pending updates",
+    ),
+    Capability(
+        "ha.backups",
+        "backups",
+        "backups, newest first",
+        "opsd.queries:cmd_backups",
+        step="Checking backups",
+        source="backups",
+    ),
     Capability(
         "ha.logs",
         "logs",
@@ -213,6 +241,8 @@ REGISTRY: tuple[Capability, ...] = (
             "identifier": Arg(str, None, pattern=IDENT_RE, help="host journal identifier, e.g. kernel"),
             "slug": Arg(str, None, pattern=SLUG_RE, help="add-on slug for addon logs"),
         },
+        step="Checking the logs",
+        source="logs",
     ),
     Capability(
         "ha.history",
@@ -236,8 +266,17 @@ REGISTRY: tuple[Capability, ...] = (
             ),
         },
         validator="opsd.history:validate_history",
+        step="Reading the history",
+        source="history",
     ),
-    Capability("ha.system", "system", "Core/Supervisor/OS/host versions and resource use", "opsd.queries:cmd_system"),
+    Capability(
+        "ha.system",
+        "system",
+        "Core/Supervisor/OS/host versions and resource use",
+        "opsd.queries:cmd_system",
+        step="Checking the system",
+        source="system info",
+    ),
     # The one read that reaches the internet: the daemon fetches Home Assistant Core's own files for the installed
     # Core version from GitHub (opsd.coresource). Not in triage's grant (opsd.runner NETWORK_READS).
     Capability(
@@ -258,6 +297,8 @@ REGISTRY: tuple[Capability, ...] = (
         quota=Quota(per_run=3, per_day=12),
         validator="opsd.coresource:validate_compare",
         refund_refused=True,
+        step="Comparing with Home Assistant Core",
+        source="Core comparison",
     ),
     # No arguments. It reads only the vacuums' registry options and
     # their cached segments (websocket reads; no service call), see opsd.house.vacuums.
@@ -267,6 +308,8 @@ REGISTRY: tuple[Capability, ...] = (
         "check the vacuums' rooms against HA's vacuum area mapping (cached map): in sync, or what drifted",
         "opsd.house.vacuums:cmd_rooms",
         requires=frozenset({"vacuums"}),
+        step="Checking the vacuum rooms",
+        source="vacuum rooms",
     ),
     # The agent maintains HA and reloads an integration when it judges it needed. The domain is
     # the only input; opsd.reload resolves the entries and holds every limit: the admin's
@@ -286,6 +329,7 @@ REGISTRY: tuple[Capability, ...] = (
         quota=Quota(per_run=2, per_day=6),
         validator="opsd.reload:validate_reload",
         refund_refused=True,
+        step="Reloading an integration",
     ),
     Capability(
         "git.status",
@@ -293,6 +337,8 @@ REGISTRY: tuple[Capability, ...] = (
         "tracked files changed in the working tree",
         "opsd.queries:cmd_git_status",
         requires=frozenset({"git"}),
+        step="Looking at config history",
+        source="git status",
     ),
     Capability(
         "git.log",
@@ -301,6 +347,8 @@ REGISTRY: tuple[Capability, ...] = (
         "opsd.queries:cmd_git_log",
         {"n": Arg(int, 10, minimum=1, maximum=50, flag="-n"), "path": Arg(str, None, pattern=TEXT_RE)},
         requires=frozenset({"git"}),
+        step="Looking at config history",
+        source="config history",
     ),
     Capability(
         "git.diff",
@@ -309,6 +357,8 @@ REGISTRY: tuple[Capability, ...] = (
         "opsd.queries:cmd_git_diff",
         {"range": Arg(str, "HEAD", pattern=TEXT_RE, positional=True), "path": Arg(str, None, pattern=TEXT_RE)},
         requires=frozenset({"git"}),
+        step="Looking at config history",
+        source="config history",
     ),
     Capability(
         "git.show",
@@ -317,6 +367,8 @@ REGISTRY: tuple[Capability, ...] = (
         "opsd.queries:cmd_git_show",
         {"spec": Arg(str, "HEAD", pattern=TEXT_RE, positional=True)},
         requires=frozenset({"git"}),
+        step="Looking at config history",
+        source="config history",
     ),
     # Reminders and follow-ups. `schedule` effects only, so a chat
     # that Core-resident code might have forged can use them (policy.CHAT_EFFECTS).
@@ -342,8 +394,16 @@ REGISTRY: tuple[Capability, ...] = (
         effects=frozenset({Effect.SCHEDULE}),
         quota=Quota(per_run=5, per_day=30),
         validator="opsd.tasks:validate_create",
+        step="Scheduling a reminder",
     ),
-    Capability("task.list", "tasks", "open reminders and follow-ups", "opsd.tasks:exec_list"),
+    Capability(
+        "task.list",
+        "tasks",
+        "open reminders and follow-ups",
+        "opsd.tasks:exec_list",
+        step="Checking reminders",
+        source="reminders",
+    ),
     Capability(
         "task.cancel",
         "cancel",
@@ -352,25 +412,9 @@ REGISTRY: tuple[Capability, ...] = (
         {"id": Arg(int, 0, minimum=0, maximum=10**9, help="task id from opsctl tasks")},
         effects=frozenset({Effect.SCHEDULE}),
         quota=Quota(per_run=10, per_day=30),
+        step="Cancelling a reminder",
     ),
-    # Effects. These are the first mutating socket verbs: they only work inside
-    # an agent run, for the items handed to that run, within these quotas.
-    Capability(
-        "baseline.ack",
-        "ack",
-        "acknowledge a hand-off item by its exact key (critical: snooze up to 3 days, never accept)",
-        "opsd.effects:exec_ack",
-        {
-            "key": Arg(str, None, pattern=ITEM_KEY_RE, help="exact item key from the hand-off"),
-            "days": Arg(int, 1, minimum=1, maximum=30),
-            "accept": Arg(bool, False, help="permanent condition: fold into the baseline (never for critical)"),
-            "reason": Arg(str, None, pattern=TEXT_RE),
-        },
-        effects=frozenset({Effect.AGENT_STATE}),
-        origins=frozenset({Origin.AGENT_SELF}),
-        quota=Quota(per_run=100, per_day=400),
-        validator="opsd.effects:validate_ack",
-    ),
+    # Effects: they only work inside an agent run, within these quotas.
     Capability(
         "notify.admin",
         "notify",
@@ -393,6 +437,7 @@ REGISTRY: tuple[Capability, ...] = (
         validator="opsd.effects:validate_notify",
         # A History note is no push: it never uses the push quota (the executor allows a few per run).
         quota_free=("reason", "note"),
+        step="Sending you a push",
     ),
     Capability(
         "update.plan",
@@ -400,6 +445,8 @@ REGISTRY: tuple[Capability, ...] = (
         "the latest update plan (tiers, reasons, reviews), approvals, holds, results with their OS evidence, and"
         " rollbacks",
         "opsd.updates:cmd_plan",
+        step="Reading the update plan",
+        source="update plan",
     ),
     # A chat may start a longer investigation in its own thread: background
     # follow-up runs, each a normal capped run, that report back into the thread.
@@ -417,28 +464,7 @@ REGISTRY: tuple[Capability, ...] = (
         origins=frozenset({Origin.ADMIN, Origin.ADMIN_CHAT}),
         quota=Quota(per_run=1, per_day=4),
         validator="opsd.tasks:validate_investigate",
-    ),
-    # Ask the admin to approve one APPROVE-tier update of the stored plan. It
-    # only highlights the update in the panel; it approves nothing (see opsd.proposals).
-    Capability(
-        "approval.request",
-        "request-approval",
-        "ask the admin to approve one update the latest plan marks 'approve', or `backup` to ask them to back up"
-        " now (they decide in the panel)",
-        "opsd.proposals:exec_request",
-        {
-            "entity": Arg(
-                str,
-                None,
-                pattern=APPROVAL_SUBJECT_RE,
-                positional=True,
-                help="update entity from update-plan, or backup",
-            )
-        },
-        effects=frozenset({Effect.PROPOSE}),
-        origins=frozenset({Origin.ADMIN, Origin.ADMIN_CHAT}),
-        quota=Quota(per_run=2, per_day=6),
-        validator="opsd.proposals:validate_request",
+        step="Starting an investigation",
     ),
     # Config changes as git proposals. Proposing grants nothing; applying and reverting
     # are daemon-internal and run only after the admin approves them in the panel (opsd.changes).
@@ -459,6 +485,7 @@ REGISTRY: tuple[Capability, ...] = (
         quota=Quota(per_run=3, per_day=10),
         validator="opsd.changes:validate_propose",
         requires=frozenset({"git"}),
+        step="Proposing a config change",
     ),
     Capability(
         "facts.propose",
@@ -471,6 +498,7 @@ REGISTRY: tuple[Capability, ...] = (
         quota=Quota(per_run=2, per_day=5),
         validator="opsd.changes:validate_fact",
         requires=frozenset({"git"}),
+        step="Proposing a house fact",
     ),
     # A known-false-positive rule. The verifier is chosen by name from a fixed set in
     # code (opsd.house.suppress), never written by the model; the admin approves the git proposal.
@@ -495,6 +523,7 @@ REGISTRY: tuple[Capability, ...] = (
         quota=Quota(per_run=1, per_day=3),
         validator="opsd.house.suppress:validate_suppression",
         requires=frozenset({"git", "suppress"}),
+        step="Proposing a suppression",
     ),
     # A fork rebase: the AI names the fork, the reason and which of the fork's own changes to keep (hunk ids from
     # `core-compare --fork`); it never supplies file content. The daemon builds the files from Core's source and the
@@ -517,12 +546,12 @@ REGISTRY: tuple[Capability, ...] = (
         quota=Quota(per_run=1, per_day=3),
         validator="opsd.forkrebase:validate_propose",
         refund_refused=True,
+        step="Proposing a fork rebase",
     ),
     Capability(
         "change.apply",
         "change-apply",
         "write an approved change, check the config, reload, commit and push",
-        "opsd.changes:exec_internal",
         tier=PolicyTier.APPROVE,
         effects=frozenset({Effect.MUTATE_HA, Effect.MUTATE_GIT}),
         origins=frozenset({Origin.AGENT_SELF}),
@@ -532,22 +561,8 @@ REGISTRY: tuple[Capability, ...] = (
         "change.revert",
         "change-revert",
         "write back what an applied change replaced, check, reload, commit and push",
-        "opsd.changes:exec_internal",
         tier=PolicyTier.APPROVE,
         effects=frozenset({Effect.MUTATE_HA, Effect.MUTATE_GIT}),
-        origins=frozenset({Origin.AGENT_SELF}),
-        internal=True,
-    ),
-    # Saves one storage dashboard named in a migration plan the admin approved (opsd.dashboards): a backup of its
-    # JSON first, a read-back, and a restore on failure. Approval-only and daemon-internal; the self-guard lets
-    # exactly that one save through and never one of a dashboard the profile marks as generated.
-    Capability(
-        "dashboard.save",
-        "dashboard-save",
-        "save one storage dashboard as the approved migration plan shows it",
-        "opsd.dashboards:exec_internal",
-        tier=PolicyTier.APPROVE,
-        effects=frozenset({Effect.MUTATE_HA}),
         origins=frozenset({Origin.AGENT_SELF}),
         internal=True,
     ),
@@ -557,7 +572,6 @@ REGISTRY: tuple[Capability, ...] = (
         "fork.apply",
         "fork-apply",
         "write an approved fork rebase into custom_components and restart Core, inside the update pipeline",
-        "opsd.forkrebase:exec_internal",
         tier=PolicyTier.APPROVE,
         effects=frozenset({Effect.MUTATE_HA}),
         origins=frozenset({Origin.AGENT_SELF}),
@@ -568,7 +582,6 @@ REGISTRY: tuple[Capability, ...] = (
         "backup.create",
         "backup-create",
         "native full backup (Supervisor), verified full with Home Assistant included",
-        "opsd.updexec:exec_backup",
         tier=PolicyTier.AUTO_NOTIFY,
         effects=frozenset({Effect.MUTATE_HA}),
         origins=frozenset({Origin.AGENT_SELF}),
@@ -578,18 +591,15 @@ REGISTRY: tuple[Capability, ...] = (
         "update.install",
         "update-install",
         "install one planned update through the native mechanism",
-        "opsd.updexec:exec_install",
         tier=PolicyTier.AUTO_NOTIFY,
         effects=frozenset({Effect.MUTATE_HA}),
         origins=frozenset({Origin.AGENT_SELF}),
-        tier_resolver="opsd.updexec:resolve_install",
         internal=True,
     ),
     Capability(
         "update.rollback",
         "update-rollback",
         "return one update to its previous version (version pin or add-on restore)",
-        "opsd.updexec:exec_rollback",
         tier=PolicyTier.AUTO_NOTIFY,
         effects=frozenset({Effect.MUTATE_HA}),
         origins=frozenset({Origin.AGENT_SELF}),
@@ -618,6 +628,10 @@ def _check_registry(rows: Iterable[Capability]) -> dict[str, Capability]:
             raise ValueError(f"unknown requirement in {cap.name}: {sorted(cap.requires - REQUIREMENTS)}")
         if cap.internal and (cap.read_only or cap.origins != frozenset({Origin.AGENT_SELF})):
             raise ValueError(f"internal capability {cap.name} must be a daemon (agent-self) mutation")
+        if cap.internal != (cap.executor is None):
+            raise ValueError(f"capability {cap.name}: an executor exactly when it is reachable")
+        if not cap.internal and not cap.step:
+            raise ValueError(f"capability {cap.name} has no step label")
         by_name[cap.name] = cap
         verbs.add(cap.verb)
     return by_name
@@ -627,23 +641,23 @@ CAPABILITIES: dict[str, Capability] = _check_registry(REGISTRY)
 BY_VERB: dict[str, Capability] = {c.verb: c for c in REGISTRY}
 
 
-def enabled(registry: Mapping[str, Capability] = CAPABILITIES) -> list[Capability]:
-    """What the AI can reach (socket, CLI, guard, prompts): enabled and not daemon-internal."""
-    return [c for c in registry.values() if c.enabled and not c.internal]
+def reachable(registry: Mapping[str, Capability] = CAPABILITIES) -> list[Capability]:
+    """What the AI can reach (socket, CLI, guard, prompts): every row that is not daemon-internal."""
+    return [c for c in registry.values() if not c.internal]
 
 
 def internal(registry: Mapping[str, Capability] = CAPABILITIES) -> dict[str, Capability]:
     """The daemon's own powers (never on the socket)."""
-    return {c.name: c for c in registry.values() if c.enabled and c.internal}
+    return {c.name: c for c in registry.values() if c.internal}
 
 
 def cli_verbs(registry: Mapping[str, Capability] = CAPABILITIES) -> frozenset[str]:
     """What the guard hook lets the AI run as `opsctl <verb>`."""
-    return frozenset(c.verb for c in enabled(registry))
+    return frozenset(c.verb for c in reachable(registry))
 
 
 def schema(registry: Mapping[str, Capability] = CAPABILITIES) -> dict[str, Mapping[str, Arg]]:
-    return {c.verb: c.args for c in enabled(registry)}
+    return {c.verb: c.args for c in reachable(registry)}
 
 
 def resolve_ref(ref: str) -> Callable[..., Any]:
@@ -699,7 +713,7 @@ def parse_request(raw: bytes, registry: Mapping[str, Capability] = CAPABILITIES)
     if not isinstance(request, dict) or set(request) - {"verb", "args"}:
         raise RequestError("request must be {verb, args}")
     verb = request.get("verb")
-    capability = next((c for c in enabled(registry) if c.verb == verb), None) if isinstance(verb, str) else None
+    capability = next((c for c in reachable(registry) if c.verb == verb), None) if isinstance(verb, str) else None
     if capability is None:
         raise RequestError("unknown verb")
     args = request.get("args", {})
@@ -716,7 +730,7 @@ def build_parser(registry: Mapping[str, Capability] = CAPABILITIES) -> argparse.
     """The `opsctl` command line, generated from the registry."""
     parser = argparse.ArgumentParser(prog="opsctl", description="Ops Agent capabilities (output is redacted).")
     sub = parser.add_subparsers(dest="verb", required=True)
-    for cap in enabled(registry):
+    for cap in reachable(registry):
         cmd = sub.add_parser(cap.verb, help=cap.summary, description=cap.summary)
         for name, arg in cap.args.items():
             if arg.positional:
@@ -759,7 +773,7 @@ def capability_table(names: Iterable[str], registry: Mapping[str, Capability] = 
     lines = []
     for name in sorted(names):
         cap = registry.get(name)
-        if cap is None or not cap.enabled or cap.internal or unavailable(cap, available) is not None:
+        if cap is None or cap.internal or unavailable(cap, available) is not None:
             continue
         kind = "read" if cap.read_only else f"effect, {cap.tier}"
         quota = f", at most {cap.quota.per_run} per run" if cap.quota.per_run else ""

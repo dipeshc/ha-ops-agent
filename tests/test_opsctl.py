@@ -178,6 +178,89 @@ def test_entities_integrations_entries(env: FakeClient, capsys: pytest.CaptureFi
     assert json.loads(run(capsys, "entries", "--failed")[1])["count"] == 0
 
 
+JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJleGFtcGxlIn0.c2lnbmF0dXJlLWV4YW1wbGU"
+HEX40 = "0123456789abcdef0123456789abcdef01234567"
+SECRETS = {
+    "token": "tok-plain-value", "api_key": "plainkey", "password": "hunter2", "host": "hub.example",
+    "url": "http://hub.example", "webhook_id": "hook", "latitude": 12.5, "longitude": 3.25, "username": "someone",
+    "email": "someone@example.com", "client_secret_v2": "shh", "device_key": "k", "access_token": "abc",
+    "nested": {"country": "US"},
+}  # fmt: skip
+# Allowed keys whose values look like secrets, addresses or places: the second guard drops them.
+SECRET_VALUES = {
+    "mode": JWT, "region": HEX40, "language": "someone@example.com", "province": "http://hub.example",
+    "subdiv": "192.0.2.10", "time_zone": "aa:bb:cc:dd:ee:ff", "excludes": ["sat", "ABCDEFGHIJ0123456789xyz"],
+    "add_holidays": ["2026-12-24", "+1 555 0100 2000"], "scan_interval": 51.50735, "state": "California",
+}  # fmt: skip
+# Short free text on a generic allowed key that no secret pattern catches: only the key's own shape withholds it.
+FREE_TEXT = {"mode": "hunter2", "country": "user:pass", "region": "Flat 4 Baker Street", "excludes": ["pw123"],
+             "time_zone": "x=1", "language": "en.v2", "remove_holidays": ["key: abc"], "province": "A/B"}  # fmt: skip
+PLAIN = {"country": "US", "workdays": ["mon", "tue"]}
+
+
+def test_entry_settings_never_reveal_secrets() -> None:
+    from opsd import privacy
+
+    entry = {"domain": "workday", "data": SECRETS | PLAIN, "options": SECRET_VALUES}
+    settings, withheld = privacy.entry_settings(entry, build_redactor(Path("/nonexistent")).redact)
+    assert settings == {"data": PLAIN}
+    assert withheld == len(SECRETS) + len(SECRET_VALUES)
+    text = json.dumps(settings)
+    for value in [*SECRETS.values(), *SECRET_VALUES.values(), JWT, HEX40, "someone", "12.5", "hub.example"]:
+        assert len(str(value)) < 4 or str(value) not in text
+    for key in [*SECRETS, *SECRET_VALUES]:
+        assert f'"{key}"' not in text
+    # Each text key has a shape (`privacy.ENTRY_VALUE_SHAPES`): no digits, `:`, `=` or `/` where none belong.
+    assert privacy.entry_settings({"domain": "workday", "data": FREE_TEXT}) == ({}, len(FREE_TEXT))
+    # A secret value from secrets.yaml on an allowed key is withheld too (the redactor would change it).
+    found, _ = privacy.entry_settings({"domain": "workday", "options": {"mode": "hunter22secret"}},
+                                      build_redactor(Path("/nonexistent"), ["hunter22secret"]).redact)  # fmt: skip
+    assert found == {}
+    # Phones and access hardware give nothing at all; an odd shape gives nothing.
+    for domain in ("mobile_app", "acme_lock", "garage_door"):
+        assert privacy.entry_settings({"domain": domain, "data": PLAIN}) == ({}, 0)
+    assert privacy.entry_settings({"domain": "workday", "data": ["country"]}) == ({}, 0)
+    assert privacy.entry_settings({"data": PLAIN}) == ({}, 0)
+
+
+def test_entry_settings_keep_allowed_choices() -> None:
+    from opsd import privacy
+
+    entry = {"domain": "workday", "data": {"country": "US", "workdays": ["mon", "tue"], "state": "CA",
+                                           "days_offset": 0, "add_holidays": ["2026-12-24", "Company day"]},
+             "options": {"excludes": ["sat", "sun", "holiday"], "time_zone": "America/New_York", "mode": "auto",
+                         "scan_interval": 30, "update_interval": 1.5, "language": "en"}}  # fmt: skip
+    settings, withheld = privacy.entry_settings(entry)
+    assert settings == {"data": entry["data"], "options": entry["options"]} and withheld == 0
+    assert "country" in privacy.ENTRY_SETTING_KEYS and "token" not in privacy.ENTRY_SETTING_KEYS
+    # The caps: at most 20 settings an entry, a list of at most 10.
+    long = {"domain": "workday", "data": {"workdays": [f"d{n}" for n in range(11)], "country": "US"}}
+    assert privacy.entry_settings(long) == ({"data": {"country": "US"}}, 1)
+
+
+def test_entries_answer_with_settings_and_fail_closed(
+    env: FakeClient, paths: Paths, fake_ha: FakeHA, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_ha.entries.append({"entry_id": "wd1", "domain": "workday", "title": "Workday", "state": "loaded"})
+    # No stored entries file: the rows without settings, never an error.
+    out = json.loads(run(capsys, "entries", "--domain", "workday")[1])
+    assert out["count"] == 1 and out["settings_unavailable"] is True and "settings" not in out["entries"][0]
+    stored = paths.ha_config / ".storage" / "core.config_entries"
+    stored.parent.mkdir(exist_ok=True)
+    stored.write_text(json.dumps({"data": {"entries": [
+        {"entry_id": "wd1", "domain": "workday", "data": SECRETS | PLAIN, "options": SECRET_VALUES},
+        {"entry_id": "zha1", "domain": "zha", "data": {"device": {"path": "/dev/ttyUSB0"}, "radio_type": "ezsp"}},
+    ]}}))  # fmt: skip
+    raw = run(capsys, "entries")[1]
+    rows = {r["entry_id"]: r for r in json.loads(raw)["entries"]}
+    assert rows["wd1"]["settings"] == {"data": PLAIN} and rows["wd1"]["withheld"] == len(SECRETS) + len(SECRET_VALUES)
+    assert "settings" not in rows["zha1"] and rows["zha1"]["withheld"] == 2
+    for value in ("tok-plain-value", "hunter2", "hub.example", "someone", JWT, HEX40, "12.5", "/dev/ttyUSB0"):
+        assert value not in raw
+    stored.write_text("{not json")
+    assert json.loads(run(capsys, "entries")[1])["settings_unavailable"] is True
+
+
 def test_repairs_updates_backups_system(env: FakeClient, capsys: pytest.CaptureFixture[str]) -> None:
     assert json.loads(run(capsys, "repairs")[1])["core"] == []
     assert json.loads(run(capsys, "updates")[1])[0]["entity_id"] == "update.home_assistant_core_update"
@@ -212,7 +295,7 @@ def test_output_secrets_and_cap(env: FakeClient, capsys: pytest.CaptureFixture[s
     env.log_text = "wifi hunter22secret\n" + "x" * 50_000
     out = run(capsys, "logs", "core", "--lines", "5")[1]
     assert "hunter22secret" not in out
-    assert "truncated" in out or len(out) < opsctl.MAX_OUTPUT_CHARS + 200
+    assert "truncated" in out or len(out) < rpc.MAX_OUTPUT_CHARS + 200
 
 
 def test_git_verbs_via_cli(env: FakeClient, paths: Paths, capsys: pytest.CaptureFixture[str]) -> None:
@@ -268,7 +351,8 @@ def test_rpc_parse_clamps_and_defaults() -> None:
     with pytest.raises(rpc.RequestError, match="not JSON"):
         rpc.parse_request(b"\xff\xfe")
     for cap in filter(shipped, CAPABILITIES.values()):
-        assert callable(resolve_ref(cap.executor))
+        # An internal row has no executor reference at all: the daemon calls its own code.
+        assert (cap.executor is None) if cap.internal else callable(resolve_ref(cap.executor or ""))
 
 
 def test_rpc_bad_request_is_reported(env: FakeClient) -> None:
@@ -313,7 +397,7 @@ def test_client_without_daemon(
 def test_rpc_rejects_unexpected_peer(env: FakeClient) -> None:
     server = rpc.RpcServer(env.server._env, allowed_uids=frozenset({12345}))  # type: ignore[attr-defined]
     assert server._allowed_uids == frozenset({12345})
-    assert rpc.peer_uid(None) is None
+    assert rpc.peer_creds(None).uid is None
 
 
 def test_help(capsys: pytest.CaptureFixture[str]) -> None:

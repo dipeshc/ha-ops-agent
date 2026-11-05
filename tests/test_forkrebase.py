@@ -366,11 +366,14 @@ def propose(rig: Rig, paths: Paths) -> dict[str, Any]:
 async def approve(rig: Rig, record: dict[str, Any], when: str = "window") -> str:
     bound = await rig.manager.fork_binding(str(record["id"]))
     assert bound == forkrebase.binding(record)
-    found = rig.approvals.request_fork(bound, title="t", user="admin-1", when=when)
-    state = rig.approvals.confirm_fork(found["id"], user="admin-1",
-                                       binding_now=await rig.manager.fork_binding(str(record["id"])))  # fmt: skip
-    assert state == "approved"
+    found = grant(rig, record, bound, when)
+    assert found["state"] == "approved"
     return str(found["id"])
+
+
+def grant(rig: Rig, record: dict[str, Any], bound: dict[str, Any], when: str = "window") -> dict[str, Any]:
+    return rig.approvals.grant("fork_rebase", bound, subject_=fork_subject(str(record["id"])), title="t",
+                               user="admin-1", when=when)  # fmt: skip
 
 
 def fork_job(rig: Rig) -> Any:
@@ -456,21 +459,20 @@ async def test_a_health_regression_rolls_the_rebase_back(pipe: tuple[Rig, ForkOp
 async def test_the_approval_is_bound_to_the_fork_core_and_result(pipe: tuple[Rig, ForkOps, Paths]) -> None:
     rig, _ops, paths = pipe
     record = propose(rig, paths)
-    # The fork changed after it was proposed: the approval cannot even be given.
+    # The fork changed after it was approved: the approval is never used, and is void.
     bound = await rig.manager.fork_binding(str(record["id"]))
+    found = grant(rig, record, bound)
     (paths.custom_components / DOMAIN / "fan.py").write_text(FORK_FAN + "# edited\n")
-    assert await rig.manager.fork_binding(str(record["id"])) != bound
-    found = rig.approvals.request_fork(bound, title="t", user="admin-1", when="window")
     now_bound = await rig.manager.fork_binding(str(record["id"]))
-    assert rig.approvals.confirm_fork(found["id"], user="admin-1", binding_now=now_bound) == "void"
+    assert now_bound != bound and not rig.approvals.consume(found["id"], "fork_rebase", now_bound)
+    assert rig.store.approval(found["id"])["state"] == "void"  # type: ignore[index]
     (paths.custom_components / DOMAIN / "fan.py").write_text(FORK_FAN)
-    # Another admin cannot confirm it; the stored result tampered with voids it.
-    found = rig.approvals.request_fork(bound, title="t", user="admin-1", when="window")
-    assert rig.approvals.confirm_fork(found["id"], user="admin-2", binding_now=bound) == "refused"
+    # The stored result tampered with: no binding at all, so nothing is ever used.
+    found = grant(rig, record, bound)
     stored = paths.data / "fork-rebase" / record["id"] / "new" / "fan.py"
     stored.write_text("import os\n")
     assert await rig.manager.fork_binding(str(record["id"])) is None
-    assert rig.approvals.confirm_fork(found["id"], user="admin-1", binding_now=None) == "void"
+    assert not rig.approvals.consume(found["id"], "fork_rebase", None)
     # Approved, then Core moved before the window: the job never consumes it and nothing is written.
     record = propose(rig, paths)
     await approve(rig, record)
@@ -480,7 +482,7 @@ async def test_the_approval_is_bound_to_the_fork_core_and_result(pipe: tuple[Rig
     assert job.state == "skipped" and (paths.custom_components / DOMAIN / "fan.py").read_text() == FORK_FAN
     assert forkrebase.load(rig.store, record["id"])["state"] == "stale"
     # An edited approval binding never proves anything.
-    assert not rig.approvals.proves_fork("0" * 32, job, forkrebase.binding(record))
+    assert not rig.approvals.proves("0" * 32, "fork_rebase", job, forkrebase.binding(record))
 
 
 async def test_rebase_now_and_the_gate(pipe: tuple[Rig, ForkOps, Paths]) -> None:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from opsd.evidence import parse_changelog, parse_github_body, parse_release_post, release_post_url
+from opsd.evidence import parse_github_body, parse_release_post, release_post_url
 
 FIXTURES = Path(__file__).parent / "fixtures"
 INDEX = (FIXTURES / "release-index.html").read_text()
@@ -60,10 +60,3 @@ def test_a_patch_body_names_what_it_touches_and_its_breaking_lines() -> None:
     assert touched == {"acme_pool", "acme_weather"}
     [change] = changes
     assert change.domain == "acme_weather" and "acme_weather.refresh" in change.terms
-
-
-def test_changelog_lines_that_ask_for_a_manual_step_are_kept() -> None:
-    notes = "- Faster start-up\n- Breaking: the `acme_card.layout` option is removed\n- Translations\n"
-    [change] = parse_changelog(notes, title="Acme Card 4.0.0", domain=None, source="src")
-    assert change.kind == "notes" and "acme_card.layout" in change.terms
-    assert parse_changelog("- Faster start-up\n- Translations\n", title="t", domain=None, source="s") == []

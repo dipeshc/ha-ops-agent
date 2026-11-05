@@ -10,13 +10,13 @@ import os
 import re
 import shutil
 import signal
-import stat
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from opsd import safefs
 from opsd.budget import reading_unit
 from opsd.config import CredentialKind
 from opsd.redact import Redactor
@@ -67,7 +67,6 @@ class RunResult:
     turns: int = 0
     structured: dict[str, Any] | None = None
     error: str = ""
-    transcript: str = ""
     denials: list[str] = field(default_factory=list)
     tokens_in: int = 0
     tokens_out: int = 0
@@ -75,8 +74,7 @@ class RunResult:
     duration_s: float = 0.0
     # Epoch seconds when a subscription usage limit resets, if Claude Code said.
     limit_reset: float | None = None
-    # First and last `rate_limit_info` seen during the run (account utilisation per window).
-    rate_first: dict[str, Any] | None = None
+    # The last `rate_limit_info` seen during the run (account utilisation per window).
     rate_last: dict[str, Any] | None = None
     # Tool calls the guard hook never decided, or that were denied although it allowed them:
     # the CLI's behaviour changed (a timeout falls through, a new rule), raised as a health item.
@@ -193,20 +191,15 @@ def read_decisions(path: Path) -> tuple[str, str | None]:
     """The guard's decision log, read by root from a directory `ops` controls: never through a link,
     only a regular file, at most 1 MB. Anything else is an anomaly (and no decisions)."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        return safefs.read_regular(path, MAX_DECISIONS_BYTES).decode(errors="replace"), None
     except FileNotFoundError:
         return "", None
+    except safefs.NotRegular:
+        return "", "the guard decision log is not a regular file"
+    except safefs.TooLarge:
+        return "", "the guard decision log is larger than 1 MB"
     except OSError as err:
         return "", f"the guard decision log could not be opened safely ({type(err).__name__})"
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            return "", "the guard decision log is not a regular file"
-        if info.st_size > MAX_DECISIONS_BYTES:
-            return "", "the guard decision log is larger than 1 MB"
-        return os.read(fd, MAX_DECISIONS_BYTES).decode(errors="replace"), None
-    finally:
-        os.close(fd)
 
 
 def build_argv(cfg: RunConfig, prompt: str) -> list[str]:
@@ -516,9 +509,8 @@ async def run_claude(
         )
     else:
         result = interpret_result(result_event)
-    result.transcript = str(transcript_path)
     if rate_events:
-        result.rate_first, result.rate_last = rate_events[0], rate_events[-1]
+        result.rate_last = rate_events[-1]
         if result.rate_last.get("status") == "rejected" and result.status != "ok":
             result.status = "usage_limited"
             reset = result.rate_last.get("resetsAt")

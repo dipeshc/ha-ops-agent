@@ -51,11 +51,10 @@ plain, tested code for everything that acts.
   back), and stays closed until the evidence changes. It asks you only 30
   days before a named removal's deadline (the month its release ships), or
   when its check says only you can act; until then the item and its one-tap
-  fix wait under *Coming up*, ready to apply. Replacement candidates and suggestions
-  wait under *Suggestions*. With git on, a YAML migration is a one-tap
-  proposal. A dashboard migration is a plan you approve, and only ever on core
-  display-only cards: the agent backs the dashboard up, saves the change,
-  reads it back and restores the backup if anything differs. A Core update that would remove something you still use always
+  fix wait under *Coming up*, ready to apply. Replacement candidates wait
+  under *Suggestions*. With git on, a YAML migration is a one-tap
+  proposal; a dashboard change is a plan step you make by hand (the agent
+  never writes a dashboard). A Core update that would remove something you still use always
   asks.
 - **Forks of Core integrations.** For a custom integration with the name
   of a Core one, the agent can compare it with Home Assistant Core's own
@@ -100,7 +99,7 @@ changes nothing.
   starts only with 1.2 GB free).
 - The Companion app on the admin's phone, for pushes.
 - AI access, for triage, chat and release-note reviews (see
-  [AI access](#ai-access)). Without it, set `llm.provider: none`: you still
+  [AI access](#ai-access)). Without it, leave the AI off: you still
   get the deterministic health check, pushes and approvals, but automatic
   updates wait for your approval because their release notes cannot be
   reviewed (`updates.hold_if_unreviewed`).
@@ -123,12 +122,30 @@ The first health check accepts today's state as the baseline and sends one
 summary push. Broken custom integrations are never accepted silently; they
 are reported again until you accept them in the panel.
 
+### Upgrading
+
+Update the add-on from the add-on store and keep "Create backup" on: that
+backup is the way back. The agent's store has a schema version, and a new
+version upgrades it once, in one transaction, at its first start; a
+failure leaves the old store untouched and the agent runs degraded until
+you restore the backup. An older version refuses a newer store, so going
+back means restoring that backup.
+
+From 0.23 to 0.24.0 the store moves to schema 20. The upgrade drops what
+the removed features left (chat approval requests, dashboard approvals and
+dashboard state, the read-only item of the old single chat and its turns,
+unused counters), voids an approval that was never confirmed, and keeps
+everything else (approvals, changes, items, conversations, the audit
+log). It deletes `ops.db.v18.bak`, `run.lock` and `selftest.json` from the
+add-on's data; `/data/maintenance/dashboards/` (the backups of dashboards
+earlier versions changed) is left for you to remove once you no longer
+need them. The daily count of agent pushes starts from zero again on the
+upgrade day.
+
 ## AI access
 
-The agent reaches its AI model through a provider, chosen with
-`llm.provider`. Today the provider is `claude`: the agent runs Claude Code
-headless, which the image installs at build time, at a pinned version, from
-Anthropic's signed package repository.
+The agent runs Claude Code headless, which the image installs at build
+time, at a pinned version, from Anthropic's signed package repository.
 
 - **Sign-in.** Paste either credential into `claude.token`:
   - a Claude Code setup token: run `claude setup-token` on your own
@@ -150,12 +167,17 @@ Anthropic's signed package repository.
   (`claude.plan`) per 7 days and a fifth of that per 5 hours; they stop at
   80 % of it, chat at half of that. It also yields when your account is above 90 %
   of a window. `limits.run_max_usd` caps each run's cost and the optional
-  `limits.daily_max_usd` a day's.
+  `limits.daily_max_usd` a day's. `claude.plan` is `pro` (the default),
+  `max5` or `max20`; the `auto` of earlier versions is read as `pro`.
 
-`llm.provider: none` turns the AI off. The health check, pushes, approvals
+The AI switch (the panel's AI toggle, or the helper
+`input_boolean.ops_agent_ai_enabled`) turns the AI off; without a
+credential it never runs. The health check, pushes, approvals
 and the update rules keep working, but automatic updates wait for your
 approval, since their release notes cannot be reviewed (unless you turn
-`updates.hold_if_unreviewed` off).
+`updates.hold_if_unreviewed` off). Earlier versions had an `llm.provider`
+option; it is gone, and a saved value is ignored (the AI switch is the off
+switch).
 
 ## Configuration
 
@@ -165,7 +187,6 @@ to your home. The main options:
 | Option | Default | What it does |
 | --- | --- | --- |
 | `agent.mode` | `observe` | `observe` reports only. `act` lets it install updates (with `updates.auto_install`), make backups and reload allowed integrations. |
-| `llm.provider` | `claude` | The AI provider; `none` runs without AI. See [AI access](#ai-access). |
 | `notify.service` | | Your Companion app notify service, e.g. `mobile_app_my_phone`. Empty: the profile's `notify_service`. |
 | `notify.max_pushes_per_day` | `3` | Normal pushes per day. Safety pushes have their own small budget. |
 | `notify.quiet_start` / `quiet_end` | `22:30` / `07:00` | Non-urgent pushes wait until the end. Empty turns quiet hours off. |
@@ -206,7 +227,6 @@ pieces, no watched entities, no reloadable integrations, git off.
 | `reload.domains`, `reload.deny` | Integrations it may reload, and extra ones it never reloads. |
 | `rebase.deny` | Custom-integration forks it never proposes a Core rebase for. |
 | `git.enabled`, `author_name`, `author_email`, `proposals` | Config changes as git proposals (`automations`, `alerts`, `templates`). Needs the configuration directory to be a git repository. |
-| `dashboards.generated` | Storage dashboards something else writes; the agent never edits them. |
 | `docs.runbook`, `docs.facts`, `docs.readable` | Markdown files and folders the agent reads first. `facts` must be `docs/<name>.md`; nothing under `ops/`. |
 | `house_notes` | A few lines of background in plain words. |
 | `overlays` | Optional extra modules a custom build adds under `opsd/house/`. This repository ships none, so leave it out. |
@@ -292,8 +312,7 @@ custom card) could act as you in the panel. See
   not restored.
 - The AI's triage is advice. The health check, update rules and limits are
   deterministic code, and they are what protects the house.
-- Dashboards change only through a maintenance plan you approved; areas and
-  other UI-stored settings are not edited.
+- Dashboards, areas and other UI-stored settings are never edited.
 
 ## Support
 

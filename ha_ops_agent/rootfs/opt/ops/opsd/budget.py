@@ -1,25 +1,9 @@
-"""The one budget for AI runs.
+"""The one budget for AI runs (spec budget.md B1-B7).
 
-What bounds use deterministically: a daily run cap per profile, each run's `--max-turns`, its cost cap
-(`--max-budget-usd`), its timeout (the run time it reserved), and one rolling run-time budget:
-
-- `B = plan_hours x 3600 x usage.max_share_percent / 100` seconds of AI run time per 7 days, and `B / 5`
-  per 5 hours (`claude.plan`; `auto` is pro, the smallest). It is an honest wall-clock budget of the
-  agent's own runs, not a measured share of the subscription: the provider reports account utilisation
-  in whole percents, too coarse to see one run.
-- Runs stop at 80 % of each window's budget; user-class runs (chat, investigations, summaries) at half
-  of that stop line, so monitoring always keeps at least the other half. A run's timeout is trimmed to the budget left.
-- The account-busy yield: a measured account utilisation of at least 90 % in either window, less than an
-  hour old, stops every run (the admin's own work comes first).
-- `limits.daily_max_usd` (optional): the reported cost of today's runs (`RunResult.cost_usd`) stays under it;
-  each run's cost cap is trimmed to what is left.
-
-With a provider API key there are no subscription windows (`Caps.windows` false): neither the run-time
-budget nor the account-busy yield applies, while the daily run caps, `--max-turns`, the run timeout, the
-per-run cost cap and the daily cost cap still do.
-
-A run reserves its run time in one store transaction before the AI starts; the reservation is replaced by
-the actual figures when it ends. The kill switch and the usage-limit backoff are in `aicontrol`.
+Daily run caps per profile, per-run turn and cost caps, one rolling run-time budget per 5 hours and 7 days (user
+runs stop at half of it), the account-busy yield and the optional daily cost cap. With an API key there are no
+subscription windows. `Store.reserve_run` checks all of it in one transaction; utilisation readings and their unit
+are parsed here too.
 """
 
 import math
@@ -31,7 +15,15 @@ from math import inf
 from opsd.config import Options
 
 WINDOW = timedelta(hours=5)
-RUNS_PER_DAY = {"triage": 6, "chat": 20, "followup": 3, "investigate": 6, "summary": 6, "update_review": 2}
+RUNS_PER_DAY = {
+    "triage": 6,
+    "chat": 20,
+    "followup": 3,
+    "investigate": 6,
+    "summary": 6,
+    "update_review": 2,
+    "maintenance_plan": 3,
+}
 DEFAULT_PROFILE_RUNS = 3
 # Runs of a profile's daily cap that only the admin's own taps may use (Plan a fix): the agent's other runs of that
 # profile stop this many short, so they never starve what the admin asked for. The cap itself is unchanged.
@@ -64,18 +56,12 @@ MIN_RUN_SECONDS = 60.0
 
 @dataclass(frozen=True, slots=True)
 class Period:
-    day: str
-    week: str  # Monday of the week (local), YYYY-MM-DD
-    week_end: str
-    month: str
+    day: str  # the local date, YYYY-MM-DD
 
     @classmethod
     def at(cls, now: datetime, tz: tzinfo) -> Period:
         local: date = now.astimezone(tz).date()
-        monday = local - timedelta(days=local.weekday())
-        return cls(
-            local.isoformat(), monday.isoformat(), (monday + timedelta(days=6)).isoformat(), local.isoformat()[:7]
-        )
+        return cls(local.isoformat())
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +82,8 @@ class Caps:
 
     @property
     def week_seconds(self) -> float:
-        """B: run time the agent may use per 7 days, `plan hours x 3600 x max_share_percent / 100`."""
+        """B: run time the agent may use per 7 days, `plan hours x 3600 x max_share_percent / 100` (pro's hours
+        for a plan without any, such as the legacy `auto`)."""
         if not self.windows:
             return inf
         return PLAN_WEEKLY_HOURS.get(self.plan, PLAN_WEEKLY_HOURS["pro"]) * 3600 * self.share_limit
@@ -125,7 +112,7 @@ class Caps:
     def from_options(cls, options: Options, *, windows: bool = True) -> Caps:
         """`windows` is false when the credential is an API key (no subscription windows)."""
         return cls(
-            plan=resolve_plan(options.claude.plan),
+            plan=options.claude.plan,
             share_limit=share_fraction(options.usage.max_share_percent),
             windows=windows,
             daily_usd=options.limits.daily_max_usd or None,
@@ -136,11 +123,6 @@ def share_fraction(percent: float) -> float:
     """`max_share_percent` as a fraction, held inside the allowed range."""
     low, high = SHARE_RANGE
     return max(low, min(high, percent)) / 100
-
-
-def resolve_plan(option: str) -> str:
-    """The option if it names a tier; `auto` is `pro`, the most conservative (the provider reports no tier)."""
-    return option if option in PLAN_WEEKLY_HOURS else "pro"
 
 
 @dataclass(frozen=True, slots=True)

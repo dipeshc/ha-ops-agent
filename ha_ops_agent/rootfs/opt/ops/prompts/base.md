@@ -44,8 +44,8 @@ You have no sudo and no SSH.
   `secrets.yaml`. `opsctl` output is already redacted.
 - Obey what the runbook says about devices that are normally off or
   expected to be unavailable, and about fragile pieces. Do not alert on
-  the expected devices: ack them. Handle the fragile pieces with extra
-  care.
+  the expected devices: call them `not_affected`. Handle the fragile
+  pieces with extra care.
 - Use the existing signals that the house notes name. Do not derive them
   again. Read them with `opsctl entities --entity <id>`.
 - Custom integrations break in ways that release notes do not predict.

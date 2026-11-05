@@ -1,39 +1,8 @@
-"""Reminders, follow-ups and chat (push replies and the panel), admin only.
+"""Reminders, follow-ups, conversations and investigations, admin only (spec chat.md T1-T17b).
 
-- A due `reminder` is a deterministic push (no model) with Done and Snooze
-  buttons, plus a Reply button when asked for.
-- A due `followup` is a `followup` profile run; its reply (if any) is a push.
-- A chat message (a verified push reply or a panel message) is stored at
-  once as a queued admin turn and answered by a `chat` run on a small
-  bounded job queue. The reply is a turn in the thread, published live to
-  the panel, and pushed only when the admin is not watching that thread.
-- A message that gets no answer is never dropped silently: the thread gets
-  a card (a `system` turn) that says why. Blocks that lift by themselves
-  (usage limits, caps, the account yielding) are retried automatically
-  unless the admin turns that off (see `chatcards`). A retry moves the turn
-  `refused -> queued` with a compare-and-set, so it runs once however many
-  times a retry fires or is requested; the agent's reply and the turn's
-  `ok` are written in one transaction.
-- A long thread is summarised by a capability-free `summary` run and then
-  continues; the summary is a fenced `system` turn, the old turns stay.
-- The chat prompt also lists what is open around the thread
-  (updates waiting for the admin, held versions, open health items); each
-  reply carries a "sources" footer built from the run's audit rows (what
-  was read, what was refused), never from the model's own account; and an
-  approval request made in the run is shown under the reply with the
-  plan's own title and versions.
-- An investigation (`task.investigate`) runs as up to three `investigate`
-  steps in the background. Its progress is one `system` card in the thread
-  (rewritten in place), each step's findings an agent turn, and the admin
-  can cancel it from the card: a pending step is cancelled, a running one
-  is killed. Steps are normal runs under every usage cap; a blocked step
-  waits for the block to lift (at most three times) and then stops.
-
-Chat and follow-ups run one at a time, so they wait for the single AI
-slot without holding dispatcher slots, and a flood of replies cannot crowd
-out the health check. Limits: 30 chat turns and 20 chat runs a day, the
-`user` budget class, 3 follow-up runs a day, 30 manual retries a day.
-Every turn is audited. Panel messages keep the `admin-chat` origin.
+A message is stored at once as a queued turn and answered by a `chat` run on a small bounded queue; a blocked one
+gets a card and may retry by itself (`chatcards`). Follow-ups and investigation steps are normal capped runs. Runs
+wait for the single AI slot without holding dispatcher slots; every turn is audited.
 """
 
 import asyncio
@@ -47,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
 
-from opsd import forkrebase, proposals, verdicts
+from opsd import forkrebase, verdicts
 from opsd.activity import ActivityLog
 from opsd.capabilities import CAPABILITIES
 from opsd.channels import (
@@ -63,7 +32,6 @@ from opsd.channels import (
 )
 from opsd.chatcards import error_card, plan_retry, refusal_card, split_reason
 from opsd.conversation import (
-    CHAT_TURNS_PER_DAY,
     CONTEXT_TURNS,
     FINDINGS_CHARS,
     MAX_FINDINGS,
@@ -83,7 +51,7 @@ from opsd.conversation import (
 )
 from opsd.effects import PUSH_REASONS
 from opsd.events import Event
-from opsd.items import ITEM_ID_RE, ItemBook, is_question, item_context, item_id, thread_of, update_key
+from opsd.items import ITEM_ID_RE, ItemBook, is_question, item_context, item_id, thread_of
 from opsd.items import deep_link as item_link
 from opsd.live import Hub
 from opsd.policy import Origin
@@ -91,13 +59,12 @@ from opsd.redact import Redactor
 from opsd.runctx import AGENT_SELF, Principal, RunContext
 from opsd.runner import BLOCKED_STATUSES, CHAT, FOLLOWUP, INVESTIGATE, SUMMARY, AgentRunner
 from opsd.store import IN_FLIGHT, ITEM_THREAD_RE, QUESTION_PREFIX, RETRYABLE, Store, StoreError, Task, Turn
-from opsd.tasks import MAX_OPEN_INVESTIGATIONS, MAX_OPEN_TASKS, MAX_TITLE_CHARS
+from opsd.tasks import MAX_OPEN_TASKS, MAX_TITLE_CHARS, investigation_refusal, open_investigation
 
 _LOGGER = logging.getLogger(__name__)
 
 MAX_JOBS = 10
 CHAT_WAIT_S = 25 * 60.0
-MAX_FOLLOWUP_RUNS_PER_DAY = 3
 FOLLOWUP_RETRY = timedelta(hours=6)
 MAX_TASK_ATTEMPTS = 3
 SNOOZE = timedelta(days=1)
@@ -124,15 +91,15 @@ PLAN_FIX_BRIEF = (
     " is outside what you may propose (for example a custom integration's own code, an integration to replace, or"
     " anything in the UI), say so plainly, say that the admin or an engineering session must do it, and that he can"
     " use Remind me on the item to come back to it. In the last step, also give your verdict on whether the item"
-    " really affects this install: not_affected (you checked and nothing here needs a change), fixable (you proposed"
-    " the fix), needs_owner (only the admin can do or decide it) or unknown, with the reason and what you read."
+    ' really affects this install: not_affected (you checked and nothing here needs a change; "no fix needed" is'
+    " not_affected), fixable (you proposed the fix), needs_owner (only for something the admin himself must do or"
+    " decide; then owner_action names it as a short imperative, e.g. \"Set the country in the integration's"
+    ' options") or unknown (a check you could not complete is unknown, never needs_owner), with the reason and'
+    " what you read; owner_action is null unless needs_owner."
 )
 # A plan's text on its finding (the last step's findings).
 PLAN_CHARS = 3000
-# The admin's Plan a fix taps a day: their own allowance, apart from the investigations the agent starts in chat.
-PLAN_FIX_PER_DAY = 4
-PLAN_FIX_QUOTA = "cap:plan_fix"
-# Run ids an investigation keeps (its approval requests are voided if it is cancelled).
+# Run ids an investigation keeps (its plan's proposals are found by them).
 MAX_RUN_IDS = 6
 INVESTIGATION_LIVE = ("queued", "running", "next", "waiting")
 VERBS = {c.name: c.verb for c in CAPABILITIES.values()}
@@ -221,13 +188,10 @@ class Assistant:
     def audit(
         self, capability: str, principal: str, *, args: dict[str, object], outcome: str, detail: str = ""
     ) -> None:
-        try:
-            self.store.audit(
-                at=datetime.now(UTC), run_id=None, principal=principal, channel="assistant", capability=capability,
-                args=args, tier=None, decision=outcome, outcome=outcome, detail=detail,
-            )  # fmt: skip
-        except (StoreError, sqlite3.Error) as err:
-            _LOGGER.error("audit write failed", extra={"error": str(err)[:200]})
+        self.store.audit_safe(
+            at=datetime.now(UTC), run_id=None, principal=principal, channel="assistant", capability=capability,
+            args=args, tier=None, decision=outcome, outcome=outcome, detail=detail,
+        )  # fmt: skip
 
     # ------------------------------------------------------------ pushes
 
@@ -240,8 +204,7 @@ class Assistant:
         return record if record is not None and thread_of(record) == thread else None
 
     def writable(self, thread: str) -> bool:
-        """Messages go only to the conversation of an item or a question that is stored; the earlier one chat is
-        read only."""
+        """Messages go only to the conversation of an item or a question that is stored."""
         return self.record_of(thread) is not None
 
     def item_message(self, thread: str, title: str, body: str, *, reply: bool = True,
@@ -263,7 +226,7 @@ class Assistant:
         return clean_text(str(record["title"]), 70) if record is not None else fallback
 
     def note(self, kind: str, title: str, detail: str = "", *, needs_admin: bool = False,
-             ref: dict[str, Any] | None = None, chat_text: str | None = None) -> str | None:  # fmt: skip
+             ref: dict[str, Any] | None = None) -> str | None:  # fmt: skip
         """An activity entry; returns the item it went on (the task's item, a finding for "Plan a fix", or its
         own standalone item)."""
         if self.activity is None:
@@ -273,10 +236,9 @@ class Assistant:
             # About a task (a reminder, a follow-up, an investigation): an event on that task's item, or on the
             # finding a "Plan a fix" runs on.
             key = self._task_item_key(task)
-            entry = self.activity.record(kind, title, detail, needs_admin=needs_admin, ref=ref, chat_text=chat_text,
-                                         item=key)  # fmt: skip
+            entry = self.activity.record(kind, title, detail, needs_admin=needs_admin, ref=ref, item=key)
         else:
-            entry = self.activity.record(kind, title, detail, needs_admin=needs_admin, ref=ref, chat_text=chat_text)
+            entry = self.activity.record(kind, title, detail, needs_admin=needs_admin, ref=ref)
         found = (entry or {}).get("item")
         return found if isinstance(found, str) else None
 
@@ -300,8 +262,7 @@ class Assistant:
         try:
             if source != "reminder":
                 kind = "followup" if source == "followup" else "notice"
-                noted = self.note(kind, title, message.body, needs_admin=True,
-                                  chat_text=message.body if source == "followup" else None)  # fmt: skip
+                noted = self.note(kind, title, message.body, needs_admin=True)
                 target = target or noted
             record = self.store.item(target) if isinstance(target, str) and ITEM_ID_RE.fullmatch(target) else None
         except (StoreError, sqlite3.Error) as err:
@@ -447,19 +408,20 @@ class Assistant:
 
     async def run_followup(self, task: Task) -> None:
         now = datetime.now(UTC)
-        if not self.store.bump(self._day(now), "followup_runs", limit=MAX_FOLLOWUP_RUNS_PER_DAY):
-            if task.attempts >= MAX_TASK_ATTEMPTS:
-                self.store.finish_task(task.id, "failed", now=now)
-            else:
-                self.store.reschedule(task.id, next_fire_at=now + FOLLOWUP_RETRY, now=now)
-            self.audit("task.fired", "system", args={"task": task.id}, outcome="deferred", detail="daily cap")
-            return
         principal = _principal(task)
         redactor = self._redactor()
         outcome = await self.runner.run_agent(
             FOLLOWUP, redactor.redact(build_followup_prompt(task, now=now, tz=self._tz())), principal=principal,
             now=now, redactor=redactor, generation=task.generation, wait_s=CHAT_WAIT_S,
         )  # fmt: skip
+        if outcome.run.status == "run_cap_reached":
+            # The day's follow-up runs are used up (budget.RUNS_PER_DAY): it waits, a few times at most.
+            if task.attempts >= MAX_TASK_ATTEMPTS:
+                self.store.finish_task(task.id, "failed", now=now)
+            else:
+                self.store.reschedule(task.id, next_fire_at=now + FOLLOWUP_RETRY, now=now)
+            self.audit("task.fired", "system", args={"task": task.id}, outcome="deferred", detail="daily cap")
+            return
         self.store.finish_task(task.id, "done" if outcome.run.status == "ok" else "failed", now=now)
         reply, summary = validate_reply(outcome.run.structured) if outcome.run.status == "ok" else (None, "")
         self.audit("task.fired", principal.label(), args={"task": task.id, "run": outcome.context.run_id},
@@ -520,7 +482,7 @@ class Assistant:
     def _thread_for(self, event: Event) -> str | None:
         """The conversation of the item the push was about: the thread recorded with the action id when the push
         was sent (the daemon's record, never the event's own words), else the item its tag names. A push about
-        nothing that still exists (or the earlier one chat) starts a question."""
+        nothing that still exists starts a question."""
         thread = event.payload.get("thread_id")
         if isinstance(thread, str) and self.writable(thread):
             return thread
@@ -547,8 +509,6 @@ class Assistant:
             # Checked before the question exists: no question is left Running for a message that never runs.
             if client_id is not None and self.store.client_used(client_id):
                 return None, Submitted("client_id_used")
-            if self.store.count(self._day(now), "chat_turns") >= CHAT_TURNS_PER_DAY:
-                return None, Submitted("cap")
             record = self.items.question(key, state="running", gist=f"asked {self._hhmm(now)}", title=title,
                                          actor="you", now=now)  # fmt: skip
             record = record or self.store.item_by_key(key)
@@ -661,18 +621,6 @@ class Assistant:
         who = principal.label()
         digest = hashlib.sha256(text.encode()).hexdigest()[:16]
         self._turn_changed(turn)
-        if not self.store.bump(self._day(now), "chat_turns", limit=CHAT_TURNS_PER_DAY):
-            self.audit("chat.turn", who, args={"role": "admin", "thread": thread, "sha": digest}, outcome="refused",
-                        detail="daily cap")  # fmt: skip
-            card = refusal_card("chat_cap", "", now=now, tz=self._tz(), reset_at=self._midnight(now),
-                                limit=CHAT_TURNS_PER_DAY)  # fmt: skip
-            refused = self._write_card(turn, "refused", card.status, card.text, card.meta, now)
-            self.thread_changed(thread)
-            if self.store.bump(self._day(now), "chat_cap_notice", limit=1):
-                notice = self.item_message(thread, "Chat limit", "Today's chat limit is reached; try again tomorrow.",
-                                           reply=False)  # fmt: skip
-                await self._push_unless_watching(thread, notice, what="chat_cap")
-            return Submitted("refused", refused or turn)
         self.audit("chat.turn", who, args={"role": "admin", "thread": thread, "chars": len(text), "sha": digest},
                     outcome="accepted")  # fmt: skip
         if not self._enqueue_turn(turn):
@@ -837,34 +785,22 @@ class Assistant:
         thread = thread_of(record)
         if thread is None or not str(record.get("key") or "").startswith("maint:"):
             return "Only a maintenance item can plan a fix."
-        open_now = self.store.open_investigations()
-        if any(t.thread_id == thread for t in open_now):
-            return "A plan is already being made for this item; wait for it or stop it."
-        if len(open_now) >= MAX_OPEN_INVESTIGATIONS:
-            return f"{MAX_OPEN_INVESTIGATIONS} investigations are already open; try again later."
-        if self.store.count_open_tasks("admin") >= MAX_OPEN_TASKS["admin"]:
-            return "Too many open reminders and follow-ups; cancel some first."
-        day = self._day(now)
-        # The admin's own allowance: investigations the agent started in chat never use it up.
-        if not self.store.bump(day, PLAN_FIX_QUOTA, limit=PLAN_FIX_PER_DAY):
-            return f"Today's {PLAN_FIX_PER_DAY} plans are used up; try again tomorrow."
+        refusal = investigation_refusal(self.store, thread, "admin")
+        if refusal is not None:
+            return f"{refusal[0].upper()}{refusal[1:]}."
         title = clean_text(f"Plan a fix: {record.get('title') or 'maintenance item'}", MAX_TITLE_CHARS)
         source = record.get("source") or {}
         # Bound to the finding's evidence, not the item's revision (which the plan itself moves): the same tap the
-        # same day is a duplicate and gives its quota unit back.
+        # same day is a duplicate.
         fingerprint = str(source.get("fingerprint") or f"r{record.get('revision')}")[:32]
-        task, created = self.store.create_task(
-            kind="followup", title=title, owner="admin", created_by=f"panel:{user[:64]}", next_fire_at=now,
-            payload={"investigation": True, "plan_fix": True, "note": PLAN_FIX_BRIEF, "max_steps": PLAN_FIX_STEPS,
-                     "step": 0, "findings": [], "origin": str(Origin.ADMIN_CHAT), "user_id": user,
-                     "item": str(record["id"]), "started_at": now.isoformat(timespec="seconds"),
-                     "finding": str(source.get("finding") or ""), "fingerprint": fingerprint},
+        task, created = open_investigation(
+            self.store, title=title, brief=PLAN_FIX_BRIEF, steps=PLAN_FIX_STEPS, owner="admin",
+            created_by=f"panel:{user[:64]}", origin=Origin.ADMIN_CHAT, user_id=user, thread_id=thread,
             idempotency_key=f"plan_fix:{record['id']}:{fingerprint}:{now.date().isoformat()}", now=now,
-            thread_id=thread,
+            extra={"plan_fix": True, "item": str(record["id"]), "started_at": now.isoformat(timespec="seconds"),
+                   "finding": str(source.get("finding") or ""), "fingerprint": fingerprint},
         )  # fmt: skip
         if not created:
-            # The same request again (same item, evidence and day): the quota unit goes back.
-            self.store.unbump(day, PLAN_FIX_QUOTA)
             return "This fix was already planned today; the plan is on the item."
         self.audit("task.investigate", f"admin-chat:{user[:64]}", args={"task": task.id, "item": record["id"]},
                    outcome="accepted", detail="plan a fix (panel)")  # fmt: skip
@@ -904,10 +840,9 @@ class Assistant:
             return ""
 
     def _run_meta(self, run_id: str) -> dict[str, Any]:
-        """Sources, refusals and approval requests of a run, from the daemon's own records."""
+        """Sources, refusals and fork rebase proposals of a run, from the daemon's own records."""
         try:
             meta: dict[str, Any] = dict(sources_of(self.store.audit_rows(run_id=run_id, limit=300), VERBS))
-            meta["proposals"] = proposals.for_run(self.store, run_id)
             meta["forks"] = forkrebase.for_run(self.store, run_id)
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.warning("no sources for run", extra={"error": str(err)[:200]})
@@ -944,22 +879,12 @@ class Assistant:
                                                   meta={"item": str(record["id"])}))  # fmt: skip
 
     def _link_cards(self, thread: str, run_id: str, run_meta: dict[str, Any], now: datetime) -> None:
-        """After a run: a link card per approval request, config change and fork rebase it made (each is an item,
-        decided there), and the Back up now card for a backup request."""
-        for found in run_meta.get("proposals") or []:
-            if found.get("kind") == "backup":
-                self._turn_changed(self.store.append_turn(
-                    thread, role="system", status="proposal", now=now,
-                    text="Back up now? A complete, encrypted backup with your automatic backup settings. Nothing"
-                         " runs until you tap Back up now.",
-                    meta={"actions": ["backup"]}))  # fmt: skip
-                continue
-            self._link_card(thread, update_key(str(found["entity_id"]), str(found["to"])), "Approval requested", now)
+        """After a run: a link card per config change and fork rebase it made (each is an item, decided there)."""
         for row in self.store.changes_of_runs([run_id]):
             self._link_card(thread, f"change:{row['id']}", "Proposed change", now)
         for fork in run_meta.get("forks") or []:
             self._link_card(thread, f"fork:{fork['id']}", "Rebase onto Core", now)
-        if run_meta.get("proposals") or run_meta.get("forks"):
+        if run_meta.get("forks"):
             self.publish("updates", None, {})
 
     async def _refused(self, turn: Turn, status: str, error: str) -> None:
@@ -1092,10 +1017,6 @@ class Assistant:
     def _cancel_requested(self, task_id: int) -> bool:
         return bool(self.store.kv_get(f"{CANCEL_KEY}{task_id}"))
 
-    def _void_requests(self, run_ids: list[str], now: datetime) -> None:
-        if proposals.void_runs(self.store, run_ids, now=now, detail="the investigation was cancelled"):
-            self.publish("updates", None, {})
-
     async def _end_investigation(
         self,
         task: Task,
@@ -1117,8 +1038,6 @@ class Assistant:
         if state == "failed":
             kept["stopped"] = clean_text(detail, 300) or "it could not finish"
         self.store.finish_task(task.id, state, now=now, payload=kept)
-        if state == "cancelled":
-            self._void_requests(runs if runs is not None else _run_ids(kept), now)
         self._set_card(card, task, state, step, of, detail=detail)
         self.audit("task.investigate", "system", args={"task": task.id, "step": step}, outcome=state,
                    detail=detail[:200])  # fmt: skip
@@ -1231,11 +1150,11 @@ class Assistant:
         found = verdicts.answer(structured.get("verdict") if isinstance(structured, Mapping) else None)
         if found is None or not re.fullmatch(r"[0-9a-f]{16}", finding) or not fingerprint:
             return
-        verdict, reason, evidence = found
+        verdict = found.verdict
         try:
             verdicts.record(self.store, f"maint:{finding}", fingerprint=fingerprint, verdict=verdict,
-                            reason=redactor.redact(reason), evidence=[redactor.redact(e) for e in evidence],
-                            by="plan_fix", now=now)  # fmt: skip
+                            reason=redactor.redact(found.reason), evidence=[redactor.redact(e) for e in found.evidence],
+                            by="plan_fix", now=now, owner_action=redactor.redact(found.owner_action))  # fmt: skip
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.warning("plan verdict not kept", extra={"task": task.id, "error": str(err)[:160]})
             return
@@ -1275,16 +1194,14 @@ class Assistant:
 
     def cancel_queued_plan(self, item: str, reason: str) -> bool:
         """A finding the agent checked "not affected" needs no plan: its queued Plan a fix (one a cap holds, so nothing
-        runs) is cancelled, the item's history says why, and the admin's Plan a fix allowance gets the tap back.
-        A plan already running is left to finish (its own verdict then decides)."""
+        runs) is cancelled and the item's history says why. A plan already running is left to finish (its own
+        verdict then decides)."""
         task = self.store.plan_task(item)
         record = self.store.item(item)
         if task is None or task.state != "pending" or task.thread_id is None or record is None:
             return False
         if self.cancel_investigation(task.thread_id, task.id) != "ok":
             return False
-        started = _parse(task.payload.get("started_at")) or datetime.now(UTC)
-        self.store.unbump(self._day(started), PLAN_FIX_QUOTA)
         self.store.add_item_event(item, at=datetime.now(UTC), actor="daemon", text=f"Plan a fix cancelled: {reason}",
                                   revision=int(record["revision"]))  # fmt: skip
         return True
@@ -1300,7 +1217,6 @@ class Assistant:
         # Checked before and after every step, so a cancel can never be lost to a race.
         self.store.kv_set(f"{CANCEL_KEY}{task.id}", now.isoformat(timespec="seconds"), now=now)
         if task.state == "pending" and self.store.admin_cancel_task(task.id, now=now):
-            self._void_requests(_run_ids(task.payload), now)
             card = self.store.card_by_status(thread, "investigation", task.id)
             if card is not None:
                 self._set_card(card, task, "cancelled", int(task.payload.get("step") or 0),
@@ -1401,7 +1317,7 @@ class Assistant:
         self.store.finish_task(task.id, "done", now=now)
         turn_id = task.payload.get("turn_id")
         turn = self.store.get_turn(turn_id) if isinstance(turn_id, int) else None
-        # The earlier one chat is read only: a retry left scheduled there never runs.
+        # A retry whose conversation is gone (its item pruned) never runs.
         if (
             turn is None
             or turn.status != "refused"
@@ -1427,23 +1343,6 @@ class Assistant:
             self.store.set_turn_status(turn.id, "refused", expect=("queued",), meta={"retries": retries - 1})
             self.store.schedule_retry(turn.id, at=now + RETRY_QUEUE_FULL, attempt=retries, thread_id=turn.thread_id,
                                       now=now)  # fmt: skip
-
-    def keep_earlier(self) -> None:
-        """At start: the one chat of earlier versions becomes one read-only History item (written once), and an
-        investigation it started that is still open reports to its own item's conversation from now on."""
-        try:
-            chat = self.store.chat_id()
-            if self.items is None or not chat:
-                return
-            turns, first, last = self.store.legacy_turns()
-            self.items.earlier(turns=turns, first=first, last=last)
-            now = datetime.now(UTC)
-            for task in self.store.open_investigations():
-                own = self.store.item_by_key(f"task:{task.id}")
-                if task.thread_id == chat and own is not None:
-                    self.store.set_task_thread(task.id, f"item:{own['id']}", now=now)
-        except (StoreError, sqlite3.Error) as err:
-            _LOGGER.warning("earlier conversation not kept as an item", extra={"error": str(err)[:200]})
 
     def recover(self, now: datetime) -> int:
         """At start: turns a restart caught queued or running get an `interrupted` card (retry by hand)."""

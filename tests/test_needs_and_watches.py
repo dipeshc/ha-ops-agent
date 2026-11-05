@@ -97,10 +97,10 @@ async def test_the_status_sensor_carries_the_needs_you_count_and_top_title(h: An
     d = daemon(h)
     assert d.store is not None and d.items is not None
     view = d.status_view()
-    assert view["needs_you"] == 0 and view["needs_you_top"] is None and "pending_items" in view
+    assert view["needs_you"] == 0 and view["needs_you_top"] is None and "pending_items" not in view
     health = [{"key": "power:undervoltage", "kind": "power", "severity": "warning",
                "summary": "the host reports under-voltage " + "x" * 200, "detail": {}}]  # fmt: skip
-    d._save_open_items([], datetime.now(UTC))
+    d._save_open_items([], datetime.now(UTC).isoformat(timespec="seconds"))
     d.items._context = lambda: Context(health_at=datetime.now(UTC).isoformat(), health_items=health)  # type: ignore[method-assign]
     d.items.write_health()
     view = d.status_view()
@@ -118,31 +118,3 @@ def test_the_pill_never_shows_a_proposer_or_model_written_title() -> None:
     assert needs_label({"key": "updates:update.x@1", "kind": "update", "title": "Example Broker 4.2.0 → 4.3.0"}) == (
         "Example Broker 4.2.0 → 4.3.0"
     )
-
-
-def test_a_watch_from_before_the_upgrade_asks_on_time(tmp_path: Path) -> None:
-    """0.18 stored a watching health item without `recheck_at`; the start's recompose gives it one."""
-    store = Store.open(tmp_path / "ops.db")
-    since = NOW - timedelta(hours=1)
-    soon = {"key": "remote:down", "kind": "remote", "severity": "warning", "summary": "remote access is off",
-            "detail": {"since": since.isoformat(),
-                       "needs_after": (since + timedelta(hours=6)).isoformat()}}  # fmt: skip
-    past = {"key": "remote:other", "kind": "remote", "severity": "warning", "summary": "the other one is off",
-            "detail": {"needs_after": (NOW - timedelta(minutes=1)).isoformat()}}  # fmt: skip
-    for raw in (soon, past):
-        store.put_item({"id": f"c-{raw['key'][-4:]}", "key": f"health:{raw['key']}", "kind": "check",
-                        "title": raw["summary"], "state": "proposed", "kicker": "Health check", "ref": "", "gist": "",
-                        "quiet": False, "revision": 1, "source": {"health": raw["key"]},
-                        "as_of": NOW.isoformat(), "at": NOW.isoformat(), "created_at": NOW.isoformat(),
-                        "updated_at": NOW.isoformat()})  # fmt: skip
-    clock = {"now": NOW}
-    ctx = Context(health_at=NOW.isoformat(), health_items=[soon, past])
-    book = ItemBook(store, Hub(), tz=lambda: UTC, context=lambda: ctx, clock=lambda: clock["now"])
-    book.recompose()
-    assert store.item_by_key("health:remote:other")["needs"]  # type: ignore[index]
-    waiting = store.item_by_key("health:remote:down")
-    assert waiting is not None and not waiting["needs"] and waiting["source"]["recheck_at"]
-    clock["now"] = NOW + timedelta(hours=5)
-    book.tick()
-    assert store.item_by_key("health:remote:down")["needs"]  # type: ignore[index]
-    store.close()

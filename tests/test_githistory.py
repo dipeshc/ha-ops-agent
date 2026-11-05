@@ -328,7 +328,7 @@ def test_a_filter_driver_added_after_the_overrides_were_built_never_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The config snapshot and the git call are two processes: a driver added in between must find nothing to run."""
-    from opsd import gitops, health, safegit
+    from opsd import health, safegit
     from opsd.gitops import Repo
 
     ha, script = _hostile(tmp_path)
@@ -355,8 +355,8 @@ def test_a_filter_driver_added_after_the_overrides_were_built_never_runs(
     subprocess.run(["git", "-C", str(ha), "-c", "filter.late.clean=cat", "reset", "-q"], check=True)
     git(ha, "config", "--remove-section", "filter.late")
 
-    for module in (safegit, gitops, githistory, health):
-        monkeypatch.setattr(module, "git_argv", racing)
+    # Every git call goes through `safegit.run`, so this one patch covers gitops, githistory and health too.
+    monkeypatch.setattr(safegit, "git_argv", racing)
     repo = Repo(ha, tmp_path / "k", tmp_path / "kh")
     (ha / "automations" / "a.yaml").write_text("- id: three\n")
     assert repo.dirty_paths() == ["automations/a.yaml"]
@@ -388,7 +388,7 @@ def test_a_late_driver_never_runs_while_committing_even_with_racily_clean_files(
     """Touching another tracked file makes the live index re-check it by content; committing never does."""
     import os
 
-    from opsd import gitops, safegit
+    from opsd import safegit
     from opsd.gitops import Repo
 
     ha, script = _hostile(tmp_path)
@@ -405,8 +405,7 @@ def test_a_late_driver_never_runs_while_committing_even_with_racily_clean_files(
             config.write(f'[filter "late"]\n\tclean = {script}\n\tsmudge = {script}\n\tprocess = {script}\n')
         return argv
 
-    for module in (safegit, gitops):
-        monkeypatch.setattr(module, "git_argv", racing)
+    monkeypatch.setattr(safegit, "git_argv", racing)
     # Same content, new times: racily clean for the live index.
     os.utime(ha / "automations" / "side_b.yaml", None)
     (ha / "automations" / "a.yaml").write_text("- id: example\n")

@@ -1,24 +1,7 @@
-"""Standalone backups: "Back up now" in the panel and the act-mode self-heal.
+"""Standalone backups: "Back up now" in the panel and the act-mode self-heal (spec updates.md U24-U25).
 
-Both run Core's `backup/generate_with_automatic_settings` through the audited
-`backup.create` executor (the admin's encryption key and agents; the agent
-never handles the key), wait for Core's backup manager to finish, and check
-the result with `verify_backup` (encrypted on this machine, Home Assistant,
-its database and every installed add-on). One backup at a time.
-
-- "Back up now" is the admin's high-impact panel action (`panelapi._run`), at
-  most one start an hour, in any mode, and not while a complete backup is
-  under 3 hours old.
-
-Each backup counts toward Core's retention (and uploads to every agent), so
-repeated starts could push older restore points out: at most `DAILY_CAP`
-standalone backups a day, the panel and the self-heal together.
-- The self-heal is the agent's own AUTO-tier action, only in `agent.mode: act`,
-  only when no complete backup finished in the last 26 hours and Core's
-  automatic backup schedule is configured, at most once a day. In observe
-  mode the health item says so and the panel offers "Back up now".
-
-The latest result is kept (`LAST_KEY`) for the panel and the health check.
+Both run Core's backup with the admin's automatic settings through the audited `backup.create` executor (the
+agent never handles the key) and verify the result; one at a time, at most `DAILY_CAP` a day.
 """
 
 import asyncio
@@ -29,14 +12,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from opsd.health import parse_time
-from opsd.store import Store, StoreError
+from opsd.store import Store
 from opsd.updexec import ExecutorRefused, Executors, UpdateOps, verify_backup
 
 _LOGGER = logging.getLogger(__name__)
 
 LAST_KEY = "backup.last"
 SELF_HEAL_KEY = "backup.self_heal_at"
-MANUAL_GAP = timedelta(hours=1)
 SELF_HEAL_GAP = timedelta(hours=24)
 # No complete backup finished within this long: the self-heal may run.
 SELF_HEAL_AFTER_H = 26.0
@@ -105,11 +87,7 @@ class Backups:
     # ------------------------------------------------------------- state
 
     def last(self) -> dict[str, Any]:
-        try:
-            raw = json.loads(self.store.kv_get(LAST_KEY) or "{}")
-        except StoreError, ValueError:
-            return {}
-        return raw if isinstance(raw, dict) else {}
+        return self.store.kv_json(LAST_KEY) or {}
 
     def _save(self, record: dict[str, Any]) -> None:
         self.store.kv_set(LAST_KEY, json.dumps(record), now=self._clock())
@@ -153,24 +131,11 @@ class Backups:
         fresh = self.fresh_minutes()
         if fresh is not None:
             return f"Latest backup {fresh} min ago."
-        later = self.next_manual_at()
-        if later is not None:
-            return f"One backup an hour: try again after {later:%H:%M} UTC."
         return None
 
-    def next_manual_at(self) -> datetime | None:
-        """When "Back up now" is allowed again (one start an hour), or None if it is allowed now."""
-        started = parse_time(self.last().get("started_at"))
-        if started is None or self._clock() - started >= MANUAL_GAP:
-            return None
-        return started + MANUAL_GAP
-
     def view(self) -> dict[str, Any]:
-        later = self.next_manual_at()
-        return {"last": self.last(), "running": self.running,
-                "next_at": later.isoformat(timespec="seconds") if later else None,
-                "fresh_minutes": self.fresh_minutes(), "capped": self.capped(),
-                "blocked": self.manual_refusal()}  # fmt: skip
+        return {"last": self.last(), "running": self.running, "fresh_minutes": self.fresh_minutes(),
+                "capped": self.capped(), "blocked": self.manual_refusal()}  # fmt: skip
 
     def recent_failure(self) -> str | None:
         """Why the latest backup the agent started failed, if that was in the last week."""

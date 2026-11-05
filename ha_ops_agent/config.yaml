@@ -1,5 +1,5 @@
 name: HA Ops Agent
-version: "0.23.0"
+version: "0.24.0"
 slug: ha_ops_agent
 description: >-
   Unattended maintenance for Home Assistant: a daily health check, AI triage
@@ -47,14 +47,11 @@ backup_exclude:
 options:
   agent:
     mode: observe
-  llm:
-    # claude | none (deterministic alerts only)
-    provider: claude
   claude:
     # A setup token from claude setup-token (subscription), or an API key (sk-ant-api...).
     token: ""
-    # Subscription tier that sizes the agent's run-time budget (auto: pro, the smallest).
-    plan: auto
+    # Subscription tier that sizes the agent's run-time budget: pro, max5 or max20.
+    plan: pro
     model_standard: claude-sonnet-5-5
   chat:
     activity_days: 7
@@ -90,11 +87,10 @@ options:
 schema:
   agent:
     mode: list(observe|act)
-  llm:
-    provider: list(claude|none)
   claude:
     token: password?
-    plan: list(auto|pro|max5|max20)
+    # auto: accepted from earlier versions, read as pro.
+    plan: list(pro|max5|max20|auto)
     model_standard: match(^[a-z0-9][a-z0-9.-]{1,63}$)
     model_fast: match(^([a-z0-9][a-z0-9.-]{1,63})?$)?
   chat:

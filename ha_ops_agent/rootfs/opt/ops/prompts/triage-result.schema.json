@@ -43,6 +43,17 @@
           "reason": {
             "type": "string",
             "maxLength": 300
+          },
+          "owner_action": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "maxLength": 160
+              }
+            ]
           }
         }
       }

@@ -1,27 +1,8 @@
-"""Unix-socket RPC between the AI's `opsctl` (unprivileged) and the daemon.
+"""Unix-socket RPC between the AI's `opsctl` (unprivileged) and the daemon (spec capabilities.md K7-K10).
 
-The socket is owned root:ops, mode 0660, in a root:ops 0750 directory. Each
-connection carries one newline-terminated JSON request `{"verb": ..., "args":
-{...}}` of at most 8 KiB and gets one answer: `{"ok": true, "output": "..."}`
-or `{"ok": false, "error": "..."}`.
-
-Every request goes through the same pipeline, and every request is audited
-in the store whatever its outcome (rejections are rate-limited so a flood
-cannot fill the disk):
-
-1. Peer: the uid must be `ops` (SO_PEERCRED); root is refused.
-2. Binding: an `ops` caller must be a descendant of the active AI run's
-   process; it is then bound to that run's `RunContext` (principal,
-   profile, hand-off). With no active run an `ops` caller is refused.
-3. Schema: the capability registry validates verb and arguments strictly.
-4. Profile: the capability must be in the run's allowlist.
-5. Run budget (200 requests per run) and per-capability quotas.
-6. Validator, then policy (`policy.decide`): only `auto` and `auto_notify`
-   execute; `approve` and `never` are refused here (an approval
-   is only ever granted in the panel, never over the socket).
-7. Execution with a timeout; output redacted and size-capped.
-
-If the audit row cannot be written, the request is refused (fail closed).
+Every request runs the same pipeline, in order: peer, run binding, schema, profile, budgets and quotas, validator,
+policy, execution with a timeout, redacted and size-capped output. Every request is audited (rejections rate-limited);
+without an audit row it is refused.
 """
 
 import asyncio
@@ -33,7 +14,6 @@ import os
 import socket
 import sqlite3
 import struct
-import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,14 +30,14 @@ from opsd.capabilities import (
     parse_request,
     request_verb,
     resolve_ref,
-    schema,
     unavailable,
 )
 from opsd.githistory import HistoryError
-from opsd.policy import Origin, PolicyTier, Resolution, Verdict, decide
+from opsd.policy import Origin, Resolution, Verdict, decide_for
 from opsd.runctx import ExecContext, ExecEnv, RunContext
 from opsd.store import StoreError
 from opsd.supervisor import ApiError
+from opsd.ws import RejectionLimiter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,10 +47,6 @@ MAX_CONCURRENT = 2
 MAX_CONNECTIONS = 8
 # Rejections written to the audit log per minute; the rest are counted.
 AUDIT_REJECTIONS_PER_MIN = 60
-
-# Kept for callers and tests that want the request shapes.
-SCHEMA = schema()
-__all__ = ["MAX_REQUEST_BYTES", "SCHEMA", "RequestError", "RpcServer", "call", "parse_request"]
 
 Executor = Callable[[ExecContext, Args], Any]
 
@@ -103,10 +79,6 @@ def peer_creds(sock: socket.socket | None) -> Peer:
     return Peer(pid=int(pid), uid=int(uid))
 
 
-def peer_uid(sock: socket.socket | None) -> int | None:
-    return peer_creds(sock).uid
-
-
 def descends_from(pid: int, ancestor: int, proc: Path = Path("/proc")) -> bool:
     """Is `pid` the `ancestor` process or one of its descendants (via /proc ppid links)?"""
     seen: set[int] = set()
@@ -124,31 +96,6 @@ def descends_from(pid: int, ancestor: int, proc: Path = Path("/proc")) -> bool:
             return False
         current = int(fields[1])
     return current == ancestor
-
-
-class RejectionLimiter:
-    """Caps how many rejected requests are written to the audit log per minute."""
-
-    def __init__(self, per_minute: int, clock: Callable[[], float] = time.monotonic) -> None:
-        self._per_minute = per_minute
-        self._clock = clock
-        self._window = clock()
-        self._count = 0
-        self.suppressed = 0
-
-    def allow(self) -> bool:
-        now = self._clock()
-        if now - self._window >= 60:
-            self._window, self._count = now, 0
-        self._count += 1
-        if self._count > self._per_minute:
-            self.suppressed += 1
-            return False
-        return True
-
-    def take_suppressed(self) -> int:
-        count, self.suppressed = self.suppressed, 0
-        return count
 
 
 class RpcServer:
@@ -180,10 +127,6 @@ class RpcServer:
         self._rejections = RejectionLimiter(AUDIT_REJECTIONS_PER_MIN)
 
     # ------------------------------------------------------------ run binding
-
-    @property
-    def active_run(self) -> RunContext | None:
-        return self._active
 
     def begin_run(self, run: RunContext) -> None:
         if self._active is not None:
@@ -302,17 +245,8 @@ class RpcServer:
 
     def _decide(self, cap: Capability, ctx: ExecContext, args: Args, origin: Origin) -> Verdict:
         options = self._env.options
-        tighten = {name: PolicyTier.APPROVE for name in options.capabilities.require_approval}
-        tighten.update({name: PolicyTier.NEVER for name in options.capabilities.never})
-        return decide(
-            capability=cap.name,
-            default_tier=cap.tier,
-            effects=cap.effects,
-            origin=origin,
-            allowed_origins=cap.origins,
-            acting=options.acting,
-            resolution=self._resolve(cap, ctx, args),
-            tighten=tighten,
+        return decide_for(
+            cap, options.capabilities, origin=origin, acting=options.acting, resolution=self._resolve(cap, ctx, args)
         )
 
     @staticmethod
@@ -389,8 +323,7 @@ class RpcServer:
         except CapabilityError as err:
             return reject(str(err)[:300])
         ctx.verdict = verdict
-        runnable = verdict.execute or (verdict.report_only and cap.report_only_executor)
-        if not runnable:
+        if not verdict.execute:
             reason = {
                 "needs_approval": "this needs the admin's approval (Needs you on Home); tell the admin what to approve",
                 "report_only": "observe mode: report it instead",
@@ -446,6 +379,8 @@ class RpcServer:
 
     async def _execute(self, cap: Capability, ctx: ExecContext, args: Args) -> tuple[dict[str, Any], str]:
         redactor = self._env.redactor()
+        if cap.executor is None:
+            return {"ok": False, "error": f"{cap.name} is daemon-internal"}, "refused"
         executor = self._executor(cap.executor)
         try:
             if inspect.iscoroutinefunction(executor):

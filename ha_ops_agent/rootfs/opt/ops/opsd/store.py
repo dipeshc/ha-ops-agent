@@ -1,41 +1,19 @@
-"""Durable agent state in SQLite (`/data/ops.db`, root only, 0600).
+"""Durable agent state in SQLite (`/data/ops.db`, root only, 0600): spec storage.md S1-S7, S11.
 
-Ten tables (`docs/spec/storage.md`): the audit log of every capability request, the task schedule
-(compare-and-set claims), the per-run usage ledger, the conversations' turns, the update runs and jobs, one
-`approvals` record for every approval and proposal (a kind and a payload), the items and their events,
-and `kv` for small state: daily counters, quiet-hours holds, push action ids, reload times, the chat's
-identity and read mark, update and maintenance flags. Files that the health check needs without the
-store (`state.json`, `baseline.json`, `open-items.json`, `notify.json`) stay files.
-
-The schema is created whole on a fresh install. A store written by 0.18 (schema 18) is upgraded by
-one migration in one transaction; any other version refuses to open. Opening is deliberately
-conservative:
-- only a file SQLite reports as corrupt or not a database, or one that fails
-  `quick_check`, is moved aside and recreated (the store holds no policy and
-  the system tasks are re-created at every start);
-- a locked or busy database is retried with backoff;
-- anything else (disk full, I/O error, permissions, a schema this code does not upgrade) is never
-  "repaired": `StoreUnavailable` is raised and the daemon runs degraded, without store-dependent
-  features, and alerts the admin.
-
-Every write runs in one transaction. A write records what it touched (a job, a run, an approval, a
-change, a fact, a task, a kv key); before the transaction commits, the `observer` (the item book) writes
-the items those records show, so an item and its source never disagree after a crash.
-
-Tasks fire at least once, not exactly once: a crash between a task's effect
-and its rescheduling repeats the firing after restart. Any future mutating
-task must therefore carry an `idempotency_key` (unique per task) that its
-executor checks before acting.
+One connection, one transaction per write (nested writes join it); the observer (the item book) writes the
+items a transaction's records show before it commits (S1). A fresh file is created at `SCHEMA_VERSION`, a
+store at `UPGRADE_FROM` is upgraded in one transaction, any other version is refused (S2, S11). Only a
+corrupt file is moved aside (S5). Tasks fire at least once, so a mutating task carries an idempotency key.
 """
 
 import contextlib
+import hashlib
 import json
 import logging
 import math
 import os
 import re
 import sqlite3
-import stat
 import sys
 import threading
 import time
@@ -49,10 +27,9 @@ from opsd.budget import MIN_RUN_SECONDS, MIN_RUN_USD, WINDOW, WINDOWS, Caps, Per
 
 _LOGGER = logging.getLogger(__name__)
 
-# The whole schema. `IF NOT EXISTS` lets the upgrade from 18 run the same text: the tables it keeps
-# unchanged (audit, kv, update_runs, update_jobs, item_events) already exist, the ones it rebuilds were
-# renamed out of the way first. A renamed table keeps its index names, so the indexes are created only
-# after the old tables are dropped.
+# The whole schema. `IF NOT EXISTS` lets the upgrade run the same text: the tables it keeps already exist,
+# the ones it rebuilds were renamed out of the way first. A renamed table keeps its index names, so the
+# indexes are created only after the old tables are dropped.
 TABLES = """
     CREATE TABLE IF NOT EXISTS audit (
         id INTEGER PRIMARY KEY,
@@ -88,7 +65,7 @@ TABLES = """
         updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS approvals (
-        kind TEXT NOT NULL CHECK (kind IN ('approval', 'request', 'change', 'fact')),
+        kind TEXT NOT NULL CHECK (kind IN ('approval', 'change', 'fact')),
         id TEXT NOT NULL,
         subject TEXT NOT NULL DEFAULT '',
         state TEXT NOT NULL,
@@ -105,8 +82,7 @@ TABLES = """
         decided_by TEXT,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (kind, id),
-        CHECK (kind != 'approval' OR state IN ('pending', 'approved', 'rejected', 'expired', 'used', 'void')),
-        CHECK (kind != 'request' OR state IN ('open', 'done', 'void', 'expired')),
+        CHECK (kind != 'approval' OR state IN ('approved', 'rejected', 'expired', 'used', 'void')),
         CHECK (kind != 'change' OR state IN ('refused', 'open', 'applying', 'applied', 'reverting', 'reverted',
             'failed', 'stale', 'rejected', 'expired')),
         CHECK (kind != 'fact' OR state IN ('pending', 'applied', 'rejected'))
@@ -127,15 +103,11 @@ TABLES = """
         profile TEXT NOT NULL,
         class TEXT NOT NULL,
         day TEXT NOT NULL,
-        week TEXT NOT NULL,
-        month TEXT NOT NULL,
         started_at TEXT NOT NULL,
         ended_at TEXT,
         status TEXT NOT NULL DEFAULT 'running',
         reserved_turns INTEGER NOT NULL,
-        reserved_tokens INTEGER NOT NULL,
         reserved_seconds REAL NOT NULL DEFAULT 0,
-        reserved_share REAL NOT NULL DEFAULT 0,
         turns INTEGER,
         tokens INTEGER,
         tokens_in INTEGER NOT NULL DEFAULT 0,
@@ -144,11 +116,8 @@ TABLES = """
         duration_s REAL NOT NULL DEFAULT 0,
         model TEXT NOT NULL DEFAULT '',
         seconds REAL,
-        share_5h REAL,
-        share_7d REAL,
         acct_5h REAL,
-        acct_7d REAL,
-        share_estimated INTEGER NOT NULL DEFAULT 0
+        acct_7d REAL
     );
     CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS update_runs (
@@ -191,8 +160,8 @@ TABLES = """
     CREATE TABLE IF NOT EXISTS items (
         id TEXT PRIMARY KEY,
         key TEXT NOT NULL UNIQUE,
-        kind TEXT NOT NULL CHECK (kind IN ('update', 'reminder', 'investigation', 'proposal', 'check', 'backup',
-            'reload', 'window', 'maintenance')),
+        kind TEXT NOT NULL CHECK (kind IN ('update', 'reminder', 'investigation', 'question', 'proposal', 'check',
+            'backup', 'reload', 'window', 'maintenance')),
         kicker TEXT NOT NULL DEFAULT '',
         ref TEXT NOT NULL DEFAULT '',
         title TEXT NOT NULL,
@@ -252,131 +221,71 @@ INDEXES = """
 """
 SCHEMA = TABLES + ";" + INDEXES
 
-UPGRADE_FROM = 18
-SCHEMA_VERSION = 19
+UPGRADE_FROM = 19
+SCHEMA_VERSION = 20
 
-# The tables 19 rebuilds; renamed first so that TABLES creates their new shape.
-_REBUILT = ("tasks", "approvals", "turns", "runs", "items")
-# 18's tables that 19 folds into others, children before parents (old turns reference threads).
-_FOLDED = ("old_turns", "threads", "spend", "counters", "issued_actions", "fact_proposals", "approval_proposals",
-           "change_proposals", "held_pushes", "activity", "old_tasks", "old_approvals", "old_runs",
-           "old_items")  # fmt: skip
-# Copies 18's rows into 19's shape. Runs after the renames and TABLES, before the old tables are dropped.
-UPGRADE_18 = """
-    INSERT INTO tasks (id, kind, title, owner, created_by, system_key, schedule, payload, state, attempts,
-            generation, next_fire_at, last_fired_at, thread_id, idempotency_key, created_at, updated_at)
-        SELECT id, kind, title, owner, created_by, system_key, schedule, payload,
-            CASE state WHEN 'waiting_approval' THEN 'pending' ELSE state END, attempts, generation, next_fire_at,
-            last_fired_at, thread_id, idempotency_key, created_at, updated_at
-        FROM old_tasks WHERE kind IN ('reminder', 'followup', 'recurring', 'retry');
+# The tables the upgrade from 19 rebuilds (a CHECK or the columns changed); renamed first so that TABLES
+# creates their new shape, and dropped once their rows are copied.
+_REBUILT = ("approvals", "runs", "items")
+# What the upgrade from 19 drops or converts (storage.md S11). Runs after the renames and TABLES, before the
+# old tables are dropped.
+UPGRADE_19 = """
     INSERT INTO approvals (kind, id, subject, state, payload, plan_hash, requested_by, run_when, used_by, detail,
-            created_at, expires_at, decided_at, decided_by, updated_at)
-        SELECT 'approval', id, subject, state, plan, plan_hash, requested_by, run_when, used_by_job, detail,
-            created_at, expires_at, decided_at, decided_by, COALESCE(decided_at, created_at)
-        FROM old_approvals;
-    INSERT INTO approvals (kind, id, subject, state, payload, requested_by, detail, run_id, created_at,
-            expires_at, decided_at, updated_at)
-        SELECT 'request', CAST(id AS TEXT), entity_id || '@' || to_version, state,
-            json_object('entity_id', entity_id, 'from_version', from_version, 'to_version', to_version,
-                'plan_run', plan_run, 'title', title, 'thread_id', thread_id),
-            requested_by, detail, run_id, created_at, expires_at, decided_at, COALESCE(decided_at, created_at)
-        FROM approval_proposals;
-    INSERT INTO approvals (kind, id, subject, state, payload, requested_by, detail, run_id, created_at,
-            expires_at, decided_at, updated_at)
-        SELECT 'change', CAST(id AS TEXT), subject, state,
-            json_object('variant', kind, 'why', why, 'effect', effect,
-                'files', CASE WHEN json_valid(files) THEN json(files) ELSE json('[]') END,
-                'summary', CASE WHEN json_valid(summary) THEN json(summary) ELSE json('[]') END, 'diff', diff,
-                'base_sha', base_sha, 'commit_sha', commit_sha, 'ref', ref,
-                'fact_id', fact_id, 'applied_sha', applied_sha, 'reverted_sha', reverted_sha,
-                'thread_id', thread_id),
-            requested_by, detail, run_id, created_at, expires_at, decided_at, updated_at
-        FROM change_proposals;
-    INSERT INTO approvals (kind, id, state, payload, created_at, decided_at, updated_at)
-        SELECT 'fact', CAST(id AS TEXT), status,
-            json_object('text', text, 'thread_id', thread_id, 'turn_id', turn_id, 'change_id', change_id),
-            created_at, decided_at, COALESCE(decided_at, created_at)
-        FROM fact_proposals;
-    INSERT INTO turns (id, role, text, at, run_id, status, meta, client_id, reply_to)
-        SELECT id, role, text, at, run_id, status, meta, client_id, reply_to FROM old_turns
-        WHERE thread_id = (SELECT value FROM kv WHERE key = 'chat.main_thread');
-    INSERT INTO runs (run_id, profile, class, day, week, month, started_at, ended_at, status, reserved_turns,
-            reserved_tokens, reserved_seconds, reserved_share, turns, tokens, tokens_in, tokens_out,
-            tokens_cache_read, duration_s, model, seconds, share_5h, share_7d, acct_5h, acct_7d, share_estimated)
-        SELECT run_id, profile, class, day, week, month, started_at, ended_at, status, reserved_turns,
-            reserved_tokens, reserved_seconds, reserved_share, turns, tokens, tokens_in, tokens_out,
-            tokens_cache_read, duration_s, model, seconds, share_5h, share_7d, acct_5h, acct_7d, share_estimated
+            run_id, created_at, expires_at, decided_at, decided_by, updated_at)
+        SELECT kind, id, subject, CASE WHEN kind = 'approval' AND state = 'pending' THEN 'void' ELSE state END,
+            payload, plan_hash, requested_by, run_when, used_by,
+            CASE WHEN kind = 'approval' AND state = 'pending' THEN 'never confirmed (0.24.0 has no confirmation step)'
+                ELSE detail END,
+            run_id, created_at, expires_at,
+            CASE WHEN kind = 'approval' AND state = 'pending' THEN strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
+                ELSE decided_at END, decided_by,
+            CASE WHEN kind = 'approval' AND state = 'pending' THEN strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
+                ELSE updated_at END
+        FROM old_approvals
+        WHERE kind != 'request' AND NOT (kind = 'approval'
+            AND (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.kind') END) IS 'dashboard');
+    INSERT INTO runs (run_id, profile, class, day, started_at, ended_at, status, reserved_turns, reserved_seconds,
+            turns, tokens, tokens_in, tokens_out, tokens_cache_read, duration_s, model, seconds, acct_5h, acct_7d)
+        SELECT run_id, profile, class, day, started_at, ended_at, status, reserved_turns, reserved_seconds, turns,
+            tokens, tokens_in, tokens_out, tokens_cache_read, duration_s, model, seconds, acct_5h, acct_7d
         FROM old_runs;
     INSERT INTO items (id, key, kind, kicker, ref, title, state, gist, need, about, actions, phase, follows, facts,
             agent, change, footnote, quiet, revision, as_of, at, needs_since, resolved_at, created_at, updated_at,
             source, push)
-        SELECT id, key, kind, kicker, ref, title, state, gist, need, about, actions, phase, follows, facts, agent,
-            change, footnote, quiet, revision, as_of, at, needs_since, resolved_at, created_at, updated_at, source,
-            push
-        FROM old_items;
-    UPDATE items SET state = 'cancelled', gist = 'not run by this version (an unused task kind)', need = NULL,
-            actions = '[]', needs_since = NULL, revision = revision + 1,
-            resolved_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now'), at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now'),
+        SELECT id, key, CASE WHEN substr(key, 1, 4) = 'ask:' THEN 'question' ELSE kind END, kicker, ref, title,
+            state, gist, need, about, actions, phase, follows, facts, agent, change, footnote, quiet, revision, as_of,
+            at, needs_since, resolved_at, created_at, updated_at, source,
+            CASE WHEN id IN (SELECT tag FROM held) THEN '{}' ELSE push END
+        FROM old_items WHERE key != 'chat:earlier';
+    DELETE FROM kv WHERE key IN (SELECT key FROM held WHERE tag IN (SELECT id FROM items));
+    DELETE FROM item_events WHERE item_id IN (SELECT id FROM old_items WHERE key = 'chat:earlier');
+    DELETE FROM turns WHERE (CASE WHEN json_valid(meta) THEN json_extract(meta, '$.thread') END) IS NULL;
+    UPDATE tasks SET state = 'cancelled', next_fire_at = NULL,
             updated_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
-        WHERE key IN (SELECT 'task:' || id FROM old_tasks
-            WHERE kind NOT IN ('reminder', 'followup', 'recurring', 'retry'))
-        AND state NOT IN ('done', 'failed', 'cancelled', 'expired');
-    INSERT INTO item_events (item_id, at, actor, text, revision)
-        SELECT id, updated_at, 'daemon', 'Cancelled: not run by this version (an unused task kind)', revision FROM items
-        WHERE key IN (SELECT 'task:' || id FROM old_tasks
-            WHERE kind NOT IN ('reminder', 'followup', 'recurring', 'retry'))
-        AND gist = 'not run by this version (an unused task kind)';
-    INSERT INTO item_events (item_id, at, actor, text, revision)
-        SELECT 'a-' || id, at, 'daemon',
-            CASE WHEN kind IN ('notice', 'followup', 'investigation') THEN 'The agent sent you a message'
-                ELSE substr(title, 1, 160) END, 1
-        FROM activity a WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.id = 'a-' || a.id OR i.key = 'activity:' || a.id
-            OR i.id = a.item);
-    INSERT INTO items (id, key, kind, kicker, title, state, gist, agent, quiet, revision, as_of, at, resolved_at,
-            created_at, updated_at, source)
-        SELECT 'a-' || id, 'activity:' || id,
-            CASE kind WHEN 'backup' THEN 'backup' WHEN 'reload' THEN 'reload' WHEN 'updates' THEN 'window'
-                WHEN 'approval' THEN 'update' WHEN 'change' THEN 'proposal' WHEN 'investigation' THEN 'investigation'
-                WHEN 'reminder' THEN 'reminder' WHEN 'followup' THEN 'reminder' ELSE 'check' END,
-            CASE kind WHEN 'notice' THEN 'Message from the agent' WHEN 'followup' THEN 'Follow-up'
-                WHEN 'investigation' THEN 'Investigation' ELSE '' END,
-            CASE WHEN kind IN ('notice', 'followup', 'investigation') THEN 'The agent sent you a message'
-                ELSE substr(title, 1, 160) END,
-            CASE WHEN lower(title) LIKE '%failed%' OR lower(title) LIKE '%rolled back%' THEN 'failed' ELSE 'done' END,
-            CASE WHEN kind IN ('notice', 'followup', 'investigation') THEN '' ELSE substr(detail, 1, 300) END,
-            CASE WHEN kind IN ('notice', 'followup', 'investigation')
-                THEN json_object('text', substr(title || ': ' || detail, 1, 2000), 'sources', json_array(),
-                    'not_read', json_array(), 'run_id', NULL)
-                ELSE NULL END,
-            CASE WHEN needs_admin = 0 THEN 1 ELSE 0 END, 1, at, at, at, at, at, json_object('activity', id)
-        FROM activity a WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.id = 'a-' || a.id OR i.key = 'activity:' || a.id
-            OR i.id = a.item);
-    INSERT OR REPLACE INTO kv (key, value, updated_at)
-        SELECT 'count:' || day || ':' || name, CAST(n AS TEXT), day || 'T00:00:00+00:00' FROM counters;
-    INSERT OR REPLACE INTO kv (key, value, updated_at)
-        SELECT 'push.held:' || printf('%012d', id),
-            json_object('held_at', held_at, 'message', message, 'title', title, 'state', state,
-                'outcome', outcome, 'settled_at', settled_at),
-            COALESCE(settled_at, held_at)
-        FROM held_pushes;
-    INSERT OR REPLACE INTO kv (key, value, updated_at)
-        SELECT 'push.action:' || action_id,
-            json_object('kind', kind, 'tag', tag, 'thread_id', thread_id, 'issued_at', issued_at,
-                'expires_at', expires_at, 'used_at', used_at),
-            COALESCE(used_at, issued_at)
-        FROM issued_actions;
-    INSERT OR REPLACE INTO kv (key, value, updated_at)
-        SELECT 'chat.read', CAST(last_read_turn_id AS TEXT), updated_at FROM threads
-        WHERE id = (SELECT value FROM kv WHERE key = 'chat.main_thread');
-    INSERT OR REPLACE INTO kv (key, value, updated_at)
-        SELECT 'chat.created_at', created_at, created_at FROM threads
-        WHERE id = (SELECT value FROM kv WHERE key = 'chat.main_thread');
-    INSERT OR REPLACE INTO kv (key, value, updated_at)
-        SELECT 'activity.seq', CAST(MAX(COALESCE((SELECT MAX(id) FROM activity), 0),
-            COALESCE((SELECT MAX(CAST(substr(key, 10) AS INTEGER)) FROM items WHERE key LIKE 'activity:%'), 0))
-            AS TEXT), '1970-01-01T00:00:00+00:00';
-    DELETE FROM kv WHERE key = 'items.backfill' OR key LIKE 'confirm:%'
+        WHERE kind = 'retry' AND state IN ('pending', 'running')
+        AND thread_id = (SELECT value FROM kv WHERE key = 'chat.main_thread');
+    DELETE FROM tasks WHERE system_key = 'status.refresh';
+    DELETE FROM kv WHERE key IN ('chat.main_thread', 'chat.created_at', 'chat.read')
+        OR substr(key, 1, 22) = 'maintenance:dashboard:' OR substr(key, 1, 21) = 'maintenance:migrated:'
+        OR substr(key, 1, 19) = 'maintenance:result:'
+        OR (substr(key, 1, 6) = 'count:' AND substr(key, 18) IN ('chat_turns', 'chat_cap_notice', 'followup_runs',
+            'cap:plan_fix', 'cap:approval.request', 'cap:dashboard.save', 'cap:baseline.ack'));
+    UPDATE kv SET value = CASE WHEN json_valid(value) THEN json_remove(value, '$.trigger', '$.problems',
+            '$.inventory') ELSE value END WHERE key = 'maintenance:meta';
+    DROP TABLE temp.held
 """
+# Held pushes (quiet hours) with their push's tag, before UPGRADE_19 (an item push's tag is its item's id).
+_HELD_19 = """
+    CREATE TEMP TABLE held AS SELECT key,
+        CASE WHEN json_valid(value) THEN CASE WHEN json_valid(json_extract(value, '$.message'))
+            THEN json_extract(json_extract(value, '$.message'), '$.tag') END END AS tag
+        FROM kv WHERE substr(key, 1, 10) = 'push.held:'
+        AND (CASE WHEN json_valid(value) THEN json_extract(value, '$.state') END) IS 'held'
+"""
+# Files 0.23.0 and earlier left beside the store that nothing reads any more (the upgrade deletes them; the
+# store's own `<name>.v18.bak` copy too).
+_LEFTOVERS = ("run.lock", "selftest.json")
+
 
 # Update runs in these states own the update pipeline; at most one exists.
 ACTIVE_UPDATE_STATES = ("backing_up", "installing")
@@ -389,28 +298,20 @@ JOB_FINAL = frozenset({"succeeded", "rolled_back", "rollback_failed", "failed", 
 UPDATE_KEEP = timedelta(days=180)
 
 MAX_FACT_CHARS = 500
-# The copy taken before the upgrade from 18 (`<store>.v18.bak`), kept for a manual rollback.
-UPGRADE_COPY_SUFFIX = ".v18.bak"
-UPGRADE_COPY_KEEP = timedelta(days=14)
 _FILE_MODE = 0o600
-# The reload rate state (`opsd.reload`): `{domain: last reload}`, the same JSON 0.18's reloads.json held.
+# The reload rate state (`opsd.reload`): `{domain: last reload}`.
 RELOAD_KEY = "reload.last"
-_RELOADS_FILE = "reloads.json"
-_MAX_IMPORT_BYTES = 65536
 COUNT_KEY = "count:"
 # Today's reported AI cost, in millionths of a USD (`limits.daily_max_usd`).
 COST_COUNTER = "ai_cost_musd"
 USD_UNITS = 1_000_000
 HELD_KEY = "push.held:"
 ACTION_KEY = "push.action:"
-MAIN_THREAD_KEY = "chat.main_thread"
 READ_KEY = "chat.read"
-CHAT_CREATED_KEY = "chat.created_at"
 # A conversation bound to an item (`item:<id>`) or a question item (`ask:<id>`); see the chat section.
 ITEM_THREAD_RE = re.compile(r"(item|ask):([a-z]-[0-9a-z]{1,40})")
-# Question items (`ask:<token>`) and the earlier one chat, kept as one read-only item.
+# Question items (`ask:<token>`).
 QUESTION_PREFIX = "ask:"
-EARLIER_KEY = "chat:earlier"
 ACTIVITY_SEQ_KEY = "activity.seq"
 _CHANGE_PAYLOAD = frozenset({"files", "diff", "base_sha", "commit_sha", "ref", "applied_sha", "reverted_sha"})
 _CHANGE_COLUMNS = frozenset({"detail", "decided_at", "expires_at"})
@@ -522,17 +423,6 @@ def _approval(row: sqlite3.Row) -> dict[str, Any]:
     keys = ("id", "plan_hash", "requested_by", "state", "created_at", "expires_at", "decided_at", "decided_by",
             "subject", "run_when", "detail")  # fmt: skip
     return {k: row[k] for k in keys} | {"used_by_job": row["used_by"], "plan": _json_or(row["payload"], {})}
-
-
-def _request(row: sqlite3.Row) -> dict[str, Any]:
-    """A chat's request that the admin approve an update (`kind = request`); never an approval."""
-    payload = _json_or(row["payload"], {})
-    return {"id": int(row["id"]), "entity_id": str(payload.get("entity_id") or ""),
-            "from_version": str(payload.get("from_version") or ""), "to_version": str(payload.get("to_version") or ""),
-            "plan_run": int(payload.get("plan_run") or 0), "title": str(payload.get("title") or ""),
-            "thread_id": payload.get("thread_id"), "run_id": row["run_id"], "requested_by": row["requested_by"],
-            "state": row["state"], "created_at": row["created_at"], "expires_at": row["expires_at"],
-            "decided_at": row["decided_at"], "detail": row["detail"]}  # fmt: skip
 
 
 def _change(row: sqlite3.Row) -> dict[str, Any]:
@@ -650,13 +540,64 @@ def _task(row: sqlite3.Row) -> Task:
     )
 
 
-def upgrade_copy(store_path: Path) -> Path:
-    """Where the copy taken before the upgrade from 18 lives."""
-    return store_path.with_name(store_path.name + UPGRADE_COPY_SUFFIX)
-
-
 def _statements(script: str) -> Iterator[str]:
     return (s for s in script.split(";") if s.strip())
+
+
+def _legacy_evidence(finding: Any) -> str:
+    """0.22's maintenance evidence hash of a finding."""
+    parts = (finding.variant, finding.removal, finding.quote, sorted(finding.affected), sorted(finding.fixable))
+    return hashlib.sha256("|".join(str(p) for p in parts).encode()).hexdigest()[:16]
+
+
+def _upgrade_findings(conn: sqlite3.Connection) -> None:
+    """The upgrade from 19, in its transaction: the stored maintenance findings 0.24.0 has no variant for go (with
+    their plan and hiding), and a hiding or plan recorded under 0.22's evidence hash moves to the finding's own."""
+    # The finding's fingerprint is maintenance's to compute; it imports this module, so it is imported here.
+    from opsd import maintenance  # noqa: PLC0415
+
+    def get(key: str) -> str | None:
+        row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return str(row[0]) if row else None
+
+    def put(key: str, value: str) -> None:
+        conn.execute("UPDATE kv SET value = ? WHERE key = ?", (value, key))
+
+    def drop(raw: Any) -> None:
+        key = raw.get("key") if isinstance(raw, dict) else None
+        for prefix in (maintenance.PLAN_KEY, maintenance.HIDDEN_KEY):
+            conn.execute("DELETE FROM kv WHERE key = ?", (f"{prefix}{key}",))
+
+    stored = _json_or(get(maintenance.FINDINGS_KEY), [])
+    kept = []
+    for raw in stored:
+        dropped = isinstance(raw, dict) and (raw.get("variant") == "suggestion" or raw.get("signal") == "marketplace")
+        if dropped:
+            drop(raw)
+            continue
+        try:
+            finding = maintenance.Finding.from_json(raw)
+            legacy, current = (_legacy_evidence(finding), finding.evidence) if finding is not None else (None, None)
+        except sqlite3.Error:
+            raise
+        except Exception as err:  # noqa: BLE001 - one unreadable finding must not wedge the upgrade
+            # A stored finding this code cannot read must not wedge the start (the upgrade would fail the same way
+            # every time): it goes, with its plan and hiding; the next scan finds it again if it still applies.
+            _LOGGER.warning("dropping a stored maintenance finding the upgrade cannot read",
+                            extra={"key": str(raw.get("key") if isinstance(raw, dict) else raw)[:40],
+                                   "error": f"{type(err).__name__}: {err}"[:200]})  # fmt: skip
+            drop(raw)
+            continue
+        kept.append(raw)
+        if finding is None or legacy is None or current is None:
+            continue
+        if get(maintenance.HIDDEN_KEY + finding.key) == legacy:
+            put(maintenance.HIDDEN_KEY + finding.key, current)
+        plan = _json_or(get(maintenance.PLAN_KEY + finding.key), {})
+        if plan.get("evidence") == legacy:
+            put(maintenance.PLAN_KEY + finding.key, json.dumps(plan | {"evidence": current}))
+    if len(kept) != len(stored):
+        put(maintenance.FINDINGS_KEY, json.dumps(kept))
 
 
 class Store:
@@ -752,10 +693,9 @@ class Store:
             raise
         self._conn = conn
         self._fix_modes()
-        self.expire_upgrade_copy(datetime.now(UTC))
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        """Create the schema on an empty file, or upgrade 0.18's schema; refuse every other version."""
+        """Create the schema on an empty file, or upgrade a store at `UPGRADE_FROM`; refuse every other version."""
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
         if version == SCHEMA_VERSION:
             return
@@ -774,67 +714,15 @@ class Store:
         if version != UPGRADE_FROM:
             _LOGGER.critical("store schema too old to upgrade", extra={"schema": version, "upgrades": UPGRADE_FROM})
             raise StoreError(f"store schema {version} is older than this agent upgrades ({UPGRADE_FROM}, add-on "
-                             "0.18): install 0.18 first and start it once, or restore the add-on's /data from a "
-                             "backup")  # fmt: skip
-        self._copy_aside(conn)
-        reloads = self._read_reloads()
+                             "0.19 to 0.23): install 0.23 first and start it once, or restore the add-on's /data "
+                             "from a backup")  # fmt: skip
         renames = "".join(f"ALTER TABLE {name} RENAME TO old_{name};" for name in _REBUILT)
-        drops = "".join(f"DROP TABLE {name};" for name in _FOLDED)
-        self._run(conn, renames + TABLES + ";" + UPGRADE_18 + ";" + drops + INDEXES, version=SCHEMA_VERSION,
-                  extra=(lambda c: self._import_reloads(c, reloads)) if reloads is not None else None)  # fmt: skip
-        with contextlib.suppress(OSError):
-            (self.path.parent / _RELOADS_FILE).unlink()
-
-    def _copy_aside(self, conn: sqlite3.Connection) -> None:
-        """Before the upgrade from 18: a consistent copy of the store (SQLite's backup API), private like it.
-
-        For the admin's manual rollback (storage.md S12). Without it the upgrade does not start.
-        """
-        target = upgrade_copy(self.path)
-        temp = target.with_name(f"{target.name}.tmp")
-        try:
-            temp.unlink(missing_ok=True)
-            # Created private first: the copy is never readable by anyone the store is not.
-            os.close(os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, _FILE_MODE))
-            copy = sqlite3.connect(temp)
-            try:
-                conn.backup(copy)
-            finally:
-                copy.close()
-            os.chmod(temp, _FILE_MODE)
-            made, store = temp.stat(), self.path.stat()
-            if stat.S_IMODE(made.st_mode) != _FILE_MODE or made.st_uid != store.st_uid:
-                raise OSError(f"mode {oct(stat.S_IMODE(made.st_mode))} owner {made.st_uid}, not the store's")
-            with temp.open("rb") as handle:
-                os.fsync(handle.fileno())
-            os.replace(temp, target)
-            # The rename itself survives a power loss only once its directory is on disk.
-            folder = os.open(target.parent, os.O_RDONLY)
-            try:
-                os.fsync(folder)
-            finally:
-                os.close(folder)
-        except (OSError, sqlite3.Error) as err:
+        drops = "".join(f"DROP TABLE old_{name};" for name in _REBUILT)
+        self._run(conn, _HELD_19 + ";" + renames + TABLES + ";" + UPGRADE_19 + ";" + drops + INDEXES,
+                  version=SCHEMA_VERSION, extra=_upgrade_findings)  # fmt: skip
+        for name in (*_LEFTOVERS, f"{self.path.name}.v18.bak"):
             with contextlib.suppress(OSError):
-                temp.unlink()
-            _LOGGER.critical("store not copied aside; not upgrading", extra={"error": str(err)[:200]})
-            raise StoreError(f"could not copy the store aside before the upgrade ({type(err).__name__}: {err}); "
-                             "the store is unchanged") from err  # fmt: skip
-        _LOGGER.info("store copied aside before the upgrade", extra={"copy": str(target)})
-
-    def expire_upgrade_copy(self, now: datetime) -> bool:
-        """Delete the pre-upgrade copy once it is `UPGRADE_COPY_KEEP` old (at a start and the daily prune)."""
-        target = upgrade_copy(self.path)
-        try:
-            made = datetime.fromtimestamp(target.stat().st_mtime, UTC)
-        except FileNotFoundError:
-            return False
-        if now - made < UPGRADE_COPY_KEEP:
-            return False
-        with contextlib.suppress(FileNotFoundError):
-            target.unlink()
-        _LOGGER.info("pre-upgrade store copy deleted", extra={"copy": str(target)})
-        return True
+                (self.path.parent / name).unlink(missing_ok=True)
 
     @staticmethod
     def _run(conn: sqlite3.Connection, script: str, *, version: int,
@@ -852,23 +740,6 @@ class Store:
             conn.execute("ROLLBACK")
             raise
         _LOGGER.info("store migrated", extra={"version": version})
-
-    def _read_reloads(self) -> str | None:
-        """0.18's reload rate state, verbatim: `opsd.reload` refuses a corrupt one the same way it did."""
-        path = self.path.parent / _RELOADS_FILE
-        try:
-            with path.open("rb") as handle:
-                raw = handle.read(_MAX_IMPORT_BYTES + 1)
-        except FileNotFoundError:
-            return None
-        if len(raw) > _MAX_IMPORT_BYTES:
-            return "too large"
-        return raw.decode("utf-8", errors="replace")
-
-    @staticmethod
-    def _import_reloads(conn: sqlite3.Connection, raw: str) -> None:
-        conn.execute("INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, ?)",
-                     (RELOAD_KEY, raw, _iso(datetime.now(UTC))))  # fmt: skip
 
     def _fix_modes(self) -> None:
         for suffix in ("", "-wal", "-shm"):
@@ -1013,6 +884,14 @@ class Store:
         self.audit_finish(audit_id, outcome, detail)
         return audit_id
 
+    def audit_safe(self, *, outcome: str, detail: str = "", **fields: Any) -> int | None:
+        """`audit` for a record of something already done: a failed write is logged, never raised."""
+        try:
+            return self.audit(outcome=outcome, detail=detail, **fields)
+        except (StoreError, sqlite3.Error) as err:
+            _LOGGER.error("audit write failed", extra={"error": str(err)[:200]})
+            return None
+
     def audit_rows(self, *, run_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         if run_id is None:
             rows = self._all("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,))
@@ -1078,10 +957,6 @@ class Store:
             )
             row = conn.execute("SELECT * FROM tasks WHERE system_key = ?", (key,)).fetchone()
         return _task(row)
-
-    def system_task(self, key: str) -> Task | None:
-        row = self._one("SELECT * FROM tasks WHERE system_key = ?", (key,))
-        return _task(row) if row else None
 
     def get_task(self, task_id: int) -> Task | None:
         row = self._one("SELECT * FROM tasks WHERE id = ?", (task_id,))
@@ -1183,8 +1058,10 @@ class Store:
         return _task(row), True
 
     def open_tasks(self, *, limit: int = 50) -> list[Task]:
-        """Pending, user-visible tasks (never the system's own)."""
-        return self.list_tasks("upcoming", now=datetime.now(UTC), limit=limit)
+        """Pending or running user-visible tasks (never the system's own), the next to fire first."""
+        rows = self._all("SELECT * FROM tasks WHERE system_key IS NULL AND state IN ('pending', 'running')"
+                         " ORDER BY next_fire_at LIMIT ?", (limit,))  # fmt: skip
+        return [_task(r) for r in rows]
 
     def open_investigations(self) -> list[Task]:
         """Follow-ups that are chat investigations, pending or running."""
@@ -1197,12 +1074,6 @@ class Store:
         """Replace a user-visible task's payload (the daemon's own bookkeeping on it)."""
         return self._task_cas(task_id, "UPDATE tasks SET payload = ?, updated_at = ? WHERE id = ?"
                               " AND system_key IS NULL", (json.dumps(payload), _iso(now), task_id))  # fmt: skip
-
-    def set_task_thread(self, task_id: int, thread_id: str, *, now: datetime) -> bool:
-        """Move an open user-visible task's reports to another conversation (an investigation from the earlier chat)."""
-        return self._task_cas(task_id, "UPDATE tasks SET thread_id = ?, updated_at = ? WHERE id = ?"
-                              " AND system_key IS NULL AND state IN ('pending', 'running')",
-                              (thread_id, _iso(now), task_id))  # fmt: skip
 
     def plan_task(self, item: str) -> Task | None:
         """The latest "Plan a fix" investigation of an item (`payload.plan_fix`, `payload.item`), in any state."""
@@ -1256,24 +1127,6 @@ class Store:
                               " WHERE id = ? AND system_key IS NULL AND state = 'done'",
                               (_iso(next_fire_at), _iso(now), task_id))  # fmt: skip
 
-    def list_tasks(self, view: str, *, now: datetime, limit: int = 50) -> list[Task]:
-        """The user-visible tasks: `upcoming` (open) or `done` (closed in the last 14 days)."""
-        if view == "upcoming":
-            sql = (
-                "SELECT * FROM tasks WHERE system_key IS NULL AND state IN ('pending', 'running')"
-                " ORDER BY next_fire_at LIMIT ?"
-            )
-            args: tuple[Any, ...] = (limit,)
-        elif view == "done":
-            sql = (
-                "SELECT * FROM tasks WHERE system_key IS NULL AND state IN ('done', 'cancelled', 'failed')"
-                " AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?"
-            )
-            args = (_iso(now - timedelta(days=14)), limit)
-        else:
-            raise ValueError(f"unknown task view: {view}")
-        return [_task(r) for r in self._all(sql, args)]
-
     def admin_cancel_task(self, task_id: int, *, now: datetime) -> bool:
         """The admin may cancel any open user-visible task (theirs or the agent's), never a system task."""
         return self._close_pending(task_id, "cancelled", owner=None, now=now)
@@ -1309,37 +1162,20 @@ class Store:
 
     # ---------------------------------------------------------------- chat
 
-    # A conversation is a thread of turns. Every thread but the earlier one chat is bound to an item: `item:<id>` is
-    # the conversation on that item, `ask:<id>` the one of a question (itself an item). The thread's key lives in the
-    # turn's `meta.thread`, written by the store only; the earlier one chat's turns have none (`chat_id`).
+    # A conversation is a thread of turns bound to an item: `item:<id>` is the conversation on that item, `ask:<id>`
+    # the one of a question (itself an item). The thread's key lives in the turn's `meta.thread`, written by the
+    # store only.
 
-    def chat_id(self) -> str:
-        """The earlier one chat's id (`kv` `chat.main_thread`), or "" when this store never had one."""
-        return self.kv_get(MAIN_THREAD_KEY)
-
-    def create_thread(self, thread_id: str, *, principal: str, channel: str, now: datetime) -> None:
-        """Start the earlier one chat as `thread_id`; a no-op once it exists (0.22.0 never starts one)."""
-        del principal, channel
-        with self._tx():
-            if self.chat_id():
-                return
-            self.kv_set(MAIN_THREAD_KEY, thread_id, now=now)
-            self.kv_set(CHAT_CREATED_KEY, _iso(now), now=now)
-            self.kv_set(READ_KEY, "0", now=now)
-
-    def _tag(self, thread_id: str) -> tuple[str, str | None] | None:
+    def _tag(self, thread_id: str) -> tuple[str, str] | None:
         """(thread, its `meta.thread` value) for a thread that exists: an item's or a question's while the item is
-        stored, or the earlier one chat (no value). None for anything else."""
+        stored. None for anything else."""
         found = ITEM_THREAD_RE.fullmatch(thread_id)
-        if found is not None:
-            row = self._one("SELECT key FROM items WHERE id = ?", (found.group(2),))
-            key = str(row["key"]) if row is not None else EARLIER_KEY
-            # The earlier one chat's item has no conversation of its own: its thread is the chat (`chat_id`).
-            if key == EARLIER_KEY or (found.group(1) == "ask") != key.startswith(QUESTION_PREFIX):
-                return None
-            return thread_id, thread_id
-        chat = self.chat_id()
-        return (chat, None) if chat and thread_id == chat else None
+        if found is None:
+            return None
+        row = self._one("SELECT key FROM items WHERE id = ?", (found.group(2),))
+        if row is None or (found.group(1) == "ask") != str(row["key"]).startswith(QUESTION_PREFIX):
+            return None
+        return thread_id, thread_id
 
     def _turn(self, row: sqlite3.Row, chat: str | None = None) -> Turn:
         try:
@@ -1348,7 +1184,7 @@ class Store:
             meta = {}
         meta = meta if isinstance(meta, dict) else {}
         tag = meta.get("thread")
-        thread = tag if isinstance(tag, str) and tag else (chat if chat is not None else self.chat_id())
+        thread = tag if isinstance(tag, str) and tag else (chat or "")
         return Turn(id=int(row["id"]), thread_id=thread, role=str(row["role"]), text=str(row["text"]),
                     at=str(row["at"]), status=str(row["status"]), meta=meta, run_id=row["run_id"],
                     reply_to=row["reply_to"], client_id=row["client_id"])  # fmt: skip
@@ -1393,9 +1229,7 @@ class Store:
         if found is None:
             raise StoreError("no such chat")
         # The thread is the store's to write: whatever a caller's meta says, it is replaced.
-        stored = {k: v for k, v in (meta or {}).items() if k != "thread"}
-        if found[1] is not None:
-            stored["thread"] = found[1]
+        stored = {k: v for k, v in (meta or {}).items() if k != "thread"} | {"thread": found[1]}
         cursor = conn.execute(
             "INSERT INTO turns (role, text, at, run_id, status, meta, client_id, reply_to)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1591,14 +1425,15 @@ class Store:
 
     def stuck_turns(self) -> list[Turn]:
         """Admin turns left queued or running (by a restart), in any thread."""
-        rows = self._all("SELECT * FROM turns WHERE role = 'admin' AND status IN ('queued', 'running') ORDER BY id")
+        rows = self._all("SELECT * FROM turns WHERE role = 'admin' AND status IN ('queued', 'running')"
+                         " AND json_extract(meta, '$.thread') IS NOT NULL ORDER BY id")  # fmt: skip
         return [self._turn(r) for r in rows]
 
-    def _read_key(self, tag: str | None) -> str:
-        return READ_KEY if tag is None else f"{READ_KEY}:{tag}"
+    def _read_key(self, tag: str) -> str:
+        return f"{READ_KEY}:{tag}"
 
     def get_thread(self, thread_id: str) -> dict[str, Any] | None:
-        """A thread's summary (`read_only` for the earlier one chat); None for a thread that does not exist."""
+        """A thread's summary; None for a thread that does not exist."""
         found = self._tag(thread_id)
         if found is None:
             return None
@@ -1608,11 +1443,10 @@ class Store:
             " SUM(CASE WHEN role = 'admin' AND status IN ('queued', 'running') THEN 1 ELSE 0 END)"
             " FROM turns WHERE json_extract(meta, '$.thread') IS ?", (tag,))  # fmt: skip
         count, first_at, last_at, last_reply, busy = tuple(row) if row else (0, None, None, None, 0)
-        created = self.kv_get(CHAT_CREATED_KEY) if tag is None else first_at
         read = int(self.kv_get(self._read_key(tag), "0") or 0)
-        return {"id": thread, "channel": "panel", "created_at": created, "updated_at": last_at or created,
+        return {"id": thread, "channel": "panel", "created_at": first_at, "updated_at": last_at or first_at,
                 "turns": int(count or 0), "unread": last_reply is not None and int(last_reply) > read,
-                "in_flight": int(busy or 0) > 0, "read_only": tag is None}  # fmt: skip
+                "in_flight": int(busy or 0) > 0}  # fmt: skip
 
     def mark_read(self, thread_id: str, *, upto: int | None = None) -> bool:
         found = self._tag(thread_id)
@@ -1629,18 +1463,12 @@ class Store:
             self.kv_set(key, str(target), now=datetime.now(UTC))
             return True
 
-    def legacy_turns(self) -> tuple[int, str | None, str | None]:
-        """The earlier one chat: how many turns it has, its first and last turn time."""
-        row = self._one("SELECT COUNT(*), MIN(at), MAX(at) FROM turns WHERE json_extract(meta, '$.thread') IS NULL")
-        return (int(row[0] or 0), row[1], row[2]) if row else (0, None, None)
-
     # --------------------------------------------------------- run ledger
 
-    # A running run counts its reservation; a finished one its real figures. The `reserved_share`, `share_5h`,
-    # `share_7d` and `share_estimated` columns of `runs` are no longer read or written (0.20.0 measures run time
-    # only); they stay so the schema does not change.
+    # A running run counts its reservation (turns and run time; it reserves no tokens); a finished one its real
+    # figures.
     _USAGE_SQL = (
-        "SELECT COUNT(*), SUM(COALESCE(turns, reserved_turns)), SUM(COALESCE(tokens, reserved_tokens)),"
+        "SELECT COUNT(*), SUM(COALESCE(turns, reserved_turns)), SUM(COALESCE(tokens, 0)),"
         " SUM(tokens_cache_read), SUM(COALESCE(seconds, reserved_seconds)) FROM runs WHERE "
     )
 
@@ -1714,11 +1542,10 @@ class Store:
                 if budget_usd < MIN_RUN_USD:
                     return "cost_cap:day"
             conn.execute(
-                "INSERT INTO runs (run_id, profile, class, day, week, month, started_at, reserved_turns,"
-                " reserved_tokens, reserved_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (run_id, profile, budget_class, period.day, period.week, period.month, _iso(at), max_turns, 0,
-                 seconds),
-            )  # fmt: skip
+                "INSERT INTO runs (run_id, profile, class, day, started_at, reserved_turns, reserved_seconds)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (run_id, profile, budget_class, period.day, _iso(at), max_turns, seconds),
+            )
             return Reservation(turns=max_turns, budget_usd=budget_usd, seconds=seconds)
 
     def add_cost(self, day: str, cost_usd: float) -> float:
@@ -1765,7 +1592,7 @@ class Store:
             if charge_reservation:
                 conn.execute(
                     "UPDATE runs SET status = ?, ended_at = ?, turns = MAX(reserved_turns / 4, ?),"
-                    " tokens = MAX(reserved_tokens / 4, ?), duration_s = ?, model = ?,"
+                    " tokens = ?, duration_s = ?, model = ?,"
                     " seconds = MAX(reserved_seconds / 4, ?), acct_5h = ?, acct_7d = ? WHERE run_id = ?",
                     (status, _iso(at), turns, tokens_in + tokens_out, duration_s, model[:60], duration_s, acct_5h,
                      acct_7d, run_id),
@@ -1784,7 +1611,7 @@ class Store:
         with self._tx() as conn:
             return conn.execute(
                 "UPDATE runs SET status = 'interrupted', ended_at = ?, turns = reserved_turns,"
-                " tokens = reserved_tokens, seconds = reserved_seconds WHERE status = 'running'",
+                " tokens = 0, seconds = reserved_seconds WHERE status = 'running'",
                 (_iso(at),),
             ).rowcount
 
@@ -1821,6 +1648,14 @@ class Store:
                 (key, value, _iso(now)),
             )
             self._touch("kv", key)
+
+    def kv_json(self, key: str) -> dict[str, Any] | None:
+        """A kv value holding a JSON object; None when it is missing, empty, unreadable or not an object."""
+        try:
+            found = _json_or(self.kv_get(key), {})
+        except StoreError, sqlite3.Error:
+            return None
+        return found if isinstance(found, dict) and found else None
 
     def kv_prefix(self, prefix: str, *, limit: int = 200) -> dict[str, str]:
         """Non-empty values whose key starts with `prefix` (a literal prefix, not a pattern)."""
@@ -2035,13 +1870,16 @@ class Store:
     # ----------------------------------------------------------- approvals
 
     def create_approval(self, *, approval_id: str, plan: dict[str, Any], plan_hash: str, subject: str,
-                        requested_by: str, run_when: str, now: datetime, expires_at: datetime) -> None:  # fmt: skip
+                        requested_by: str, run_when: str, now: datetime, expires_at: datetime, state: str,
+                        decided_by: str) -> None:  # fmt: skip
+        """A new approval, already decided (`approved` or `rejected`) by the admin's one panel action."""
         with self._tx() as conn:
             conn.execute(
                 "INSERT INTO approvals (kind, id, payload, plan_hash, requested_by, state, created_at, expires_at,"
-                " subject, run_when, updated_at) VALUES ('approval', ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
-                (approval_id, json.dumps(plan, sort_keys=True), plan_hash, requested_by, _iso(now), _iso(expires_at),
-                 subject, run_when, _iso(now)),
+                " subject, run_when, updated_at, decided_at, decided_by)"
+                " VALUES ('approval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (approval_id, json.dumps(plan, sort_keys=True), plan_hash, requested_by, state, _iso(now),
+                 _iso(expires_at), subject, run_when, _iso(now), _iso(now), decided_by),
             )  # fmt: skip
             self._touch("approval", approval_id)
 
@@ -2070,41 +1908,6 @@ class Store:
             if done:
                 self._touch("approval", approval_id)
             return done
-
-    # --------------------------------------------------- approval requests
-
-    def create_proposal(self, *, entity_id: str, from_version: str, to_version: str, plan_run: int, title: str,
-                        thread_id: str | None, run_id: str, requested_by: str, now: datetime,
-                        expires_at: datetime) -> dict[str, Any]:  # fmt: skip
-        """A chat's request that the admin approve an update (never an approval itself)."""
-        payload = {"entity_id": entity_id, "from_version": from_version, "to_version": to_version,
-                   "plan_run": plan_run, "title": title[:120], "thread_id": thread_id}  # fmt: skip
-        with self._tx() as conn:
-            number = str(self._next_number(conn, "request"))
-            conn.execute(
-                "INSERT INTO approvals (kind, id, subject, state, payload, requested_by, run_id, created_at,"
-                " expires_at, updated_at) VALUES ('request', ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
-                (number, f"{entity_id}@{to_version}", json.dumps(payload), requested_by[:100], run_id, _iso(now),
-                 _iso(expires_at), _iso(now)),
-            )  # fmt: skip
-            row = conn.execute("SELECT * FROM approvals WHERE kind = 'request' AND id = ?", (number,)).fetchone()
-        return _request(row)
-
-    def proposals(self, *, states: tuple[str, ...] = ("open",), run_id: str | None = None,
-                  limit: int = 50) -> list[dict[str, Any]]:  # fmt: skip
-        extra, args = ("run_id = ?", (run_id,)) if run_id is not None else ("", ())
-        rows = self._of_kind("request", states, limit, extra=extra, args=args, order="CAST(id AS INTEGER) DESC")
-        return [_request(r) for r in rows]
-
-    def settle_proposal(self, proposal_id: int, *, to: str, now: datetime, detail: str = "") -> bool:
-        """Compare-and-set an open request to `done`, `void` or `expired`."""
-        if to not in ("done", "void", "expired"):
-            raise ValueError(f"not a final proposal state: {to}")
-        with self._tx() as conn:
-            return bool(conn.execute(
-                "UPDATE approvals SET state = ?, decided_at = ?, updated_at = ?, detail = ? WHERE kind = 'request'"
-                " AND id = ? AND state = 'open'",
-                (to, _iso(now), _iso(now), detail[:200], str(proposal_id))).rowcount)  # fmt: skip
 
     # --------------------------------------------------- change proposals
 
@@ -2181,13 +1984,6 @@ class Store:
         row = self._one("SELECT * FROM approvals WHERE kind = 'fact' AND id = ?", (str(fact_id),))
         return _fact(row) if row else None
 
-    def list_facts(self, *, now: datetime, limit: int = 100) -> list[dict[str, Any]]:
-        """Pending proposals, plus the ones decided in the last 30 days."""
-        rows = self._of_kind("fact", None, limit, extra="(state = 'pending' OR decided_at >= ?)",
-                             args=(_iso(now - timedelta(days=30)),),
-                             order="state != 'pending', created_at DESC")  # fmt: skip
-        return [_fact(r) for r in rows]
-
     def decide_fact(self, fact_id: int, status: str, *, now: datetime) -> bool:
         if status not in ("applied", "rejected"):
             raise ValueError(f"not a decision: {status}")
@@ -2251,11 +2047,6 @@ class Store:
             conn.execute("INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)",
                          (f"{ACTION_KEY}{action_id}", json.dumps(value, sort_keys=True), _iso(now)))  # fmt: skip
 
-    def issued_action(self, action_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            value = self._kv_json(self._db(), f"{ACTION_KEY}{action_id}")
-        return value | {"action_id": action_id} if value is not None else None
-
     def consume_action(self, action_id: str, *, now: datetime) -> dict[str, Any] | None:
         """Single use: the action is marked used in the same transaction that reads it."""
         key = f"{ACTION_KEY}{action_id}"
@@ -2275,7 +2066,6 @@ class Store:
         Runs and counters are kept at least 8 days, so the rolling 7-day
         window and today's counters are never pruned away.
         """
-        self.expire_upgrade_copy(now)
         cutoff = _iso(now - max(keep, MIN_KEEP))
         week, quarter = _iso(now - timedelta(days=7)), _iso(now - timedelta(days=90))
         with self._tx() as conn:
@@ -2286,12 +2076,10 @@ class Store:
             ).rowcount
             conn.execute("DELETE FROM approvals WHERE kind = 'fact' AND state != 'pending' AND decided_at < ?",
                          (quarter,))  # fmt: skip
-            conn.execute("DELETE FROM approvals WHERE kind = 'request' AND state != 'open' AND decided_at < ?",
+            # Resolved items (never one in Needs you) and their events.
+            conn.execute("DELETE FROM items WHERE needs = 0 AND resolved_at IS NOT NULL AND resolved_at < ?",
                          (quarter,))  # fmt: skip
-            # Resolved items (never one in Needs you, never the earlier one chat) and their events.
-            conn.execute("DELETE FROM items WHERE needs = 0 AND resolved_at IS NOT NULL AND resolved_at < ?"
-                         " AND key != ?", (quarter, EARLIER_KEY))  # fmt: skip
-            # An item's conversation goes with its item; the earlier one chat's turns (no thread) are kept.
+            # An item's conversation goes with its item.
             conn.execute("DELETE FROM turns WHERE json_extract(meta, '$.thread') IS NOT NULL AND at < ? AND"
                          " substr(json_extract(meta, '$.thread'), instr(json_extract(meta, '$.thread'), ':') + 1)"
                          " NOT IN (SELECT id FROM items)", (quarter,))  # fmt: skip
@@ -2299,6 +2087,9 @@ class Store:
             conn.execute("DELETE FROM kv WHERE substr(key, 1, ?) = ? AND json_extract(value, '$.state') != 'held'"
                          " AND json_extract(value, '$.settled_at') < ?", (len(HELD_KEY), HELD_KEY, week))  # fmt: skip
             conn.execute("DELETE FROM kv WHERE key LIKE 'investigation.cancel:%' AND updated_at < ?", (week,))
+            # The cloud evidence cache (`opsd.evidence`) is fresh for hours; an entry unread for a month is gone.
+            conn.execute("DELETE FROM kv WHERE substr(key, 1, 9) = 'evidence:' AND updated_at < ?",
+                         (_iso(now - timedelta(days=30)),))  # fmt: skip
             runs = conn.execute("DELETE FROM runs WHERE started_at < ?", (cutoff,)).rowcount
             counters = conn.execute("DELETE FROM kv WHERE substr(key, 1, ?) = ? AND substr(key, ?, 10) < ?",
                                     (len(COUNT_KEY), COUNT_KEY, len(COUNT_KEY) + 1, cutoff[:10])).rowcount  # fmt: skip
@@ -2416,17 +2207,13 @@ class Store:
         return int(row[0]) if row else 0
 
     def items_page(self, *, kinds: tuple[str, ...] | None, needs_only: bool, before: tuple[str, str] | None,
-                   limit: int, prefixes: tuple[str, ...] | None = None) -> list[dict[str, Any]]:  # fmt: skip
-        """History: newest `at` first, keyset-paged by (`at`, `id`); `prefixes` keeps keys that start with one."""
+                   limit: int) -> list[dict[str, Any]]:  # fmt: skip
+        """History: newest `at` first, keyset-paged by (`at`, `id`)."""
         where = ["1 = 1"]
         args: list[Any] = []
         if kinds:
             where.append(f"kind IN ({','.join('?' * len(kinds))})")
             args.extend(kinds)
-        if prefixes:
-            where.append("(" + " OR ".join("substr(key, 1, ?) = ?" for _ in prefixes) + ")")
-            for prefix in prefixes:
-                args.extend([len(prefix), prefix])
         if needs_only:
             where.append("needs = 1")
         if before is not None:

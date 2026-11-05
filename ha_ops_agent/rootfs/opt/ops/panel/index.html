@@ -351,7 +351,7 @@ async function api(method, path, body, retried) {
   return { status: res.status, data };
 }
 
-/* `conv` is the open item's conversation: {item, thread (the daemon's), turns, more, inflight, info, readOnly, loaded}. */
+/* `conv` is the open item's conversation: {item, thread (the daemon's), turns, more, inflight, info, loaded}. */
 const S = {
   route: "home", arg: null, from: "home", home: null, homeErr: null, items: {}, hist: null, asks: null, sys: null,
   fresh: 0, conv: null, state: null, seq: 0, drafts: {}, menuFor: null, live: "sse", offline: false, open: {}, note: {},
@@ -400,8 +400,8 @@ async function loadItem(id) {
   const r = await getJSON(url);
   if (r.status === 200) put(r.data.item);
   else if (r.status === 404) S.items[id] = { gone: true };
-  /* A question opened from a push or a link goes back to Ask; the earlier one chat to History. */
-  if (r.status === 200 && r.data.item.kind === "question" && S.route === "t" && S.arg === id && !els.navigated) S.from = r.data.item.conversation === "read_only" ? "history" : "ask";
+  /* A question opened from a push or a link goes back to Ask. */
+  if (r.status === 200 && r.data.item.kind === "question" && S.route === "t" && S.arg === id && !els.navigated) S.from = "ask";
   render();
 }
 /* Live events can overtake a response: an older revision never replaces a newer one. */
@@ -410,11 +410,10 @@ function put(it) {
   if (cur && !cur.gone && cur.revision > it.revision) return;
   S.items[it.id] = it.events || !cur ? it : { ...it, events: cur.events };
 }
-/* Ask lists the questions the admin asked (History's `questions` filter, newest first); the earlier one chat is in
-   History only. */
+/* Ask lists the questions the admin asked (History's `questions` filter, newest first). */
 async function loadAsks() {
   const r = await getJSON("api/history?filter=questions");
-  if (r.status === 200) S.asks = r.data.items.filter((t) => t.conversation !== "read_only");
+  if (r.status === 200) S.asks = r.data.items;
   render();
 }
 async function loadHistory(filter, more) {
@@ -446,8 +445,6 @@ async function act(t, a) {
 const FILTER_IDS = ["needs", "changes", "questions", "checks"];
 function parse() {
   const raw = location.hash.replace(/^#/, "");
-  /* Links from before 0.22.0 (#chat, #t=<chat>) land on Ask: there is no Chat any more. */
-  if (raw === "chat" || raw.startsWith("t=")) return ["ask", null];
   const [r, a] = raw.split("/");
   if (r === "t" && ID_RE.test(a || "")) return ["t", a];
   if (r === "history") return ["history", FILTER_IDS.includes(a) ? a : "all"];
@@ -710,7 +707,7 @@ function convo(t) {
 function openConv(id) {
   if (S.conv) presence(false);
   /* Ask fills it in before opening the new question: kept, then refreshed. */
-  if (!(S.conv && S.conv.item === id)) S.conv = id ? { item: id, thread: null, turns: [], more: false, inflight: null, info: null, readOnly: false, loaded: false } : null;
+  if (!(S.conv && S.conv.item === id)) S.conv = id ? { item: id, thread: null, turns: [], more: false, inflight: null, info: null, loaded: false } : null;
   if (!id) { startLive(); return; }
   loadConv();
   startLive();
@@ -723,7 +720,7 @@ async function loadConv(before) {
   if (S.conv !== c) return;
   c.loaded = true;
   if (r.status !== 200) { c.failed = r.status !== 404; render(); return; }
-  c.failed = false; c.thread = r.data.thread.id; c.info = r.data.thread; c.readOnly = !!r.data.read_only;
+  c.failed = false; c.thread = r.data.thread.id; c.info = r.data.thread;
   c.turns = before ? [...r.data.turns, ...c.turns] : [...r.data.turns, ...c.turns.filter((t) => t.id === null)];
   c.more = r.data.more; c.inflight = r.data.in_flight;
   render();
@@ -887,8 +884,6 @@ async function loadState() {
   theme();
   await loadState();
   if (!S.state) return;
-  /* The old /updates path lands on Home; an old chat link (/t/<16 hex>) too: there is no Chat any more. */
-  if (/(updates|\/t\/[0-9a-f]{16})\/?$/.test(location.pathname) && !location.hash) setHash("#home");
   /* Push links open an item by path (/t/<item id>): ingress never forwards a #fragment. */
   const deep = location.pathname.match(/\/t\/([a-z]-[0-9a-z]{1,40})\/?$/);
   if (deep && !location.hash) setHash(`#t/${deep[1]}`);

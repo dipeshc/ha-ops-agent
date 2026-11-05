@@ -3,7 +3,7 @@
 import asyncio
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -11,12 +11,14 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from opsd import daemon as daemon_mod
+from opsd.budget import RUNS_PER_DAY
 from opsd.claude_runner import RunConfig, RunResult
 from opsd.config import Paths
 from opsd.daemon import Daemon, fallback_push, next_run_at
 from opsd.jsonstore import read_json, read_jsonl, write_json_atomic
 from opsd.notify import CLEAR_MESSAGE
-from tests.conftest import FakeHA, make_options
+from opsd.supervisor import supervisor_jobs_busy
+from tests.conftest import FakeHA, make_options, system_task
 
 
 class FakeClient:
@@ -136,7 +138,6 @@ async def test_broken_custom_integration_runs_claude_and_notifies(h: Harness) ->
     for entity in ("light.kitchen", "light.porch", "fan.bedroom"):
         h.fake.set_unavailable(entity, hours_ago=8)
     h.in_run_requests = [
-        {"verb": "ack", "args": {"key": "entities:acme_solar", "days": 1, "reason": "user notified"}},
         {"verb": "notify", "args": {"title": "Acme Solar down", "urgent": True, "reason": "needs_action",
                                     "message": "All Acme Solar entities unavailable; rollback recommended."}},
     ]  # fmt: skip
@@ -152,8 +153,8 @@ async def test_broken_custom_integration_runs_claude_and_notifies(h: Harness) ->
         "interruption-level": "time-sensitive"
     }
     record = outcome.record
-    # custom:acme_solar was not acked, so the sensor stays at "attention".
-    assert record["unacked"] == ["custom:acme_solar"]
+    # Nothing was acked, so the sensor stays at "attention".
+    assert sorted(record["unacked"]) == ["custom:acme_solar", "entities:acme_solar"]
     assert h.client.states["sensor.ops_agent"][0] == "attention"
     # Every HA user can read the sensor: the model's summary stays in the panel's status.
     attributes = h.client.states["sensor.ops_agent"][1]
@@ -224,17 +225,19 @@ async def test_non_urgent_claude_push_does_not_suppress_critical(h: Harness) -> 
     await h.daemon().health_cycle("catch_up")
     h.fake.set_unavailable("light.kitchen", hours_ago=8)
     h.in_run_requests = [
-        {"verb": "ack", "args": {"key": "entities:acme_solar", "days": 30, "accept": True, "reason": "fine"}},
         {"verb": "notify", "args": {"title": "Kitchen", "message": "a light is off", "reason": "physical_task"}},
     ]
-    h.claude_reply = {"result": "ok", "summary": "fine"}
+    h.claude_reply = {
+        "result": "ok",
+        "summary": "fine",
+        "verdicts": [{"key": "entities:acme_solar", "verdict": "not_affected", "reason": "fine"}],
+    }
     await h.daemon().health_cycle("daily")
     titles = [p["title"] for p in h.pushes()]
     assert titles[-2:] == ["Agent: Kitchen", "Ops Agent: critical"]
     baseline = read_json(h.paths.baseline_file, {})
-    ack = baseline["acks"]["entities:acme_solar"]
-    assert ack["accepted"] is False and ack["by"] == "claude"
-    assert "light.kitchen" not in baseline["unavailable"]  # the AI cannot accept critical
+    # A verdict never snoozes or accepts a critical item.
+    assert "entities:acme_solar" not in baseline["acks"] and "light.kitchen" not in baseline["unavailable"]
 
 
 async def test_an_agent_push_for_information_goes_to_history_and_the_critical_push_still_goes(h: Harness) -> None:
@@ -339,20 +342,18 @@ async def test_access_hardware_is_its_own_critical_item_the_agent_cannot_accept(
     h.fake.registry.append({"entity_id": "lock.side_door", "platform": "acme_solar", "config_entry_id": "lut1"})
     await h.daemon().health_cycle("catch_up")
     h.fake.set_unavailable("lock.side_door", hours_ago=8)
-    h.in_run_requests = [{"verb": "ack", "args": {"key": "access:lock.side_door", "days": 30, "accept": True}}]
-    h.claude_reply = {"result": "ok", "summary": "lock battery"}
+    h.claude_reply = {"result": "ok", "summary": "lock battery", "verdicts": [
+        {"key": "access:lock.side_door", "verdict": "not_affected", "reason": "only the battery"}]}  # fmt: skip
     await h.daemon().health_cycle("daily")
-    assert "accept refused" in h.in_run_responses[0]["output"]
     assert h.pushes()[-1]["title"] == "Ops Agent: critical"
-    ack = read_json(h.paths.baseline_file, {})["acks"]["access:lock.side_door"]
-    assert ack["accepted"] is False and ack["by"] == "claude"
-    assert "lock.side_door" not in read_json(h.paths.baseline_file, {}).get("accepted_access", [])
-    # Snoozed by the agent: out of Needs you, but the admin can still accept it from History.
+    baseline = read_json(h.paths.baseline_file, {})
+    assert "access:lock.side_door" not in baseline["acks"]
+    assert "lock.side_door" not in baseline.get("accepted_access", [])
+    # The agent's verdict leaves it in Needs you: only the admin can accept it.
     d = h.current
-    assert d is not None and d.store is not None and d.open_items() == []
+    assert d is not None and d.store is not None and [i.key for i in d.open_items()] == ["access:lock.side_door"]
     record = d.store.item_by_key("health:access:lock.side_door")
-    assert record is not None and record["state"] == "done" and not record["needs"]
-    assert {a["id"] for a in record["actions"]} == {"snooze", "accept"}
+    assert record is not None and record["needs"]
     assert await d.user_ack("access:lock.side_door", days=30, accept=True)
     assert read_json(h.paths.baseline_file, {})["accepted_access"] == ["lock.side_door"]
     record = d.store.item_by_key("health:access:lock.side_door")
@@ -364,13 +365,13 @@ async def test_run_cap(h: Harness) -> None:
     h.fake.set_unavailable("light.kitchen", hours_ago=8)
     h.claude_status = "timeout"
     d = h.daemon()
-    for _ in range(daemon_mod.MAX_CLAUDE_RUNS_PER_DAY + 2):
+    for _ in range(RUNS_PER_DAY["triage"] + 2):
         await d.health_cycle("daily")
-    assert len(h.claude_calls) == daemon_mod.MAX_CLAUDE_RUNS_PER_DAY
+    assert len(h.claude_calls) == RUNS_PER_DAY["triage"]
     from opsd.budget import Period
 
     now = datetime.now(UTC)
-    assert d.store.usage(Period.at(now, d.tz), at=now)["day"]["runs"] == daemon_mod.MAX_CLAUDE_RUNS_PER_DAY
+    assert d.store.usage(Period.at(now, d.tz), at=now)["day"]["runs"] == RUNS_PER_DAY["triage"]
 
 
 async def test_manual_trigger_cap(h: Harness) -> None:
@@ -392,20 +393,30 @@ async def test_lock_released_after_crash(h: Harness, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(d, "_health_cycle_locked", boom)
     with pytest.raises(RuntimeError):
         await d.health_cycle("daily")
-    from opsd.lock import run_lock
-
-    with run_lock(h.paths.lock_file):
-        pass
     assert not d._cycle_running.locked()
 
 
-def test_core_down_threshold_and_jobs() -> None:
-    from datetime import timedelta
+async def test_one_health_cycle_at_a_time(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    d = h.daemon()
+    gate = asyncio.Event()
 
-    assert daemon_mod.core_down_threshold("running", jobs_busy=False, in_update_window=False) == timedelta(minutes=5)
-    assert daemon_mod.core_down_threshold("startup", jobs_busy=False, in_update_window=False) == timedelta(minutes=20)
-    assert daemon_mod.core_down_threshold("running", jobs_busy=False, in_update_window=True) == timedelta(minutes=20)
-    assert daemon_mod.core_down_threshold("running", jobs_busy=True, in_update_window=False) == timedelta(minutes=45)
+    async def slow(_trigger: str) -> Any:
+        await gate.wait()
+        return daemon_mod.CycleOutcome("ok", 0, {})
+
+    monkeypatch.setattr(d, "_health_cycle_locked", slow)
+    first = asyncio.ensure_future(d.health_cycle("daily"))
+    await asyncio.sleep(0)
+    assert (await d.health_cycle("manual")).result == "skipped_busy"
+    gate.set()
+    assert (await first).result == "ok"
+
+
+def test_core_down_threshold_and_jobs() -> None:
+
+    assert daemon_mod.core_down_threshold(jobs_busy=False, in_update_window=False) == timedelta(minutes=5)
+    assert daemon_mod.core_down_threshold(jobs_busy=False, in_update_window=True) == timedelta(minutes=20)
+    assert daemon_mod.core_down_threshold(jobs_busy=True, in_update_window=False) == timedelta(minutes=45)
     jobs = {
         "jobs": [
             {
@@ -415,9 +426,9 @@ def test_core_down_threshold_and_jobs() -> None:
             }
         ]
     }
-    assert daemon_mod.supervisor_jobs_busy(jobs)
-    assert not daemon_mod.supervisor_jobs_busy({"jobs": [{"name": "home_assistant_core_update", "done": True}]})
-    assert not daemon_mod.supervisor_jobs_busy(None)
+    assert supervisor_jobs_busy(jobs)
+    assert not supervisor_jobs_busy({"jobs": [{"name": "home_assistant_core_update", "done": True}]})
+    assert not supervisor_jobs_busy(None)
     tz = ZoneInfo("Europe/Berlin")
     at_0430 = datetime(2026, 1, 31, 3, 30, tzinfo=UTC)
     assert daemon_mod.in_window(at_0430, "04:00", tz) and not daemon_mod.in_window(at_0430, "16:00", tz)
@@ -575,10 +586,10 @@ async def test_items_raised_by_010_clear_on_next_check(h: Harness) -> None:
     reboot_to_unknown(h, hours_ago=10)
     # What an older version left behind: open critical items in the panel and on the sensor.
     d._save_open_items([Item("entities:acme_solar", "entities", "critical", "144 custom integration acme_solar ...")],
-                       datetime.now(UTC))  # fmt: skip
+                       datetime.now(UTC).isoformat(timespec="seconds"))  # fmt: skip
     pushes_before = len(h.pushes())
     outcome = await d.health_cycle("daily")
-    assert outcome.items == 0 and d.open_items() == [] and d.state.pending_items == 0
+    assert outcome.items == 0 and d.open_items() == []
     assert len(h.pushes()) == pushes_before
     assert h.client.states["sensor.ops_agent"][0] == "ok"
 
@@ -592,54 +603,44 @@ async def test_in_run_effects(h: Harness) -> None:
         h.fake.set_unavailable(entity, hours_ago=8)
     h.in_run_requests = [
         {"verb": "status"},
-        {"verb": "ack", "args": {"key": "entities:acme_solar", "days": 1, "reason": "user notified"}},
-        {"verb": "ack", "args": {"key": "custom:acme_solar", "days": 30, "accept": True}},
-        {
-            "verb": "notify",
-            "args": {
-                "title": "Acme Solar down",
-                "message": "All Acme Solar entities unavailable",
-                "urgent": True,
-                "reason": "needs_action",
-            },
-        },
+        {"verb": "notify", "args": {"title": "Acme Solar down", "message": "All Acme Solar entities unavailable",
+                                    "urgent": True, "reason": "needs_action"}},
         {"verb": "notify", "args": {"title": "again", "message": "second push"}},
-    ]
+    ]  # fmt: skip
     h.claude_reply = {"result": "escalated", "summary": "Acme Solar down"}
     outcome = await h.daemon().health_cycle("daily")
-    assert [r["ok"] for r in h.in_run_responses] == [True, True, True, True, False]
-    assert "accept refused" in h.in_run_responses[2]["output"]
+    assert [r["ok"] for r in h.in_run_responses] == [True, True, False]
     titles = [p["title"] for p in h.pushes()]
     # The AI's in-run push, then the deterministic safety push.
     assert titles[-2:] == ["Agent: Acme Solar down", "Ops Agent: critical"]
-    baseline = read_json(h.paths.baseline_file, {})
-    assert baseline["acks"]["entities:acme_solar"]["by"] == "claude"
-    assert baseline["acks"]["custom:acme_solar"]["accepted"] is False
-    assert outcome.record["unacked"] == []
-    assert outcome.record["in_run_effects"] == {"acks": 2, "pushes": 1}
+    assert outcome.record["in_run_effects"] == {"pushes": 1}
     audit = h.current.store.audit_rows(limit=50) if h.current else []
-    assert {r["capability"] for r in audit} >= {"agent.status", "baseline.ack", "notify.admin"}
-    assert h.current is not None and h.current.rpc is not None and h.current.rpc.active_run is None
-    # What the run acked is handled: shown resolved by the agent, never in Needs you; the critical push went out.
-    d = h.current
-    assert d is not None and d.open_items() == [] and d.store is not None
-    for key in ("health:entities:acme_solar", "health:custom:acme_solar"):
-        record = d.store.item_by_key(key)
-        assert record is not None and record["state"] == "done" and not record["needs"], key
-        assert "by the agent" in record["gist"]
-    assert "user notified" in str(d.store.item_by_key("health:entities:acme_solar")["gist"])
+    assert {r["capability"] for r in audit} >= {"agent.status", "notify.admin"}
+    assert h.current is not None and h.current.rpc is not None and h.current.rpc._active is None
 
 
-async def test_in_run_acks_survive_a_failed_run(h: Harness) -> None:
+async def test_a_not_affected_verdict_snoozes_a_warning_for_at_most_a_week(h: Harness) -> None:
+    """Triage only gives verdicts; the daemon snoozes a warning it called harmless (never longer than a week), shows
+    it resolved by the agent, and the admin can still override it."""
     await h.daemon().health_cycle("catch_up")
-    h.fake.set_unavailable("sensor.old_thing", hours_ago=0)
-    next(s for s in h.fake.states if s["entity_id"] == "light.porch")["state"] = "on"
-    h.fake.config_ok = False
-    h.in_run_requests = [{"verb": "ack", "args": {"key": "config:invalid", "days": 2}}]
-    h.claude_status = "timeout"
-    outcome = await h.daemon().health_cycle("daily")
-    assert outcome.result == "timeout" and "config:invalid" not in outcome.record["unacked"]
-    assert h.pushes()[-1]["title"] == "Ops Agent: critical"
+    h.fake.states.append({"entity_id": "light.garden", "state": "unavailable",
+                          "last_changed": "2026-01-01T00:00:00+00:00", "attributes": {}})  # fmt: skip
+    h.fake.registry.append({"entity_id": "light.garden", "platform": "zha", "config_entry_id": "zha1"})
+    h.claude_reply = {"result": "ok", "summary": "checked", "verdicts": [
+        {"key": "entities:zha", "verdict": "not_affected", "reason": "the garden light is on a timer"}]}  # fmt: skip
+    d = h.daemon()
+    outcome = await d.health_cycle("daily")
+    ack = read_json(h.paths.baseline_file, {})["acks"]["entities:zha"]
+    assert ack["by"] == "claude" and ack["accepted"] is False and ack["item"]["key"] == "entities:zha"
+    acked_at, until = datetime.fromisoformat(ack["acked_at"]), datetime.fromisoformat(ack["until"])
+    assert until - acked_at == timedelta(days=7)
+    assert outcome.record["unacked"] == [] and d.open_items() == [] and d.store is not None
+    record = d.store.item_by_key("health:entities:zha")
+    assert record is not None and record["state"] == "done" and not record["needs"]
+    assert "by the agent" in record["gist"] and "on a timer" in record["gist"]
+    assert {a["id"] for a in record["actions"]} == {"snooze", "accept"}
+    assert await d.user_ack("entities:zha", days=30, accept=True)
+    assert "light.garden" in read_json(h.paths.baseline_file, {})["unavailable"]
 
 
 async def test_run_is_unbound_even_when_claude_crashes(h: Harness) -> None:
@@ -648,13 +649,13 @@ async def test_run_is_unbound_even_when_claude_crashes(h: Harness) -> None:
     d = h.daemon()
 
     async def boom(*_: Any, **__: Any) -> RunResult:
-        assert d.rpc is not None and d.rpc.active_run is not None
+        assert d.rpc is not None and d.rpc._active is not None
         raise RuntimeError("runner bug")
 
     d.runner.run_claude = boom
     with pytest.raises(RuntimeError):
         await d.health_cycle("daily")
-    assert d.rpc is not None and d.rpc.active_run is None
+    assert d.rpc is not None and d.rpc._active is None
 
 
 async def test_state_json_loads(h: Harness) -> None:
@@ -670,24 +671,23 @@ async def test_state_json_loads(h: Harness) -> None:
 
 
 async def test_schedule_catch_up_then_daily(h: Harness) -> None:
-    from opsd.daemon import HEALTH_TASK, STATUS_TASK
+    from opsd.daemon import HEALTH_TASK
 
     d = h.daemon()
     d.setup_schedule(startup_delay_s=0)
-    task = d.store.system_task(HEALTH_TASK)
+    task = system_task(d.store, HEALTH_TASK)
     assert task is not None and task.payload == {"trigger": "catch_up"}
-    assert d.store.system_task(STATUS_TASK) is not None
     d.scheduler.tick()
     event = await d.queue.get()
     assert event.type == "health.requested" and event.payload["trigger"] == "catch_up"
     await d.dispatcher.handle(_acquire(d, event))
     assert h.client.states["sensor.ops_agent"][0] == "ok"
-    task = d.store.system_task(HEALTH_TASK)
+    task = system_task(d.store, HEALTH_TASK)
     assert task is not None and task.state == "pending" and task.payload == {"trigger": "daily"}
     assert task.next_fire_at is not None and datetime.fromisoformat(task.next_fire_at) > datetime.now(UTC)
     # Not stale any more: a restart schedules the next daily run, not a catch-up.
     d.setup_schedule(startup_delay_s=0)
-    task = d.store.system_task(HEALTH_TASK)
+    task = system_task(d.store, HEALTH_TASK)
     assert task is not None and task.payload == {"trigger": "daily"}
     assert datetime.fromisoformat(task.next_fire_at or "") > datetime.now(UTC)
 
@@ -704,7 +704,7 @@ async def test_restart_resumes_a_task_caught_mid_run(h: Harness) -> None:
     d = h.daemon()
     d.setup_schedule(startup_delay_s=0)
     d.scheduler.tick()
-    task = d.store.system_task(HEALTH_TASK)
+    task = system_task(d.store, HEALTH_TASK)
     assert task is not None and task.state == "running"
     d.close()
     d2 = h.daemon()
@@ -724,32 +724,35 @@ async def test_manual_request_dedupes_with_scheduled_check(h: Harness) -> None:
     assert len(d.queue) == 1
     from opsd.daemon import HEALTH_TASK
 
-    task = d.store.system_task(HEALTH_TASK)
+    task = system_task(d.store, HEALTH_TASK)
     assert task is not None and task.state == "pending"
 
 
-async def test_status_refresh_and_unknown_task(h: Harness) -> None:
+async def test_the_status_refresh_runs_every_tenth_liveness_pass(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    d = h.daemon()
+    refreshed: list[int] = []
+
+    async def refresh() -> None:
+        refreshed.append(d._ticks)
+
+    monkeypatch.setattr(d, "status_refresh", refresh)
+    for _ in range(2 * daemon_mod.STATUS_EVERY_TICKS):
+        await d.liveness_pass()
+    assert refreshed == [daemon_mod.STATUS_EVERY_TICKS, 2 * daemon_mod.STATUS_EVERY_TICKS]
+    await daemon_mod.Daemon.status_refresh(d)
+    assert "sensor.ops_agent" in h.client.states
+
+
+async def test_unknown_tasks_and_events_are_dropped(h: Harness) -> None:
     from opsd.events import Event, Priority
 
     d = h.daemon()
-    d.setup_schedule(startup_delay_s=0)
-    from opsd.daemon import STATUS_TASK
-
-    status = d.store.system_task(STATUS_TASK)
-    assert status is not None
-    d.store.claim_due(datetime.fromisoformat(status.next_fire_at or ""))
-    event = Event("status.refresh", "scheduler", Priority.MAINTENANCE, {"task_id": status.id})
-    await d.dispatcher.handle(_acquire(d, event))
-    assert "sensor.ops_agent" in h.client.states
-    after = d.store.system_task(STATUS_TASK)
-    assert after is not None and after.state == "pending"
     await d.dispatcher.handle(_acquire(d, Event("schedule.fired", "scheduler", Priority.FOLLOWUP, {"task_id": 999})))
     await d.dispatcher.handle(_acquire(d, Event("user.message", "companion", Priority.USER)))
     await d.dispatcher.handle(_acquire(d, Event("no.such", "x", Priority.USER)))
 
 
 async def test_overdue_check_requests_a_cycle(h: Harness) -> None:
-    from datetime import timedelta
 
     d = h.daemon()
     now = datetime.now(UTC)
@@ -942,8 +945,8 @@ async def test_the_item_tick_survives_a_failed_minute(h: Harness, monkeypatch: p
     assert ticks == [1]
 
 
-async def test_info_items_alone_never_start_triage(h: Harness) -> None:
-    """A new update version is information (the update has its own item): no triage run, no health item for it."""
+async def test_a_new_update_version_is_no_health_item(h: Harness) -> None:
+    """A new update version has its own item (the update planner's): no health item, no triage run, no push."""
     await h.daemon().health_cycle("catch_up")
     pushes = len(h.pushes())
     update = next(s for s in h.fake.states if s["entity_id"] == "update.home_assistant_core_update")
@@ -951,9 +954,7 @@ async def test_info_items_alone_never_start_triage(h: Harness) -> None:
     d = h.daemon()
     outcome = await d.health_cycle("daily")
     assert outcome.result == "ok" and h.claude_calls == [] and len(h.pushes()) == pushes
-    keys = [i["key"] for i in read_json(h.paths.open_items_file, {}).get("items", [])]
-    assert any(k.startswith("update:") for k in keys)
-    assert d.store is not None and not d.store.items_all(prefix="health:update:")
+    assert read_json(h.paths.open_items_file, {}).get("items") == []
 
 
 async def test_triage_verdicts_are_kept_on_their_items(h: Harness) -> None:
@@ -962,30 +963,13 @@ async def test_triage_verdicts_are_kept_on_their_items(h: Harness) -> None:
                           "last_changed": "2026-01-01T00:00:00+00:00", "attributes": {}})  # fmt: skip
     h.fake.registry.append({"entity_id": "light.garden", "platform": "zha", "config_entry_id": "zha1"})
     h.claude_reply = {"result": "ok", "summary": "checked", "verdicts": [
-        {"key": "entities:zha", "verdict": "needs_owner", "reason": "the garden light lost power"},
+        {"key": "entities:zha", "verdict": "needs_owner", "reason": "the garden light lost power",
+         "owner_action": "Switch the garden light back on at the wall"},
         {"key": "not:handed", "verdict": "not_affected", "reason": "a key the run was not given"}]}  # fmt: skip
     d = h.daemon()
     await d.health_cycle("daily")
     assert d.store is not None
     item = d.store.item_by_key("health:entities:zha")
     assert item is not None and item["needs"] and "lost power" in item["agent"]["text"]
+    assert '"Switch the garden light back on at the wall"' in item["need"]["text"]
     assert not d.store.kv_get("verdict:health:not:handed")
-
-
-async def test_a_held_push_whose_item_resolved_is_dropped(h: Harness) -> None:
-    from opsd.channels import Message
-
-    d = h.daemon()
-    assert d.store is not None and d.items is not None
-    record = {"id": "x-0123456789ab", "key": "x:held", "kind": "check", "title": "t", "state": "done", "gist": "",
-              "kicker": "",
-              "ref": "", "revision": 1, "need": None, "as_of": "2026-01-30T00:00:00+00:00",
-              "at": "2026-01-30T00:00:00+00:00", "created_at": "2026-01-30T00:00:00+00:00",
-              "updated_at": "2026-01-30T00:00:00+00:00", "resolved_at": "2026-01-30T00:00:00+00:00"}  # fmt: skip
-    d.store.put_item(record)
-    from opsd import quiet
-
-    d.store.hold_push(quiet.to_json(Message("t", "b", tag=record["id"])), title="t", now=datetime.now(UTC))
-    pushes = len(h.pushes())
-    await d.flush_held(datetime(2026, 1, 30, 12, 0, tzinfo=UTC))
-    assert len(h.pushes()) == pushes and d.store.held_pushes() == []

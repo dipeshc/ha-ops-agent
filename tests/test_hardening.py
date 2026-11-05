@@ -255,8 +255,8 @@ def test_the_daemon_reports_only_recent_anomalies() -> None:
         def __init__(self, at: datetime) -> None:
             self.value = json.dumps({"at": at.isoformat(), "profile": "chat", "anomalies": ["x"]})
 
-        def kv_get(self, key: str, default: str = "") -> str:
-            return self.value
+        def kv_json(self, key: str) -> dict[str, object]:
+            return dict(json.loads(self.value))
 
     fresh = SimpleNamespace(store=FakeStore(now - timedelta(days=1)))
     stale = SimpleNamespace(store=FakeStore(now - timedelta(days=8)))

@@ -29,6 +29,14 @@ _CARD_TYPE_RE = re.compile(r"(?:custom:)?[a-z0-9][a-z0-9_-]{0,79}")
 # Home Assistant's rule for a storage dashboard's url_path: lower case, with a hyphen.
 _DASHBOARD_PATH_RE = re.compile(r"[a-z0-9][a-z0-9_]*(?:-[a-z0-9_]+)+")
 MAX_DASHBOARDS = 20
+# An entity id as a dashboard config or a template names it.
+_ENTITY_ID_RE = re.compile(r"(?<![A-Za-z0-9_.])[a-z_][a-z0-9_]{0,63}\.[a-z0-9_]{1,128}(?![A-Za-z0-9_])")
+# Per dashboard and per integration: at most this many entity ids are kept (in memory, for the scan).
+MAX_ENTITY_IDS = 2000
+# "*" in `Inventory.dashboards`: the dashboard list itself could not be read.
+ALL_DASHBOARDS = "*"
+# A YAML file that exposes entities to a voice assistant or HomeKit (its text names one of these).
+_EXPOSURE_RE = re.compile(r"(?m)^\s*(?:homekit|alexa|google_assistant|include_entities|exclude_entities)\s*:")
 # Top-level keys of configuration.yaml that are Home Assistant's own structure, not integrations.
 _STRUCTURE = frozenset({"homeassistant", "default_config", "frontend", "http", "logger", "recorder", "automation",
                         "script", "scene", "template", "group", "sensor", "binary_sensor", "input_boolean",
@@ -49,6 +57,36 @@ class Inventory:
     problems: list[str] = field(default_factory=list)
     # The YAML text, for `references` (in memory only, never stored).
     texts: dict[str, str] = field(default_factory=dict, repr=False)
+    # Readable config files whose text could not be read ("config files" when none could be listed).
+    unread: list[str] = field(default_factory=list)
+
+    def entity_usage(self, domain: str) -> dict[str, Any]:
+        """Where the entities of a custom integration (its registry rows) are referenced: the entity ids used, the
+        config files and dashboards that name them, whether a file that names one exposes entities to a voice
+        assistant or HomeKit, and the sources that could not be read (spec maintenance.md M5d)."""
+        ids = set((self.custom.get(domain) or {}).get("entity_ids") or [])
+        used: set[str] = set()
+        files: set[str] = set()
+        exposed = False
+        for path, text in sorted(self.texts.items()):
+            named = ids & set(_ENTITY_ID_RE.findall(text))
+            if named:
+                used |= named
+                files.add(path)
+                exposed = exposed or bool(_EXPOSURE_RE.search(text))
+        boards: set[str] = set()
+        unknown = list(self.unread)
+        for url_path, board in sorted(self.dashboards.items()):
+            name = "dashboards" if url_path == ALL_DASHBOARDS else f"dashboard {url_path or 'overview'}"
+            if board.get("unreadable"):
+                unknown.append(name)
+                continue
+            named = ids & set(board.get("entities") or [])
+            if named:
+                used |= named
+                boards.add(url_path or "overview")
+        return {"entities": len(ids), "used": len(used), "files": sorted(files), "dashboards": sorted(boards),
+                "exposed": exposed, "unknown": unknown}  # fmt: skip
 
     def yaml_domains(self) -> set[str]:
         found: set[str] = set()
@@ -87,6 +125,8 @@ def yaml_features(path: str, text: str) -> list[str]:
     automation, script or blueprint file `platform:` names a trigger (`state`, `event`, `time`), not an integration
     set up here, so those files name none."""
     found: list[str] = []
+    if not path.endswith((".yaml", ".yml")):
+        return found
     if path == "configuration.yaml" or path.startswith("packages/"):
         found += [k for k in _TOP_KEY_RE.findall(text) if k not in _STRUCTURE]
     if not _TRIGGER_FILES_RE.match(path):
@@ -105,16 +145,20 @@ def read_text(root: Path, rel: str, limit: int) -> str | None:
         return None
 
 
-def read_yaml(root: Path, names: Iterable[str]) -> dict[str, str]:
-    """The readable YAML files' text (`names` from the export's own allowlist), within the size limits."""
+def read_yaml(root: Path, names: Iterable[str], *, unread: list[str] | None = None) -> dict[str, str]:
+    """The readable YAML files' text, and the template macros' (`custom_templates/*.jinja`), `names` from the
+    export's own allowlist, within the size limits; a file that could not be read is added to `unread`."""
     texts: dict[str, str] = {}
     budget = MAX_TOTAL_BYTES
     for name in names:
-        if not name.endswith((".yaml", ".yml")):
+        if not name.endswith((".yaml", ".yml")) and not (name.startswith("custom_templates/") and
+                                                         name.endswith(".jinja")):  # fmt: skip
             continue
         text = read_text(root, name, MAX_FILE_BYTES)
         size = len(text.encode()) if text is not None else 0
         if text is None or size > budget:
+            if unread is not None:
+                unread.append(name)
             continue
         budget -= size
         texts[name] = text
@@ -138,6 +182,66 @@ def manifest(custom_components: Path, domain: str) -> dict[str, Any]:
             "version": clean_text(str(raw.get("version") or ""), 30), "repo": repo}  # fmt: skip
 
 
+# HACS's catalog (`.storage/hacs.repositories`; spec maintenance.md M5c): read by the daemon only, bounded.
+CATALOG_MAX_BYTES = 32 * 1024 * 1024
+CATALOG_MAX_ENTRIES = 20_000
+CATALOG_TEXT = 300
+_FULL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+_CATEGORY_RE = re.compile(r"[a-z_]{1,32}")
+
+
+def _catalog_entry(raw: Any) -> dict[str, Any] | None:
+    """One catalog entry, cleaned (untrusted text capped); None for one without a usable repository name."""
+    if not isinstance(raw, Mapping):
+        return None
+    name = raw.get("full_name")
+    if not isinstance(name, str) or not _FULL_NAME_RE.fullmatch(name) or ".." in name:
+        return None
+    category = str(raw.get("category") or "")
+    domain = str(raw.get("domain") or "")
+    stars = raw.get("stargazers_count")
+    listed = raw.get("topics")
+    topics: list[Any] = listed if isinstance(listed, list) else []
+    updated = raw.get("last_updated")
+    return {
+        "full_name": name,
+        "category": category if _CATEGORY_RE.fullmatch(category) else "",
+        "domain": domain if DOMAIN_RE.fullmatch(domain) else None,
+        "name": clean_text(str(raw.get("manifest_name") or ""), 80),
+        "description": clean_text(str(raw.get("description") or ""), CATALOG_TEXT),
+        "topics": [clean_text(t, 50) for t in topics[:20] if isinstance(t, str)],
+        "stars": stars if isinstance(stars, int) and not isinstance(stars, bool) and 0 <= stars < 10**9 else 0,
+        "last_updated": clean_text(updated, 40) if isinstance(updated, str) else "",
+        "last_version": clean_text(str(raw.get("last_version") or ""), 40),
+        "archived": raw.get("archived") is True,
+        # HACS installed it here: the source of a custom integration's repository when its manifest names none.
+        "installed": raw.get("installed") is True,
+    }
+
+
+def hacs_catalog(path: Path) -> list[dict[str, Any]] | None:
+    """HACS's own cached catalog of repositories, read-only: a regular file never read through a link, at most
+    `CATALOG_MAX_BYTES`, of HACS's storage shape (`data` maps repository ids to entries, or lists them). None when it
+    is absent, unreadable, too large or of another shape: the caller then has no catalog (fails closed)."""
+    data = safefs.read_or_none(path, CATALOG_MAX_BYTES)
+    if data is None:
+        return None
+    try:
+        raw = json.loads(data.decode("utf-8"))
+    except ValueError:
+        return None
+    body = raw.get("data") if isinstance(raw, Mapping) else None
+    entries: list[Any]
+    if isinstance(body, Mapping):
+        entries = list(body.values())
+    elif isinstance(body, list):
+        entries = body
+    else:
+        return None
+    found = [e for e in (_catalog_entry(r) for r in entries[:CATALOG_MAX_ENTRIES]) if e is not None]
+    return found
+
+
 def _walk(node: Any, container: str | None = None) -> Iterator[tuple[str | None, Mapping[str, Any]]]:
     if isinstance(node, Mapping):
         yield container, node
@@ -146,6 +250,21 @@ def _walk(node: Any, container: str | None = None) -> Iterator[tuple[str | None,
     elif isinstance(node, list):
         for child in node:
             yield from _walk(child, container)
+
+
+def entity_ids_in(config: Any) -> list[str]:
+    """The entity ids a dashboard config names anywhere (a card's `entity`, `entities`, a template), capped."""
+    found: set[str] = set()
+    stack = [config]
+    while stack and len(found) < MAX_ENTITY_IDS:
+        node = stack.pop()
+        if isinstance(node, Mapping):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, str) and "." in node:
+            found.update(_ENTITY_ID_RE.findall(node[:4000]))
+    return sorted(found)[:MAX_ENTITY_IDS]
 
 
 def card_types(config: Any) -> dict[str, int]:
@@ -166,6 +285,7 @@ async def read_dashboards(ws: Callable[..., Awaitable[Any]]) -> tuple[dict[str, 
     try:
         listed = await ws("lovelace/dashboards/list")
     except Exception as err:  # noqa: BLE001 - a missing source is a problem, never a crash
+        found[ALL_DASHBOARDS] = {"cards": {}, "unreadable": True}
         return found, [f"dashboards unreadable: {clean_text(str(err), 120)}"]
     boards: list[Mapping[str, Any]] = [{"url_path": ""}]
     boards += [b for b in listed if isinstance(b, Mapping)][:MAX_DASHBOARDS] if isinstance(listed, list) else []
@@ -178,15 +298,17 @@ async def read_dashboards(ws: Callable[..., Awaitable[Any]]) -> tuple[dict[str, 
         except Exception as err:  # noqa: BLE001 - "no config" is normal for a generated default dashboard
             if url_path:
                 problems.append(f"dashboard {url_path}: {clean_text(str(err), 120)}")
+                # What it references is unknown, never "nothing" (M5d).
+                found[url_path] = {"cards": {}, "unreadable": True}
             continue
         if isinstance(config, Mapping):
-            found[url_path] = {"cards": card_types(config)}
+            found[url_path] = {"cards": card_types(config), "entities": entity_ids_in(config)}
     return found, problems
 
 
 def build(*, entries: Any, components: Any, texts: Mapping[str, str], custom: Mapping[str, Mapping[str, Any]],
           registry: Any, dashboards: Mapping[str, dict[str, Any]],
-          problems: Iterable[str] = ()) -> Inventory:  # fmt: skip
+          problems: Iterable[str] = (), unread: Iterable[str] = ()) -> Inventory:  # fmt: skip
     """The inventory from what was read (pure; every input may be missing or malformed)."""
     entry_domains = {
         str(e.get("domain"))
@@ -198,9 +320,14 @@ def build(*, entries: Any, components: Any, texts: Mapping[str, str], custom: Ma
     for entry in registry if isinstance(registry, list) else []:
         if isinstance(entry, Mapping) and isinstance(entry.get("entity_id"), str):
             platforms.setdefault(str(entry.get("platform")), set()).add(str(entry["entity_id"]).split(".", 1)[0])
+    ids: dict[str, list[str]] = {}
+    for entry in registry if isinstance(registry, list) else []:
+        if isinstance(entry, Mapping) and isinstance(entry.get("entity_id"), str):
+            ids.setdefault(str(entry.get("platform")), []).append(str(entry["entity_id"]))
     custom_out = {d: dict(info) | {"platforms": sorted(platforms.get(d, set())),
                                    "entities": sum(1 for e in registry if isinstance(e, Mapping)
-                                                   and e.get("platform") == d) if isinstance(registry, list) else 0}
+                                                   and e.get("platform") == d) if isinstance(registry, list) else 0,
+                                   "entity_ids": sorted(set(ids.get(d, [])))[:MAX_ENTITY_IDS]}
                   for d, info in sorted(custom.items())}  # fmt: skip
     return Inventory(
         entry_domains=frozenset(entry_domains),
@@ -210,4 +337,5 @@ def build(*, entries: Any, components: Any, texts: Mapping[str, str], custom: Ma
         dashboards=dict(dashboards),
         problems=list(problems),
         texts=dict(texts),
+        unread=list(unread),
     )

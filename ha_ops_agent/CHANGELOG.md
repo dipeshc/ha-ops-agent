@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.25.0
+
+- **Alternatives for abandoned custom integrations (suggest only).** A custom
+  integration whose GitHub repository is archived, or has had no push for a
+  year, is abandoned. When something is at stake (its repository is archived,
+  or a deprecation that names its removal version affects it), the
+  maintenance scan looks in
+  HACS's own catalog on your install (`.storage/hacs.repositories`, read
+  only, never the open web) for integrations of the same brand and lists up
+  to three as facts on the item that is already there: the repository,
+  whether it keeps the same domain (and so the entity ids), last activity,
+  stars, latest release, local or cloud (from its manifest when GitHub
+  answers), and what a switch would touch here (entities and references).
+  Ranking is deterministic: recently updated first, then stars; one
+  GitHub could not vouch for is listed last and marked unverified, and the
+  list says it is HACS's catalog, unvetted. The research
+  is redone at most every 30 days per integration, and nothing runs when
+  nothing is abandoned. No new item, no new AI run, no push: the item asks
+  only as before (near a deadline). The agent never installs, removes or
+  switches an integration or a HACS repository, calls no HACS service, and
+  proposes no change for it; no capability, websocket command or service
+  call was added. A missing or unreadable catalog simply means no
+  alternatives.
+- The weekly repository check now reads each repository's last push with
+  its archived flag (one GitHub call, cached and backed off as before).
+  Repository facts kept by an earlier version (or missing a field this
+  version needs) are read again at the next scan instead of a week later,
+  and each scan logs one `maintenance alternatives` line with its counts
+  (custom integrations checked, abandoned, at stake, candidates) or why it
+  researched nothing (nothing abandoned, GitHub backoff, nothing at stake,
+  catalog unreadable) and how many have no known repository. A deprecation
+  from the Core log that names its removal version now also puts an
+  abandoned integration at stake, and a custom integration whose manifest
+  names no repository takes the one HACS installed it from.
+  The migration impact counts the integration's entity ids referenced in
+  your config files and dashboards ("8 of 27 entities are used: ..."), and
+  says "unknown" for a source it could not read, never 0.
+- **Breaking changes are decided from Core's source.** `core-compare
+  <integration> --to <minor>` diffs Core's own integration at the installed
+  version against that minor's `.0` release (read-only, fetched by the
+  daemon, only files that differ). The maintenance check and Plan a fix are
+  told to decide a note about configuration syntax or behaviour from that
+  diff and the exact form your config uses, not from the note's wording.
+  The maintenance check gets 24 turns (was 16).
+- **No guessed "needs you".** A maintenance or Core-minor verdict that
+  needs you must cite a concrete read (a file, a core-compare result, an
+  entity or entry), give an unhedged reason, and name an action that
+  changes something: "probably", "likely", "may", or an action that only
+  asks whether to keep the configuration as it is, makes it `unknown`
+  (also for a verdict stored earlier, and for the update review's verdict
+  on a Core update's notes). A later check that says "needs you" for the
+  same evidence never overrides an earlier "not affected" or "unknown"; the
+  item's history records both.
+
 ## 0.24.0
 
 A simplification release: features nobody used are removed, mechanisms that

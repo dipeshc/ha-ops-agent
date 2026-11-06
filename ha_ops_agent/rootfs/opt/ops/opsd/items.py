@@ -1470,6 +1470,8 @@ class Composer:
         for label in ("parity", "impact"):
             if finding.detail.get(label):
                 facts.append((label.capitalize(), str(finding.detail[label])))
+        # Maintained alternatives of an abandoned custom integration (M5e): facts only, never a need or a push.
+        facts += maint.alternative_facts(finding)
         if finding.sources:
             facts.append(("Source", ", ".join(finding.sources[:3])))
         spec.facts = [{"label": label, "value": ctx.redact(clean_text(value, 600)), "at": at} for label, value in facts]

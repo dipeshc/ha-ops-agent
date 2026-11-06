@@ -12,6 +12,7 @@ pushed directly from it.
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -444,6 +445,7 @@ class Daemon:
             plan=self._maintenance_plan, propose=self._propose_maintenance if self.repo is not None else None,
             publish=lambda: self.hub.publish("maintenance", None, {}), fork_print=self._fork_print,
             fork_check=self._fork_check, fork_text=self._fork_text, cancel_plan=self._cancel_queued_plan,
+            catalog=self._hacs_catalog,
         )  # fmt: skip
         # One record per item. Every surface reads it; each write of a record it shows writes it too.
         items = ItemBook(
@@ -1529,18 +1531,21 @@ class Daemon:
             config = await api.core_rest("/config")
             registry = await api.ws("config/entity_registry/list")
             boards, problems = await inventory.read_dashboards(api.ws)
+        unread: list[str] = []
         try:
             names = await asyncio.to_thread(self._readable_names)
         except (subprocess.SubprocessError, OSError) as err:
             # The YAML features are one part of the inventory: the other signals still count.
             names = []
+            unread.append("config files")
             problems.append(f"config files unreadable: {clean_text(str(err), 120)}")
-        texts = await asyncio.to_thread(inventory.read_yaml, self.paths.ha_config, names)
+        texts = await asyncio.to_thread(functools.partial(inventory.read_yaml, unread=unread), self.paths.ha_config,
+                                        names)  # fmt: skip
         custom = {d: inventory.manifest(self.paths.custom_components, d)
                   for d in custom_domains(self.paths.custom_components)}  # fmt: skip
         inv = inventory.build(entries=entries, components=(config or {}).get("components") if isinstance(config, dict)
                               else None, texts=texts, custom=custom, registry=registry, dashboards=boards,
-                              problems=problems)  # fmt: skip
+                              problems=problems, unread=unread)  # fmt: skip
         return Gathered(
             installed=str((core or {}).get("version") or "") if isinstance(core, dict) else "",
             issues=issues.get("issues") if isinstance(issues, dict) else [],
@@ -1565,6 +1570,10 @@ class Daemon:
         finding = next((f for f in self.maintenance.findings() if f.key == key), None)
         if finding is not None and finding.domain:
             await self._fix_settled(finding.domain)
+
+    async def _hacs_catalog(self) -> list[dict[str, Any]] | None:
+        """HACS's cached catalog, read-only (`inventory.hacs_catalog`); None when it cannot be read (fails closed)."""
+        return await asyncio.to_thread(inventory.hacs_catalog, self.paths.hacs_repositories)
 
     async def _fork_text(self, domain: str) -> str | None:
         """The custom integration's current source (its top-level text files); None when it cannot be read."""

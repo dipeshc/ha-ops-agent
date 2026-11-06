@@ -201,7 +201,8 @@ UPDATE_REVIEW = Profile(
 # config entries, repairs, logs; the config files in its working directory), may compare a custom integration with
 # Core's (read-only) and propose a fork rebase (the admin approves it): its answer is advice shown as the agent's
 # words, and the YAML or dashboard edits it suggests only become a proposal or a plan the admin approves.
-MAINTENANCE_PLAN_MAX_TURNS = 16
+# Up to 8 findings, each read and checked, and up to three source comparisons (`core-compare --to`, M13f).
+MAINTENANCE_PLAN_MAX_TURNS = 24
 MAINTENANCE_PLAN = Profile(
     name="maintenance_plan",
     prompt_file="profiles/maintenance_plan.md",

@@ -212,8 +212,9 @@ async def test_only_a_custom_integration_on_this_install(world: World, gh: FakeG
 
 
 def test_the_version_is_never_model_input() -> None:
+    # The installed version is the daemon's; `--to` takes only a Core minor ahead of it (`target_tag`).
     cap = CAPABILITIES["ha.core_compare"]
-    assert set(cap.args) == {"domain", "fork"} and cap.read_only
+    assert set(cap.args) == {"domain", "fork", "to"} and cap.read_only
     parsed = build_parser().parse_args(["core-compare", "acme_fan"])
     assert parsed.domain == "acme_fan"
 
@@ -297,6 +298,50 @@ async def test_outside_a_run_it_is_refused(paths: Paths, gh: FakeGitHub) -> None
     response = await w.call("core-compare", domain="acme_fan")
     w.store.close()
     assert not response["ok"] and gh.asked == []
+
+
+# ------------------------------------------------------------------ --to: Core's own integration at two releases
+
+TIMER_OLD = {
+    "manifest.json": '{\n  "domain": "acme_timer",\n  "name": "Acme Timer"\n}\n',
+    "__init__.py": '"""The Acme Timer integration."""\n',
+    "trigger.py": "OFFSET_OPTIONS = {'offset': str}\n\ndef offset(options):\n    return options['offset']\n",
+}
+TIMER_NEW = {
+    **TIMER_OLD,
+    "trigger.py": TIMER_OLD["trigger.py"].replace(
+        "return options['offset']", "return -options['offset'] if options.get('before') else options['offset']"
+    ),
+    "schema.py": "LEGACY_SCHEMA = 'untouched'\n",
+}
+
+
+async def test_core_compare_to_diffs_cores_own_integration_between_releases(world: World, gh: FakeGitHub) -> None:
+    """A breaking change is decided from Core's source (spec maintenance.md M13f): no custom integration is needed,
+    only files whose blob SHA differs are fetched, and the diff is fenced like any comparison."""
+    gh.publish(VERSION, "acme_timer", TIMER_OLD)
+    gh.publish("2030.5.0", "acme_timer", TIMER_NEW)
+    response = await world.call("core-compare", domain="acme_timer", to="2030.5")
+    assert response["ok"], response
+    out = response["output"]
+    assert f"Home Assistant Core {VERSION} against Core 2030.5.0" in out
+    assert "- files in both: 3 (1 changed, 2 identical)" in out and "- only in 2030.5.0: schema.py" in out
+    assert f"--- core/{VERSION}/trigger.py" in out and "+++ core/2030.5.0/trigger.py" in out
+    assert out.index("<core-compare-diff>") < out.index("options.get('before')") < out.index("</core-compare-diff>")
+    assert {u for u, _, _ in gh.asked if "raw." in u} == {
+        RAW_URL.format(tag=tag, domain="acme_timer", name="trigger.py") for tag in (VERSION, "2030.5.0")
+    }
+
+
+@pytest.mark.parametrize("minor", ["2030.4", "2030.3", "2031.5", "2030.5.0", "2030.13", "latest"])
+async def test_core_compare_to_takes_only_a_minor_ahead(world: World, gh: FakeGitHub, minor: str) -> None:
+    response = await world.call("core-compare", domain="acme_timer", to=minor)
+    assert not response["ok"] and gh.asked == []
+
+
+async def test_core_compare_to_takes_no_fork(world: World, gh: FakeGitHub) -> None:
+    response = await world.call("core-compare", domain="acme_fan", to="2030.5", fork=True)
+    assert not response["ok"] and "takes no --fork" in response["error"] and gh.asked == []
 
 
 # ------------------------------------------------------------------ who may use it

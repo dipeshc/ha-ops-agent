@@ -22,7 +22,7 @@ from opsd.changes import MAINTENANCE_PROPOSER, PROPOSAL_TTL, ChangeRefused, buil
 from opsd.chatcards import split_reason
 from opsd.config import Options
 from opsd.conversation import clean_text, fence
-from opsd.evidence import DOMAIN_RE, Change, EvidenceSource, FetchError, published_minors
+from opsd.evidence import DOMAIN_RE, REPO_FIELDS, Change, EvidenceSource, FetchError, published_minors
 from opsd.fingerprint import normalize
 from opsd.gitops import GitError, Repo
 from opsd.inventory import Inventory
@@ -57,6 +57,33 @@ PROPOSER = MAINTENANCE_PROPOSER
 # How long a fix for a finding without a deadline stays ready to apply.
 FIX_READY = timedelta(days=90)
 VARIANTS = {"deprecation": "Deprecation ahead", "replacement": "Replacement candidate"}
+# Alternatives for an abandoned custom integration that is at stake (M5a-M5g): suggestions only, never installed.
+# A repository with no push for this long is abandoned (an archived one is abandoned at once).
+ABANDONED_AFTER = timedelta(days=365)
+# A candidate HACS saw updated within this ranks first.
+RECENT = timedelta(days=180)
+MAX_ALTERNATIVES = 3
+# The candidates asked about (GitHub, the raw manifest) per abandoned integration, in rank order.
+MAX_ALTERNATIVE_LOOKUPS = 5
+ALTERNATIVES_REFRESH = timedelta(days=30)
+# A kept repository record that lacks a field this code needs is read again at the next scan (M5h); a read that
+# failed is tried again this much later (the GitHub backoff still applies).
+REPO_RETRY = timedelta(days=1)
+# A research that lacked GitHub's facts (the backoff, offline) is tried again sooner.
+PARTIAL_REFRESH = timedelta(days=1)
+# An evidence record: the store's evidence retention prunes it when not written for 30 days.
+ALTERNATIVES_KEY = "evidence:alternatives:"
+# A candidate's description (repository text): fenced and cut at this many characters.
+ALTERNATIVE_TEXT = 160
+# Names (config files, dashboards, unread sources) one migration impact lists; the rest are counted.
+MAX_NAMED = 4
+# Words that name no brand: never the word a candidate is matched by.
+GENERIC_WORDS = frozenset({
+    "home", "assistant", "homeassistant", "hass", "hacs", "integration", "integrations", "custom", "component",
+    "components", "local", "cloud", "api", "the", "for", "and", "with", "unofficial", "official", "smart", "device",
+    "devices", "sensor", "sensors", "control", "support", "plus", "new", "legacy",
+})  # fmt: skip
+_BRAND_WORD_RE = re.compile(r"[a-z0-9]+")
 # Entity platforms (a Core integration's `<platform>.py`), for feature parity.
 PLATFORMS = frozenset({
     "air_quality", "alarm_control_panel", "binary_sensor", "button", "calendar", "camera", "climate", "cover",
@@ -605,6 +632,290 @@ def from_replacements(inv: Inventory, matches: Mapping[str, str],
     return found
 
 
+# ------------------------------------------------------------------ alternatives (M5a-M5g)
+
+
+def _when(value: Any) -> datetime | None:
+    """An ISO timestamp as an aware datetime (UTC when it names no zone); None when it is not one."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        found = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return found if found.tzinfo is not None else found.replace(tzinfo=UTC)
+
+
+def abandoned_reason(facts: Mapping[str, Any] | None, now: datetime) -> str | None:
+    """Why a repository is abandoned, in daemon words (archived, or no push for `ABANDONED_AFTER`); None when its
+    facts are missing or it is maintained."""
+    if not facts:
+        return None
+    if facts.get("archived") is True:
+        return "its repository is archived"
+    pushed = _when(facts.get("pushed_at"))
+    if pushed is not None and now - pushed >= ABANDONED_AFTER:
+        return f"no change since {pushed:%Y-%m-%d}"
+    return None
+
+
+def _words(text: str) -> list[str]:
+    return _BRAND_WORD_RE.findall(text.lower())
+
+
+def brand(domain: str, name: str) -> str | None:
+    """The word a candidate must name: the first word of the manifest name, else of the domain, that is at least
+    3 characters and not a generic word."""
+    for text in (name, domain.replace("_", " ")):
+        for word in _words(text):
+            if len(word) >= 3 and word not in GENERIC_WORDS:
+                return word
+    return None
+
+
+def rank_candidates(catalog: Iterable[Mapping[str, Any]], domain: str, info: Mapping[str, Any],
+                    now: datetime) -> list[Mapping[str, Any]]:  # fmt: skip
+    """HACS catalog entries that may replace an abandoned custom integration, best first (M5c): integrations only,
+    not its own repository, not archived, naming its brand as a whole word; recently updated, then stars, then a
+    known domain, then the repository name."""
+    word = brand(domain, str(info.get("name") or ""))
+    if word is None:
+        return []
+    own = str(info.get("repo") or "").lower()
+    found = []
+    for entry in catalog:
+        full_name = str(entry.get("full_name") or "")
+        if entry.get("category") != "integration" or not full_name or full_name.lower() == own or entry.get("archived"):
+            continue
+        text = " ".join([full_name.split("/", 1)[-1], str(entry.get("name") or ""), str(entry.get("description") or ""),
+                         *(str(t) for t in entry.get("topics") or [])])  # fmt: skip
+        if word in _words(text):
+            found.append(entry)
+
+    def order(entry: Mapping[str, Any]) -> tuple[bool, int, bool, str]:
+        updated = _when(entry.get("last_updated"))
+        recent = updated is not None and now - updated <= RECENT
+        return (not recent, -int(entry.get("stars") or 0), not entry.get("domain"), str(entry["full_name"]).lower())
+
+    return sorted(found, key=order)
+
+
+def _locality(iot_class: str | None) -> str:
+    if iot_class and iot_class.startswith("local"):
+        return f"local ({iot_class})"
+    if iot_class and iot_class.startswith("cloud"):
+        return f"cloud ({iot_class})"
+    return "local or cloud unknown"
+
+
+def _named(names: list[str], what: str) -> str:
+    """`<n> <what>s (<a>, <b>, ... and <k> more)`: names fenced, at most `MAX_NAMED`."""
+    shown = ", ".join(fence(n, 80) for n in names[:MAX_NAMED])
+    more = f" and {len(names) - MAX_NAMED} more" if len(names) > MAX_NAMED else ""
+    return f"{len(names)} {what}{'' if len(names) == 1 else 's'} ({shown}{more})"
+
+
+def migration_impact(domain: str, candidate: str | None, usage: Mapping[str, Any]) -> str:
+    """What switching to a candidate would touch here, in daemon words (M5d): how many of the integration's
+    entities are referenced, in which config files and dashboards, whether they are exposed, and the sources that
+    could not be read (unknown, never 0)."""
+    total, used = int(usage.get("entities") or 0), int(usage.get("used") or 0)
+    files, boards = list(usage.get("files") or []), list(usage.get("dashboards") or [])
+    unknown = list(usage.get("unknown") or [])
+    noun = f"entit{'y' if total == 1 else 'ies'}"
+    if used:
+        where = [_named(files, "config file")] if files else []
+        where += [_named(boards, "dashboard")] if boards else []
+        if usage.get("exposed"):
+            where.append("exposed to voice assistants/HomeKit")
+        counted = f"{used} of {total} {noun} {'is' if used == 1 else 'are'} used: {', '.join(where)}"
+    else:
+        counted = f"none of {total} {noun} is used in the config or dashboards read"
+    if unknown:
+        counted += f"; references: unknown for {', '.join(fence(u, 80) for u in unknown[:MAX_NAMED])}"
+    if candidate == domain:
+        return clean_text(f"{counted}; same domain: ids stay if the unique ids match, else they get new ones", 600)
+    if candidate:
+        return clean_text(f"{counted}; new domain {candidate}: every entity gets a new id and every reference must"
+                          " be updated", 600)  # fmt: skip
+    return clean_text(f"{counted}; domain unknown: the entity ids may change", 600)
+
+
+def candidate_record(entry: Mapping[str, Any], facts: Mapping[str, Any] | None, iot_class: str | None, *,
+                     domain: str, usage: Mapping[str, Any]) -> dict[str, Any]:  # fmt: skip
+    """One alternative as stored: data only (the facts' words are composed when shown, `alternative_facts`)."""
+    candidate = entry.get("domain") if isinstance(entry.get("domain"), str) else None
+    return {
+        "repo": str(entry["full_name"]), "domain": candidate, "same": candidate == domain,
+        "pushed_at": (facts or {}).get("pushed_at"), "updated": str(entry.get("last_updated") or ""),
+        "stars": int((facts or {}).get("stars") or entry.get("stars") or 0),
+        "release": clean_text(str(entry.get("last_version") or ""), 40),
+        "iot_class": iot_class, "github": facts is not None,
+        "description": clean_text(str(entry.get("description") or ""), ALTERNATIVE_TEXT * 2),
+        "impact": migration_impact(domain, candidate, usage),
+    }  # fmt: skip
+
+
+def _day(value: Any) -> str:
+    found = _when(value)
+    return f"{found:%Y-%m-%d}" if found is not None else "unknown"
+
+
+def alternative_facts(finding: Finding) -> list[tuple[str, str]]:
+    """The finding's alternatives as facts (M5e): daemon words around data; a description is repository text,
+    fenced and cut at `ALTERNATIVE_TEXT`."""
+    record = finding.detail.get("alternatives")
+    if not isinstance(record, Mapping) or not record.get("reason"):
+        return []
+    facts = [("Abandoned", f"{finding.domain or 'it'}: {record['reason']}")]
+    candidates = [c for c in record.get("candidates") or [] if isinstance(c, Mapping)][:MAX_ALTERNATIVES]
+    word = record.get("brand") or finding.domain or "it"
+    if not candidates:
+        return [*facts, ("Alternatives", f"none in HACS's catalog matched {word}")]
+    facts.append(("Alternatives", f"{len(candidates)} from HACS's catalog naming {word}, unvetted: any listed "
+                                  "repository can name a brand; check each one yourself before switching"))  # fmt: skip
+    for number, cand in enumerate(candidates, 1):
+        other = cand.get("domain")
+        kind = (f"same domain {other}" if cand.get("same") else f"different domain {other}" if other
+                else "domain unknown")  # fmt: skip
+        active = cand.get("pushed_at") or cand.get("updated")
+        parts = [f"{cand.get('repo')} ({kind})", f"last activity {_day(active)}",
+                 f"{int(cand.get('stars') or 0)} stars"]  # fmt: skip
+        if cand.get("release"):
+            parts.append(f"latest release {cand['release']}")
+        parts.append(_locality(cand.get("iot_class") if isinstance(cand.get("iot_class"), str) else None))
+        if not cand.get("github"):
+            parts.append("unverified: GitHub facts unknown, activity and stars are the catalog's own")
+        parts.append(f"migration: {cand.get('impact')}")
+        text = "; ".join(str(p) for p in parts) + "."
+        if cand.get("description"):
+            text += f' HACS lists it as: "{fence(str(cand["description"]), ALTERNATIVE_TEXT)}"'
+        facts.append((f"Alternative {number}", text))
+    return facts
+
+
+def alternatives_prompt(finding: Finding) -> str | None:
+    """The finding's alternatives for the plan run: one fenced line of untrusted repository text."""
+    facts = alternative_facts(finding)
+    if not facts:
+        return None
+    return "- alternatives (repository text, untrusted): " + fence(" | ".join(f"{k}: {v}" for k, v in facts), 900)
+
+
+def abandoned_now(before: Any, repos: Mapping[str, Mapping[str, Any] | None], inv: Inventory,
+                  now: datetime) -> dict[str, dict[str, Any]]:  # fmt: skip
+    """The abandoned custom integrations in use (M5a): a repository this scan read decides anew; one it could not
+    read (or a scan without the weekly checks) keeps its earlier entry; one no longer installed is dropped."""
+    kept = before if isinstance(before, Mapping) else {}
+    found: dict[str, dict[str, Any]] = {}
+    for domain, info in inv.custom.items():
+        repo = info.get("repo")
+        if not repo or domain == "hacs":
+            continue
+        if domain in repos and repos[domain] is not None:
+            facts = repos[domain]
+            reason = abandoned_reason(facts, now)
+            if reason is not None and facts is not None:
+                found[domain] = {"repo": str(repo), "archived": bool(facts.get("archived")), "reason": reason,
+                                 "pushed_at": facts.get("pushed_at")}  # fmt: skip
+            continue
+        old = kept.get(domain)
+        if isinstance(old, Mapping) and old.get("repo") == repo and isinstance(old.get("reason"), str):
+            found[domain] = dict(old)
+    return found
+
+
+def _repo_domains(inv: Inventory) -> list[str]:
+    """The custom integrations whose GitHub repository the weekly checks read (HACS itself aside)."""
+    return [d for d, info in list(inv.custom.items())[:MAX_CUSTOM] if info.get("repo") and d != "hacs"]
+
+
+def _complete(record: Any, repo: Any) -> bool:
+    return isinstance(record, Mapping) and record.get("repo") == repo and all(k in record for k in REPO_FIELDS)
+
+
+def stale_repos(kept: Any, inv: Inventory, now: datetime) -> list[str]:
+    """Custom integrations whose kept repository facts (`maintenance:meta` `repos`) this code cannot use: none kept
+    (an older version's scan), another repository, or a field missing (M5h). A failed read is retried after
+    `REPO_RETRY`."""
+    records = kept if isinstance(kept, Mapping) else {}
+    found = []
+    for domain in _repo_domains(inv):
+        repo, record = inv.custom[domain].get("repo"), records.get(domain)
+        if _complete(record, repo):
+            continue
+        tried = _when(record.get("tried")) if isinstance(record, Mapping) and record.get("repo") == repo else None
+        if tried is not None and now - tried < REPO_RETRY:
+            continue
+        found.append(domain)
+    return found
+
+
+def repo_records(kept: Any, repos: Mapping[str, Mapping[str, Any] | None], inv: Inventory,
+                 now: datetime) -> dict[str, dict[str, Any]]:  # fmt: skip
+    """The repository facts to keep: this scan's reads, else the earlier complete record of the same repository
+    (missing evidence never drops it, M6), else when a read was tried; integrations no longer installed drop."""
+    records = kept if isinstance(kept, Mapping) else {}
+    stamp = now.astimezone(UTC).isoformat(timespec="seconds")
+    found: dict[str, dict[str, Any]] = {}
+    for domain in _repo_domains(inv):
+        repo, old, facts = inv.custom[domain].get("repo"), records.get(domain), repos.get(domain)
+        if facts is not None:
+            found[domain] = {"repo": repo, **{k: facts.get(k) for k in REPO_FIELDS}}
+        elif isinstance(old, Mapping) and old.get("repo") == repo and (_complete(old, repo) or domain not in repos):
+            found[domain] = dict(old)
+        else:
+            found[domain] = {"repo": repo, "tried": stamp} if domain in repos else {"repo": repo}
+        if inv.custom[domain].get("repo_from") == "hacs":
+            found[domain]["from"] = "hacs"
+    for domain, info in list(inv.custom.items())[:MAX_CUSTOM]:
+        if domain != "hacs" and not info.get("repo"):
+            # Known without a repository: HACS's catalog is asked again only at the weekly checks.
+            found[domain] = {"repo": None}
+    return found
+
+
+def at_stake(domain: str, found: Iterable[Finding]) -> Finding | None:
+    """The finding an abandoned integration's alternatives go on (M5b, M5e): the deprecation for its domain with
+    the nearest named removal version (a repair, a release note or a Core log line; a deadline first), else its
+    archived-repository finding; None when nothing is at stake."""
+    mine = [f for f in found if f.domain == domain and f.variant == "deprecation"]
+    named = [(f, minor(f.removal)) for f in mine if f.removal]
+    dated = sorted(((f, at) for f, at in named if at is not None),
+                   key=lambda pair: (pair[0].deadline is None, pair[1], pair[0].key))  # fmt: skip
+    if dated:
+        return dated[0][0]
+    return next((f for f in sorted(mine, key=lambda f: f.key) if f.signal == "repository"), None)
+
+
+def repos_from_hacs(inv: Inventory, catalog: Iterable[Mapping[str, Any]]) -> int:
+    """Fill the GitHub repository of a custom integration whose manifest names none from HACS's catalog: the one
+    integration entry HACS installed with that domain (M5a). Returns how many were filled."""
+    filled = 0
+    for domain, info in inv.custom.items():
+        if info.get("repo") or domain == "hacs":
+            continue
+        entries = [e for e in catalog if e.get("category") == "integration" and e.get("installed")
+                   and e.get("domain") == domain]  # fmt: skip
+        if len(entries) == 1:
+            info["repo"], info["repo_from"] = str(entries[0]["full_name"]), "hacs"
+            filled += 1
+    return filled
+
+
+def skipped_why(stage: Mapping[str, Any], abandoned: Mapping[str, Any], *, backoff: bool) -> str:
+    """Why the alternatives stage researched nothing this scan, in daemon words ("" when it did)."""
+    if stage.get("error"):
+        return str(stage["error"])
+    if not abandoned:
+        return "GitHub backoff" if backoff else "nothing abandoned"
+    if not stage.get("at_stake"):
+        return "nothing at stake"
+    if stage.get("unread") == stage.get("at_stake"):
+        return "catalog unreadable"
+    return ""
+
+
 def removal_block(item: Mapping[str, Any], findings: Iterable[Finding]) -> str | None:
     """Why a Core update must ask: its version reaches the removal of something this install still uses (a finding
     with a deadline: a repair or a named removal of the release notes; deterministic, whatever its verdict)."""
@@ -663,7 +974,11 @@ def plan_of(store: Store, finding: Finding) -> dict[str, Any] | None:
 
 def item_id_of(finding: Finding) -> str:
     """The finding's item id (`items.item_id` of `maint:<key>`, without importing the item book)."""
-    return f"m-{hashlib.sha256(f'maint:{finding.key}'.encode()).hexdigest()[:12]}"
+    return item_id_of_key(finding.key)
+
+
+def item_id_of_key(key: str) -> str:
+    return f"m-{hashlib.sha256(f'maint:{key}'.encode()).hexdigest()[:12]}"
 
 
 def cause(finding: Finding) -> str:
@@ -728,6 +1043,27 @@ def proposal_of(store: Store, key: str) -> dict[str, Any] | None:
     return {"change": int(row["id"]), "state": str(row["state"])} if row is not None else None
 
 
+def record_verdict(store: Store, key: str, fingerprint: str, checked: verdicts.Answer, *, by: str,
+                   now: datetime) -> verdicts.Verdict:  # fmt: skip
+    """Keep a check's verdict on a finding (`verdicts.record`). When an earlier checked verdict for the same
+    fingerprint holds against a new `needs_owner` (M13h), the earlier one stays and the item's history records
+    both."""
+    earlier = verdicts.current(store, f"maint:{key}", fingerprint)
+    contradicted = verdicts.holds(earlier, checked.verdict)
+    kept = verdicts.record(store, f"maint:{key}", fingerprint=fingerprint, verdict=checked.verdict,
+                           reason=checked.reason, evidence=checked.evidence, by=by, now=now,
+                           owner_action=checked.owner_action)  # fmt: skip
+    if contradicted and earlier is not None:
+        words = earlier.verdict.replace("_", " ")
+        text = (f"Check kept as {words} ({clean_text(earlier.reason, 160)}): a later check said it needs you"
+                f" ({clean_text(checked.reason, 160)}) without new evidence")  # fmt: skip
+        _LOGGER.info("maintenance verdict kept", extra={"finding": key, "kept": earlier.verdict, "by": by})
+        item = store.item(item_id_of_key(key))
+        if item is not None:
+            store.add_item_event(str(item["id"]), at=now, actor="daemon", text=text, revision=int(item["revision"]))
+    return kept
+
+
 def build_plan_prompt(findings: list[Finding], *, git: bool) -> str:
     """The plan run's input: daemon facts, with every piece of third-party or install text fenced."""
     lines = ["Findings the daemon matched against this install by name. Check each one against the config before you "
@@ -745,11 +1081,14 @@ def build_plan_prompt(findings: list[Finding], *, git: bool) -> str:
                   f"- verdict wanted: {'yes' if finding.checked else 'no'}"]  # fmt: skip
         if finding.variant == "replacement" and finding.detail:
             lines.append(f"- replacement facts: {fence(json.dumps(finding.detail, sort_keys=True), 600)}")
+        alternatives = alternatives_prompt(finding)
         notes = [n for n in finding.detail.get("notes") or [] if isinstance(n, Mapping)]
         # A Core minor's notes one per line, each decided on its own (the verdict is the finding's, from all of them).
         evidence = [f"- note ({note.get('domain') or 'Core'}): "
                     f"{fence(str(note.get('title')) + ': ' + str(note.get('text')), NOTE_CHARS + 120)}"
                     for note in notes] or [fence(finding.quote or "(none)", QUOTE_CHARS)]  # fmt: skip
+        if alternatives is not None:
+            evidence.append(alternatives)
         lines += ["<evidence>", *evidence, "</evidence>", "</finding>", ""]
     return "\n".join(lines)
 
@@ -765,7 +1104,7 @@ def parse_plans(structured: Any, allowed: set[str]) -> dict[str, dict[str, Any]]
         if not plan:
             continue
         answer: dict[str, Any] = {"plan": plan, "why": clean_text(str(entry.get("why") or plan), 590)}
-        checked = verdicts.answer(entry)
+        checked = verdicts.answer(entry, strict=True)
         if checked is not None:
             answer["verdict"] = checked
         if isinstance(entry.get("edits"), list):
@@ -840,6 +1179,8 @@ ForkCheck = Callable[[str, str], Awaitable[tuple[bool, str, str] | None]]
 ForkText = Callable[[str], Awaitable[str | None]]
 # (finding, why, edits) -> the proposal row (changes.build_proposal through updatefix.apply_edits).
 Propose = Callable[[Finding, str, list[Any]], Awaitable[dict[str, Any]]]
+# HACS's cached catalog (`inventory.hacs_catalog`); None when it cannot be read (no alternatives then, M5c).
+Catalog = Callable[[], Awaitable[list[dict[str, Any]] | None]]
 
 
 class MaintenanceManager:
@@ -848,6 +1189,7 @@ class MaintenanceManager:
                  publish: Callable[[], Any] = lambda: None, note: Callable[[str, str], Any] | None = None,
                  fork_print: ForkPrint | None = None, fork_check: ForkCheck | None = None,
                  fork_text: ForkText | None = None, cancel_plan: Callable[[str, str], Any] | None = None,
+                 catalog: Catalog | None = None,
                  clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:  # fmt: skip
         self.store = store
         self._gather = gather
@@ -863,6 +1205,7 @@ class MaintenanceManager:
         # (item id, reason): cancel the queued Plan a fix of a finding a verdict closed
         # (`Assistant.cancel_queued_plan`).
         self._cancel_plan = cancel_plan
+        self._catalog = catalog
         self._clock = clock
         # Held from a scan's or a settle's read of the findings to its write: neither overwrites the other.
         self._lock = asyncio.Lock()
@@ -930,10 +1273,17 @@ class MaintenanceManager:
             from_logs(gathered.logs, now), inv, installed
         )
         found += from_notes(posts, inv, installed)
+        await self._hacs_repos(inv, info.get("repos"), full=full)
+        # custom domain -> its repository's facts, as read by this scan's weekly checks (M5a).
+        repos: dict[str, dict[str, Any] | None] = {}
         if full and self.evidence is not None:
-            found += await self._remote(inv, posts, failed, problems, installed)
+            found += await self._remote(inv, posts, failed, problems, installed, repos=repos)
         else:
             failed |= {"repository", "replacement"}
+            if self.evidence is not None:
+                # Facts kept by an older version (or a failed read) lack what this code needs: read them now (M5h).
+                for domain in stale_repos(info.get("repos"), inv, now):
+                    repos[domain] = await self.evidence.repository(str(inv.custom[domain]["repo"]))
         # Missing evidence never resolves a finding; a log warning lasts a while after it was last seen.
         keys = {f.key for f in found}
         # Why the scan drops a finding on purpose: the item says so when it resolves.
@@ -950,6 +1300,14 @@ class MaintenanceManager:
                 found.append(old)
                 keys.add(old.key)
         found = _ordered(found, installed)
+        abandoned = abandoned_now(info.get("abandoned"), repos, inv, now)
+        stage = await self._alternatives(found, abandoned, inv, now)
+        backoff = self.evidence is not None and self.evidence.backing_off()
+        _LOGGER.info("maintenance alternatives", extra={
+            "custom": len(_repo_domains(inv)), "checked": sum(1 for v in repos.values() if v is not None),
+            "no_repo": sum(1 for d, i in inv.custom.items() if d != "hacs" and not i.get("repo")),
+            "abandoned": len(abandoned), "at_stake": stage["at_stake"], "candidates": stage["candidates"],
+            "skipped": skipped_why(stage, abandoned, backoff=backoff), "github_backoff": backoff})  # fmt: skip
         asked = await self._ask(found)
         stamp = now.astimezone(UTC).isoformat(timespec="seconds")
         # One transaction: the scan's items are written once, from its whole result.
@@ -957,7 +1315,8 @@ class MaintenanceManager:
             self.store.kv_set(FINDINGS_KEY, json.dumps([f.to_json() for f in found]), now=now)
             self.store.kv_set(META_KEY, json.dumps({
                 "at": stamp, "full_at": stamp if full else full_at, "installed": installed, "newest": newest,
-                "configured": sorted(inv.configured_domains())[:400],
+                "configured": sorted(inv.configured_domains())[:400], "abandoned": abandoned,
+                "repos": repo_records(info.get("repos"), repos, inv, now),
             }), now=now)  # fmt: skip
             self._prune({f.key for f in found}, now)
             for key, why in gone.items():
@@ -1007,18 +1366,20 @@ class MaintenanceManager:
         return f"resolved: {old.domain} changed since the warning ({how}) and the warning has not come back"
 
     async def _remote(self, inv: Inventory, posts: list[dict[str, Any]], failed: set[str], problems: list[str],
-                      installed: str) -> list[Finding]:  # fmt: skip
-        """The weekly GitHub checks: archived repositories and replacement candidates."""
+                      installed: str, *, repos: dict[str, dict[str, Any] | None]) -> list[Finding]:  # fmt: skip
+        """The weekly GitHub checks: archived repositories (with each repository's facts in `repos`, None for one
+        that could not be read) and replacement candidates."""
         if self.evidence is None:
             return []
         archived: dict[str, bool] = {}
         for domain, info in list(inv.custom.items())[:MAX_CUSTOM]:
             if info.get("repo"):
-                state = await self.evidence.archived(str(info["repo"]))
-                if state is None:
+                facts = await self.evidence.repository(str(info["repo"]))
+                repos[domain] = facts
+                if facts is None:
                     failed.add("repository")
                 else:
-                    archived[domain] = state
+                    archived[domain] = bool(facts["archived"])
         matches = replacement_matches(inv, posts)
         core: dict[str, frozenset[str] | None] = {}
         for candidate in sorted(set(matches.values())):
@@ -1029,6 +1390,96 @@ class MaintenanceManager:
                 failed.add("replacement")
                 break
         return from_repositories(archived, inv) + await self._unforked(from_replacements(inv, matches, core), installed)
+
+    async def _hacs_repos(self, inv: Inventory, kept: Any, *, full: bool) -> None:
+        """A custom integration whose manifest names no repository takes the one HACS installed it from (M5a): kept
+        from an earlier scan, else read from HACS's catalog at the weekly checks or for one not seen before."""
+        records = kept if isinstance(kept, Mapping) else {}
+        missing = [d for d, i in inv.custom.items() if d != "hacs" and not i.get("repo")]
+        for domain in missing:
+            record = records.get(domain)
+            if isinstance(record, Mapping) and record.get("from") == "hacs" and record.get("repo"):
+                inv.custom[domain] |= {"repo": str(record["repo"]), "repo_from": "hacs"}
+        missing = [d for d in missing if not inv.custom[d].get("repo")]
+        if not missing or self._catalog is None or not (full or any(d not in records for d in missing)):
+            return
+        catalog = await self._catalog()
+        if catalog is not None:
+            repos_from_hacs(inv, catalog)
+
+    async def _alternatives(self, found: list[Finding], abandoned: Mapping[str, Mapping[str, Any]], inv: Inventory,
+                            now: datetime) -> dict[str, Any]:  # fmt: skip
+        """Maintained alternatives as facts on the finding that is at stake (M5b-M5f): researched at most every 30
+        days per integration, from HACS's catalog and GitHub's facts; nothing runs when nothing is abandoned. A
+        domain no longer abandoned has its record blanked. Never raises (the scan keeps its findings). Returns the
+        stage's counts for the scan's log line (M5h): `at_stake`, `candidates`, `unread` (no catalog)."""
+        stage: dict[str, Any] = {"at_stake": 0, "candidates": 0, "unread": 0, "error": ""}
+        for finding in found:
+            finding.detail.pop("alternatives", None)
+        try:
+            for name in self.store.kv_prefix(ALTERNATIVES_KEY, limit=50):
+                if name.removeprefix(ALTERNATIVES_KEY) not in abandoned:
+                    self.store.kv_set(name, "", now=now)
+            for domain, state in sorted(abandoned.items())[:MAX_CUSTOM]:
+                target = at_stake(domain, found)
+                if target is None:
+                    continue
+                stage["at_stake"] += 1
+                record = await self._researched(domain, state, inv, now)
+                if record is None:
+                    stage["unread"] += 1
+                    continue
+                target.detail["alternatives"] = record
+                stage["candidates"] += len(record.get("candidates") or [])
+        except (StoreError, sqlite3.Error, OSError, ValueError) as err:
+            _LOGGER.info("alternatives unavailable", extra={"error": str(err)[:160]})
+            stage["error"] = "store unavailable"
+        return stage
+
+    async def _researched(self, domain: str, state: Mapping[str, Any], inv: Inventory,
+                          now: datetime) -> dict[str, Any] | None:  # fmt: skip
+        """The kept research while it is fresh and its fingerprint holds, else a new one; None without a catalog
+        (fails closed: no facts, no problem) or without GitHub access configured."""
+        info = inv.custom.get(domain) or {}
+        print_ = _key("alternatives", domain, state.get("repo"), bool(state.get("archived")))
+        kept = self.store.kv_json(ALTERNATIVES_KEY + domain)
+        at = _when((kept or {}).get("at"))
+        if kept is not None and kept.get("fingerprint") == print_ and at is not None:
+            fresh = PARTIAL_REFRESH if kept.get("partial") else ALTERNATIVES_REFRESH
+            if now - at < fresh:
+                # The migration impact is this scan's: references change between researches.
+                usage = inv.entity_usage(domain)
+                refreshed = [dict(c) | {"impact": migration_impact(domain, c.get("domain"), usage)}
+                             for c in kept.get("candidates") or [] if isinstance(c, Mapping)]  # fmt: skip
+                return kept | {"reason": state.get("reason"), "candidates": refreshed}
+        if self._catalog is None or self.evidence is None:
+            return None
+        catalog = await self._catalog()
+        if catalog is None:
+            return None
+        usage = inv.entity_usage(domain)
+        candidates: list[dict[str, Any]] = []
+        partial = False
+        for entry in rank_candidates(catalog, domain, info, now)[:MAX_ALTERNATIVE_LOOKUPS]:
+            if len(candidates) >= MAX_ALTERNATIVES:
+                break
+            repo = str(entry["full_name"])
+            facts = await self.evidence.repository(repo)
+            if facts is not None and facts.get("archived"):
+                continue
+            partial |= facts is None
+            other = entry.get("domain")
+            iot = await self.evidence.iot_class(repo, other) if facts is not None and isinstance(other, str) else None
+            candidates.append(candidate_record(entry, facts, iot, domain=domain, usage=usage))
+        # A candidate GitHub could not vouch for ranks after every one it could, whatever the catalog says.
+        candidates.sort(key=lambda c: not c["github"])
+        record = {"fingerprint": print_, "at": now.astimezone(UTC).isoformat(timespec="seconds"), "partial": partial,
+                  "reason": state.get("reason"), "brand": brand(domain, str(info.get("name") or "")),
+                  "candidates": candidates}  # fmt: skip
+        self.store.kv_set(ALTERNATIVES_KEY + domain, json.dumps(record), now=now)
+        _LOGGER.info("alternatives researched", extra={"domain": domain, "candidates": len(candidates),
+                                                       "partial": partial})  # fmt: skip
+        return record
 
     async def _unforked(self, found: list[Finding], installed: str) -> list[Finding]:
         """The replacement candidates minus the forks that are still needed: a custom integration that shadows a
@@ -1103,6 +1554,9 @@ class MaintenanceManager:
         )
         gone = {f.key for f in kept if f.domain == domain and f.signal == "replacement"} - {f.key for f in found}
         found = _ordered([f for f in kept if f.key not in gone] + fresh, gathered.installed)
+        # The alternatives stay on whichever finding is at stake now (the abandoned set of the last scan).
+        abandoned = abandoned_now(meta(self.store).get("abandoned"), {}, gathered.inventory, now)
+        await self._alternatives(found, abandoned, gathered.inventory, now)
         with self.store.atomic():
             self.store.kv_set(FINDINGS_KEY, json.dumps([f.to_json() for f in found]), now=now)
             self._prune({f.key for f in found}, now)
@@ -1174,11 +1628,10 @@ class MaintenanceManager:
             self.store.kv_set(PLAN_KEY + finding.key, json.dumps(record), now=now)
             if finding.checked and "verdict" in answer:
                 checked: verdicts.Answer = answer["verdict"]
-                verdict = checked.verdict
-                verdicts.record(self.store, cause(finding), fingerprint=finding.evidence, verdict=verdict,
-                                reason=checked.reason, evidence=checked.evidence, by="maintenance_plan", now=now,
-                                owner_action=checked.owner_action)  # fmt: skip
-                _LOGGER.info("maintenance verdict", extra={"finding": finding.key, "verdict": verdict,
+                kept = record_verdict(self.store, finding.key, finding.evidence, checked, by="maintenance_plan",
+                                      now=now)  # fmt: skip
+                _LOGGER.info("maintenance verdict", extra={"finding": finding.key, "verdict": kept.verdict,
+                                                           "asked": checked.verdict,
                                                            "by": "maintenance_plan"})  # fmt: skip
 
     async def _offers(self, asked: Asked) -> None:

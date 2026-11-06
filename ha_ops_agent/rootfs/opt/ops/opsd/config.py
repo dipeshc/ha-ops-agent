@@ -156,6 +156,11 @@ class Paths:
     def core_config_entries(self) -> Path:
         return self.ha_config / ".storage" / "core.config_entries"
 
+    @property
+    def hacs_repositories(self) -> Path:
+        """HACS's cached catalog, read by the daemon only (spec maintenance.md M5c)."""
+        return self.ha_config / ".storage" / "hacs.repositories"
+
 
 # ------------------------------------------------------------------ options v2
 

@@ -34,6 +34,8 @@ UPDATE_ENTITY_RE = re.compile(r"update\.[a-z0-9_]{1,128}")
 SUPPRESS_VERIFIER_RE = re.compile(r"[a-z_]{1,40}")
 SUPPRESS_VALUE_RE = re.compile(r"[a-z0-9_.]{1,140}")
 # Hunk ids of a fork's own changes (opsd.forkrebase.KEEP_RE), or `none`.
+# A Core minor (`2030.4`) for `core-compare --to`: Core's own integration at that minor's `.0` release.
+CORE_MINOR_RE = re.compile(r"20\d{2}\.(?:1[0-2]|[1-9])")
 FORK_KEEP_RE = re.compile(r"none|[A-Za-z0-9_.-]{1,64}#[1-9][0-9]{0,2}(?:,[A-Za-z0-9_.-]{1,64}#[1-9][0-9]{0,2}){0,39}")
 AT_RE = re.compile(r"\+\d{1,4}[mhd]|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 _VERB_RE = re.compile(r"[a-z][a-z0-9-]{0,30}")
@@ -283,15 +285,23 @@ REGISTRY: tuple[Capability, ...] = (
         "ha.core_compare",
         "core-compare",
         "compare a custom integration with Home Assistant Core's integration of the same domain at the installed"
-        " Core version: a summary and a unified diff per file (fetched by the daemon from GitHub)",
+        " Core version, or (--to) Core's own integration at the installed version with a newer minor: a summary and"
+        " a unified diff per file (fetched by the daemon from GitHub)",
         "opsd.coresource:cmd_core_compare",
         {
-            "domain": Arg(str, None, pattern=SLUG_RE, positional=True, help="custom integration domain, e.g. acme"),
+            "domain": Arg(str, None, pattern=SLUG_RE, positional=True, help="integration domain, e.g. acme"),
             "fork": Arg(
                 bool,
                 False,
                 help="also find the Core release the fork was copied from and number its own changes for"
                 " propose-rebase --keep",
+            ),
+            "to": Arg(
+                str,
+                None,
+                pattern=CORE_MINOR_RE,
+                help="a Core minor newer than the installed one (YYYY.M): compare Core's own <domain> at the"
+                " installed version with that minor's .0 release (what a breaking change really changes)",
             ),
         },
         quota=Quota(per_run=3, per_day=12),

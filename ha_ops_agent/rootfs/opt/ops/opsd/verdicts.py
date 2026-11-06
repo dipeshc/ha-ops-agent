@@ -35,6 +35,21 @@ _NO_ACTION = re.compile(
     r"(needed|required|to do)?)\W*$"
 )
 EVIDENCE_MAX = 6
+# Causes whose verdicts must be grounded (`grounded`, spec maintenance.md M13g): a maintenance finding and a Core
+# minor's notes. A health verdict (triage) keeps its own rules.
+GROUNDED_CAUSES = ("maint:", "core:")
+# Hedged reasoning is no conclusion (small keyword checks, never more prose parsing than this).
+_HEDGED = re.compile(
+    r"(?i:\b(?:probably|likely|unlikely|guess(?:ed|ing)?|perhaps|possibly|presumably|might|maybe|"
+    r"not sure|unsure|unclear|confirm (?:it )?after|check after)\b)|\bmay\b"
+)
+# An owner action that only offers to keep the configuration as it is names nothing to do.
+_KEEP_CHOICE = re.compile(r"(?i)\b(?:keep|keeping|or leave|leave (?:it|them|this)|as[- ]is|unchanged)\b")
+# A concrete read: a config file (with or without its line), a core-compare result, an opsctl read, or an entity id.
+_CONCRETE_REF = re.compile(
+    r"(?i)(?:[\w./-]+\.(?:ya?ml|py|json|jinja)\b|\bcore-compare\b|\bopsctl\s+[a-z-]+|"
+    r"\bentit(?:y|ies)\b|\bentr(?:y|ies)\b)|^\s*[a-z_]+\.[a-z0-9_]+\s*$"
+)
 # A check that gave no answer this often behaves as without a verdict (it asks as before).
 MAX_TRIES = 2
 # A check that could not run is tried again this long after (the item asks meanwhile).
@@ -100,7 +115,38 @@ def owner_action_of(raw: Any) -> str:
     return text[:OWNER_ACTION_CHARS]
 
 
-def answer(raw: Any, *, allowed: Iterable[str] = VERDICTS) -> Answer | None:
+def hedged(text: str) -> bool:
+    """Reasoning that only guesses ("probably", "likely", "may", "confirm after the update")."""
+    return bool(_HEDGED.search(text or ""))
+
+
+def concrete(evidence: Iterable[str]) -> bool:
+    """At least one reference names a concrete read (`_CONCRETE_REF`)."""
+    return any(_CONCRETE_REF.search(str(ref)) for ref in evidence)
+
+
+def grounded(verdict: str, reason: str, evidence: Iterable[str], owner_action: str) -> str:
+    """The verdict a grounded cause may keep (spec maintenance.md M13g), else `unknown`: `needs_owner` needs an
+    unhedged reason, a concrete read among its evidence and an owner action that does more than keep things as
+    they are; a hedged `not_affected` needs a concrete read."""
+    refs = list(evidence)
+    if verdict == "needs_owner" and (hedged(reason) or hedged(owner_action) or not concrete(refs)
+                                     or _KEEP_CHOICE.search(owner_action or "")):  # fmt: skip
+        return "unknown"
+    if verdict == "not_affected" and hedged(reason) and not concrete(refs):
+        return "unknown"
+    return verdict
+
+
+def holds(earlier: Verdict | None, verdict: str) -> bool:
+    """An earlier checked `not_affected` or `unknown` for the same fingerprint holds against a new `needs_owner`:
+    no new evidence, no escalation (spec maintenance.md M13h). Placeholders (a queued or failed check, no reason)
+    and the admin's own reopen never hold."""
+    return (verdict == "needs_owner" and earlier is not None and earlier.by != "admin" and bool(earlier.reason)
+            and earlier.verdict in ("not_affected", "unknown") and not earlier.failed)  # fmt: skip
+
+
+def answer(raw: Any, *, allowed: Iterable[str] = VERDICTS, strict: bool = False) -> Answer | None:
     """A model's verdict (`{verdict, reason, evidence, owner_action}`), strictly shaped and cleaned; None when there
     is none. A `needs_owner` without a usable owner action is `unknown` (spec maintenance.md M13d), or None where
     `unknown` is not allowed (triage: no verdict)."""
@@ -122,6 +168,9 @@ def answer(raw: Any, *, allowed: Iterable[str] = VERDICTS) -> Answer | None:
         if "unknown" not in tuple(allowed):
             return None
         verdict = "unknown"
+    if strict:
+        verdict = grounded(str(verdict), reason, evidence, action)
+        action = action if verdict == "needs_owner" else ""
     return Answer(str(verdict), reason, evidence, action)
 
 
@@ -141,6 +190,11 @@ def load(store: Store, cause: str) -> Verdict | None:
     if found.verdict == "needs_owner" and not found.owner_action:
         # An older verdict without an owner action (or a damaged one) asks nothing: it is checked again.
         found.verdict = "unknown"
+    if cause.startswith(GROUNDED_CAUSES) and found.by != "admin":
+        # Also a verdict an earlier version stored: an ungrounded one asks nothing and is checked again.
+        found.verdict = grounded(found.verdict, found.reason, found.evidence, found.owner_action)
+    if found.verdict != "needs_owner":
+        found.owner_action = ""
     return found
 
 
@@ -153,12 +207,25 @@ def current(store: Store, cause: str, fingerprint: str) -> Verdict | None:
 def record(store: Store, cause: str, *, fingerprint: str, verdict: str, reason: str, by: str, now: datetime,
            evidence: Iterable[str] = (), owner_action: str = "") -> Verdict:  # fmt: skip
     """Keep a verdict for this cause and fingerprint (a kv row: the items it shows are composed in the same
-    transaction). A `needs_owner` without a usable owner action is kept as `unknown`."""
+    transaction). A `needs_owner` without a usable owner action is kept as `unknown`; for a grounded cause an
+    ungrounded one too (`grounded`), and an earlier checked verdict for the same fingerprint holds against it
+    (`holds`: the earlier one is kept, one more try counted on an `unknown`)."""
     if verdict not in (*VERDICTS, "fixed") or by not in BY:
         raise ValueError(f"not a verdict: {verdict} by {by}")
+    evidence = list(evidence)
     action = owner_action_of(owner_action) if verdict == "needs_owner" else ""
     if verdict == "needs_owner" and not action:
         verdict = "unknown"
+    if cause.startswith(GROUNDED_CAUSES):
+        verdict = grounded(verdict, reason, evidence, action)
+        earlier = current(store, cause, fingerprint)
+        if holds(earlier, verdict) and earlier is not None:
+            if earlier.verdict == "unknown":
+                earlier.tries += 1
+                store.kv_set(KEY + cause, json.dumps(earlier.to_json()), now=now)
+            return earlier
+    if verdict != "needs_owner":
+        action = ""
     found = Verdict(verdict=verdict, reason=clean_text(reason, REASON_CHARS), fingerprint=fingerprint,
                     at=now.astimezone(UTC).isoformat(timespec="seconds"), by=by,
                     evidence=[clean_text(str(e), 120) for e in evidence][:EVIDENCE_MAX],

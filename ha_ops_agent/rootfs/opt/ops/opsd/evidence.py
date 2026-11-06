@@ -7,6 +7,7 @@ are kept and cached (`CACHE_TTL`); a failed answer is never cached and makes the
 """
 
 import asyncio
+import functools
 import hashlib
 import html
 import json
@@ -38,6 +39,12 @@ RELEASE_INDEX = "https://www.home-assistant.io/blog/categories/release-notes/"
 CORE_RELEASE = "https://api.github.com/repos/home-assistant/core/releases/tags/{tag}"
 REPO_API = "https://api.github.com/repos/{repo}"
 CORE_COMPONENT = "https://api.github.com/repos/home-assistant/core/contents/homeassistant/components/{domain}"
+# A third-party integration's manifest (an alternative's `iot_class`, spec maintenance.md M5d): the raw host only.
+RAW_HOST = "raw.githubusercontent.com"
+THIRD_PARTY_MANIFEST = "https://raw.githubusercontent.com/{repo}/HEAD/custom_components/{domain}/manifest.json"
+MANIFEST_MAX_BYTES = 64 * 1024
+# The repository facts the maintenance code needs (spec maintenance.md M5a): a record without one is stale.
+REPO_FIELDS = ("archived", "pushed_at", "stars", "open_issues")
 # An integration domain, as Home Assistant names them (the one pattern the maintenance code uses).
 DOMAIN_RE = re.compile(r"[a-z0-9_]{1,64}")
 _POST_RE = re.compile(r'href="(/blog/\d{4}/\d{2}/\d{2}/release-(\d{4})(\d{1,2})/)"')
@@ -65,6 +72,22 @@ _DOCS_LINK_RE = re.compile(
 _GLOSSARY_RE = re.compile(r'<span class="terminology-tooltip">.*?</span>', re.DOTALL)
 _REPO_RE = re.compile(r"https://github\.com/([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})")
 _SAFE_REPO_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+_IOT_RE = re.compile(r"[a-z_]{3,32}")
+
+
+def _iso_or_none(value: Any) -> str | None:
+    """An ISO timestamp as given (`2030-01-02T03:04:05Z`), or None when it is not one."""
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 10**9 else 0
 
 
 class FetchError(RuntimeError):
@@ -386,15 +409,28 @@ class EvidenceSource:
         self._clock = clock
         self._backoff = GithubBackoff(cache.store, BACKOFF_KEY, clock)
 
-    async def _get(self, url: str, parse: Callable[[str], Any], *, fresh: bool = False, name: str = "") -> Any:
+    def backing_off(self) -> bool:
+        """GitHub asked to slow down: no GitHub call is made until the backoff ends."""
+        return self._backoff.active()
+
+    async def _get(self, url: str, parse: Callable[[str], Any], *, fresh: bool = False, name: str = "",
+                   hosts: frozenset[str] = ALLOWED_HOSTS, max_bytes: int = MAX_BYTES) -> Any:  # fmt: skip
         """Parsed and cached on success only: a failed or unrecognised answer is fetched again next time. `name`
-        keeps a second parse of the same page apart in the cache."""
+        keeps a second parse of the same page apart in the cache; `hosts` and `max_bytes` can only narrow the fetch
+        (`check_hosts`), and bind an injected fetcher too."""
+        check_hosts(hosts)
+        _check_url(url, hosts)
         key = f"{url}#{name}" if name else url
         cached = None if fresh else self._cache.get(key)
         if cached is not None:
             return cached
         try:
-            text = await asyncio.to_thread(self._fetch or fetch_text, url)
+            if self._fetch is not None:
+                text = await asyncio.to_thread(self._fetch, url)
+            else:
+                text = await asyncio.to_thread(functools.partial(fetch_text, hosts=hosts, max_bytes=max_bytes), url)
+            if len(text.encode()) > max_bytes:
+                raise FetchError("answer larger than the limit")
             data = parse(text)
         except FetchError as err:
             _LOGGER.info("evidence unavailable", extra={"source": url[:120], "error": str(err)[:160]})
@@ -466,8 +502,9 @@ class EvidenceSource:
             found.append({"version": f"{year}.{month}", "url": url, **data})
         return found, problems
 
-    async def archived(self, repo: str) -> bool | None:
-        """Whether a GitHub repository is archived; None when it does not exist or cannot be asked now."""
+    async def repository(self, repo: str) -> dict[str, Any] | None:
+        """A GitHub repository's facts: `archived`, `pushed_at` (ISO or None), `stars`, `open_issues`; None when it
+        does not exist, cannot be asked now (the backoff) or answers without an archived flag."""
         if not _SAFE_REPO_RE.fullmatch(repo) or ".." in repo or self._backoff.active():
             return None
 
@@ -475,14 +512,47 @@ class EvidenceSource:
             raw = json.loads(text)
             if not isinstance(raw, dict) or not isinstance(raw.get("archived"), bool):
                 raise ValueError("no archived flag")
-            return {"archived": raw["archived"]}
+            return {"archived": raw["archived"], "pushed_at": _iso_or_none(raw.get("pushed_at")),
+                    "stars": _count(raw.get("stargazers_count")),
+                    "open_issues": _count(raw.get("open_issues_count"))}  # fmt: skip
 
         try:
-            data = await self._get(REPO_API.format(repo=repo), parse, name="archived")
+            data = await self._get(REPO_API.format(repo=repo), parse, name="repository")
+            if not isinstance(data, dict) or not all(k in data for k in REPO_FIELDS):
+                # A record an older version cached lacks a field this code needs: stale, read again (M5h).
+                data = await self._get(REPO_API.format(repo=repo), parse, name="repository", fresh=True)
         except FetchError as err:
             self._backoff.note(err)
             return None
-        return bool(data.get("archived"))
+        return {"archived": bool(data.get("archived")), "pushed_at": _iso_or_none(data.get("pushed_at")),
+                "stars": _count(data.get("stars")), "open_issues": _count(data.get("open_issues"))}  # fmt: skip
+
+    async def archived(self, repo: str) -> bool | None:
+        """Whether a GitHub repository is archived; None when it does not exist or cannot be asked now."""
+        facts = await self.repository(repo)
+        return None if facts is None else bool(facts["archived"])
+
+    async def iot_class(self, repo: str, domain: str) -> str | None:
+        """A third-party integration's manifest `iot_class` (spec maintenance.md M5d), from the raw host only, at
+        most `MANIFEST_MAX_BYTES`; None when it cannot be told (no such file, an odd answer, the backoff)."""
+        if (not _SAFE_REPO_RE.fullmatch(repo) or ".." in repo or not DOMAIN_RE.fullmatch(domain)
+                or self._backoff.active()):  # fmt: skip
+            return None
+
+        def parse(text: str) -> dict[str, Any]:
+            raw = json.loads(text)
+            found = raw.get("iot_class") if isinstance(raw, dict) else None
+            if not isinstance(found, str) or not _IOT_RE.fullmatch(found):
+                raise ValueError("no iot_class")
+            return {"iot_class": found}
+
+        try:
+            data = await self._get(THIRD_PARTY_MANIFEST.format(repo=repo, domain=domain), parse, name="iot",
+                                   hosts=frozenset({RAW_HOST}), max_bytes=MANIFEST_MAX_BYTES)  # fmt: skip
+        except FetchError as err:
+            self._backoff.note(err)
+            return None
+        return str(data.get("iot_class") or "") or None
 
     async def core_platforms(self, domain: str) -> frozenset[str] | None:
         """The entity platforms a Core integration of this domain provides (its `<platform>.py` files); None when

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
 
-from opsd import forkrebase, verdicts
+from opsd import forkrebase, maintenance, verdicts
 from opsd.activity import ActivityLog
 from opsd.capabilities import CAPABILITIES
 from opsd.channels import (
@@ -95,7 +95,9 @@ PLAN_FIX_BRIEF = (
     " not_affected), fixable (you proposed the fix), needs_owner (only for something the admin himself must do or"
     " decide; then owner_action names it as a short imperative, e.g. \"Set the country in the integration's"
     ' options") or unknown (a check you could not complete is unknown, never needs_owner), with the reason and'
-    " what you read; owner_action is null unless needs_owner."
+    " what you read; owner_action is null unless needs_owner. A breaking change to a Core integration's"
+    " configuration is decided from Core's source (core-compare <integration> --to <minor>) against the exact form"
+    " this install uses; a hedged conclusion (probably, likely, may) is unknown."
 )
 # A plan's text on its finding (the last step's findings).
 PLAN_CHARS = 3000
@@ -1147,18 +1149,22 @@ class Assistant:
         changes."""
         finding = str(task.payload.get("finding") or "")
         fingerprint = str(task.payload.get("fingerprint") or "")
-        found = verdicts.answer(structured.get("verdict") if isinstance(structured, Mapping) else None)
+        found = verdicts.answer(structured.get("verdict") if isinstance(structured, Mapping) else None, strict=True)
         if found is None or not re.fullmatch(r"[0-9a-f]{16}", finding) or not fingerprint:
             return
-        verdict = found.verdict
+        shown = verdicts.Answer(
+            found.verdict,
+            redactor.redact(found.reason),
+            [redactor.redact(e) for e in found.evidence],
+            redactor.redact(found.owner_action),
+        )
         try:
-            verdicts.record(self.store, f"maint:{finding}", fingerprint=fingerprint, verdict=verdict,
-                            reason=redactor.redact(found.reason), evidence=[redactor.redact(e) for e in found.evidence],
-                            by="plan_fix", now=now, owner_action=redactor.redact(found.owner_action))  # fmt: skip
+            kept = maintenance.record_verdict(self.store, finding, fingerprint, shown, by="plan_fix", now=now)
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.warning("plan verdict not kept", extra={"task": task.id, "error": str(err)[:160]})
             return
-        _LOGGER.info("maintenance verdict", extra={"finding": finding, "verdict": verdict, "by": "plan_fix"})
+        _LOGGER.info("maintenance verdict", extra={"finding": finding, "verdict": kept.verdict,
+                                                   "asked": found.verdict, "by": "plan_fix"})  # fmt: skip
 
     async def _investigation_blocked(  # noqa: PLR0917 - internal step of run_investigation
         self,

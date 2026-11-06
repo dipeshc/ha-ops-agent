@@ -1944,7 +1944,11 @@ def test_the_macro_scan_never_follows_links_or_opens_special_files(tmp_path: Pat
 # ------------------------------------------------------------------ checked holds (0.23.0)
 
 
-def notes_review(rig: Rig, verdict: str) -> None:
+OWNER_ACTION = "Rewrite the legacy template in templates/legacy.yaml"
+
+
+def notes_review(rig: Rig, verdict: str, *, action: str = OWNER_ACTION,
+                 evidence: list[str] | None = None) -> None:  # fmt: skip
     """A review that answers every candidate low risk, and the isolated run's notes-only hold with `verdict`."""
 
     async def review(prompt: str) -> RunResult:
@@ -1953,9 +1957,9 @@ def notes_review(rig: Rig, verdict: str) -> None:
                  if e in prompt]  # fmt: skip
         if "<needs_change" in prompt:
             found = [{"entity_id": CORE, "risk": "low", "hold": False, "verdict": verdict,
-                      "reason": "nothing here uses the legacy template syntax",
-                      "owner_action": "Decide whether to keep the legacy templates" if verdict == "needs_owner"
-                      else None}]  # fmt: skip
+                      "reason": "templates/legacy.yaml uses the legacy template syntax",
+                      "evidence": ["templates/legacy.yaml:3"] if evidence is None else evidence,
+                      "owner_action": action if verdict == "needs_owner" else None}]  # fmt: skip
         return RunResult(status="ok", structured={"assessments": found})
 
     rig.manager._review = review
@@ -1990,6 +1994,30 @@ async def test_a_checked_notes_only_hold_is_released(tmp_path: Path) -> None:
     rig.store.close()
 
 
+async def test_an_ungrounded_review_needs_owner_is_unknown(tmp_path: Path) -> None:
+    """A Core minor's verdict cannot become an approval question without evidence (spec maintenance.md M13g): the
+    review's `needs_owner` with no concrete read, or one that only offers to keep the configuration, is kept as
+    `unknown` (the update stays held as for any unchecked notes, and is asked again the next night)."""
+    cases = (("Decide whether to keep the legacy templates", None), ("Rewrite the legacy template", []),
+             ("Rewrite the legacy template", ["the release notes"]))  # fmt: skip
+    for n, (action, evidence) in enumerate(cases):
+        (tmp_path / str(n)).mkdir()
+        rig = git_off(Rig(tmp_path / str(n), updates__review=True))
+        only_auto(rig, CORE)
+        rig.evidence.changes = [TEMPLATE_NOTE]
+        notes_review(rig, "needs_owner", action=action, evidence=evidence)
+        await rig.manager.run_window()
+        [core] = [i for i in rig.run()["plan"] if i["entity_id"] == CORE]
+        assert core["tier"] == "approve"
+        kept = verdicts.load(rig.store, "core:2026.10")
+        assert kept is not None and kept.verdict == "unknown" and not kept.owner_action
+        reviews = len(rig.reviews)
+        rig.now += timedelta(days=1)
+        await rig.manager.run_window()
+        assert any("<needs_change" in r for r in rig.reviews[reviews:])
+        rig.store.close()
+
+
 async def test_a_checked_hold_stays_released_and_needs_owner_keeps_it(tmp_path: Path) -> None:
     rig = git_off(Rig(tmp_path, updates__review=True))
     only_auto(rig, CORE)
@@ -2004,7 +2032,7 @@ async def test_a_checked_hold_stays_released_and_needs_owner_keeps_it(tmp_path: 
     await rig.manager.run_window()
     assert not any("<needs_change" in r for r in rig.reviews[reviews:])
     kept = verdicts.load(rig.store, "core:2026.10")
-    assert kept is not None and kept.owner_action == "Decide whether to keep the legacy templates"
+    assert kept is not None and kept.owner_action == OWNER_ACTION and kept.verdict == "needs_owner"
     # A remembered "not affected" for these notes releases the hold in every later plan (here "Plan now"),
     # without a review.
     fingerprint = verdicts.notes_fingerprint([("breaking", "template", "Template: legacy")])

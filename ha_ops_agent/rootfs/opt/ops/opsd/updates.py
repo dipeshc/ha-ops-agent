@@ -1013,9 +1013,12 @@ class UpdateManager:
                 out.append(item)
                 continue
             reason = clean_text(str((answer or {}).get("reason") or ""), 300) or "no reason given"
+            refs = (answer or {}).get("evidence")
+            # A `needs_owner` needs a concrete read and a real owner action, or it is `unknown` (M13g).
             kept = verdicts.record(self.store, str(check["cause"]), fingerprint=str(check.get("fingerprint") or ""),
                                    verdict=str(verdict), reason=reason, by="update_review", now=now,
-                                   owner_action=str((answer or {}).get("owner_action") or ""))  # fmt: skip
+                                   evidence=[str(r) for r in refs[:verdicts.EVIDENCE_MAX]] if isinstance(refs, list)
+                                   else [], owner_action=str((answer or {}).get("owner_action") or ""))  # fmt: skip
             verdict = kept.verdict
             self._audit("update.verdict", outcome=str(verdict), entity=entity, version=item.get("latest"))
             if verdict != "not_affected" or item.get("fix"):

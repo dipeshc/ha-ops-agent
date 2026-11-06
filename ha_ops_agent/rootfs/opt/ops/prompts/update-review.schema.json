@@ -85,6 +85,14 @@
               "unknown"
             ]
           },
+          "evidence": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "string",
+              "maxLength": 120
+            }
+          },
           "owner_action": {
             "anyOf": [
               {

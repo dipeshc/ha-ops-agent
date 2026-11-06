@@ -238,9 +238,9 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 ## Evidence and the config check
 
 - H19. `opsd/evidence.py` fetches release notes for the update rule and,
-  for proactive maintenance, release posts, archived flags of custom
-  integrations' repositories and Core's integration listings
-  ([maintenance.md](maintenance.md) M4–M5):
+  for proactive maintenance, release posts, the archived flag and last
+  push of custom integrations' repositories, Core's integration listings
+  and an alternative's manifest ([maintenance.md](maintenance.md) M4–M5d):
   HTTPS to `www.home-assistant.io` and `api.github.com` only, same-host
   redirects, 3 MiB, 20 seconds; results cached 12 hours in the store; a
   failed or unrecognised answer is never cached and marks the evidence
@@ -253,7 +253,9 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   Assistant Core's own source for `opsctl core-compare`
   (`api.github.com` and `raw.githubusercontent.com` only,
   [capabilities.md](capabilities.md) K13); a caller can only narrow the
-  hosts, never add one. Tests `tests/test_evidence.py`,
+  hosts, never add one; an alternative's `manifest.json` (maintenance.md
+  M5d) is read the same way from `raw.githubusercontent.com` alone, at
+  most 64 KiB. Tests `tests/test_evidence.py`,
   `test_the_hardened_fetch_refuses_any_other_host`,
   `test_the_fetch_allows_only_the_two_hosts_and_never_another_on_redirect`.
 - H20. `opsd/configcheck.py` is the fail-closed allowlist over proposed YAML

@@ -71,7 +71,11 @@ Tests: `tests/test_selfguard.py`.
   `input_boolean/list`, `input_boolean/create` (only the AI switch's name),
   and the dashboard reads `lovelace/config` (at most a `url_path`)
   and `lovelace/dashboards/list` (no arguments). Every
-  `lovelace/...` write is refused (G8). Tests `test_ws_self_targets_are_refused`,
+  `lovelace/...` write is refused (G8). No HACS command other than the
+  `hacs/repository/info` read is allowed: the alternatives of an abandoned
+  integration ([maintenance.md](maintenance.md) M5g) add no command, no
+  POST and no capability. Tests `test_ws_self_targets_are_refused`,
+  `test_alternatives_add_no_write_path_and_no_allowlisted_call`,
   `test_every_websocket_send_path_refuses_before_writing`,
   `test_the_agents_own_subscriptions_and_switch_pass`.
 

@@ -89,8 +89,11 @@ wrote, dumped once and frozen), `tests/test_infra.py`, `tests/test_usage.py`
   - `items` (with the generated `needs` column and its CHECK) and
     `item_events`: [items-and-pushes.md](items-and-pushes.md).
 - S4. Maintenance state lives in `kv` under `maintenance:` (`findings`,
-  `meta`, and per finding `plan:`, `hidden:`, `gone:` (why the scan dropped
-  it)); each scan blanks the plan and gone records of findings that are
+  `meta` (with the abandoned custom integrations, maintenance.md M5a), and
+  per finding `plan:`, `hidden:`, `gone:` (why the scan dropped
+  it)); the alternatives researched for an abandoned integration are an
+  evidence record, `evidence:alternatives:<domain>` (M5f, pruned with the
+  evidence cache, S7); each scan blanks the plan and gone records of findings that are
   gone, and
   their `verdict:maint:` records. Verdicts and the digest are `kv` rows. Test
   `test_only_deprecations_within_30_days_of_their_deadline_need_the_admin_and_push`.

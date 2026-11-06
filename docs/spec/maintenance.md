@@ -8,8 +8,9 @@ approved, and the AI only proposes.
 
 Implementation: `opsd/maintenance.py` (signals, findings, the scan, the
 update-rule hook), `opsd/inventory.py` (also the read-only dashboard
-reads), `opsd/evidence.py` (`parse_post`,
-`EvidenceSource.posts`, `.archived`, `.core_platforms`), the
+reads and HACS's catalog, `hacs_catalog`), `opsd/evidence.py` (`parse_post`,
+`EvidenceSource.posts`, `.repository`, `.archived`, `.iot_class`,
+`.core_platforms`), the
 maintenance composition in `opsd/items.py`, the
 `maintenance_plan` run profile in `opsd/runner.py` with
 `prompts/profiles/maintenance_plan.md` and
@@ -21,8 +22,13 @@ maintenance composition in `opsd/items.py`, the
   `system_log/list`, `config_entries/get`, `config/entity_registry/list`,
   `lovelace/dashboards/list`, `lovelace/config`; Core REST `/config`;
   Supervisor `/core/info`; the readable config
-  files on disk; and the allowlisted, cached fetcher of `opsd.evidence`
-  (`www.home-assistant.io`, `api.github.com`). Every fetched or local text
+  files on disk; HACS's catalog `.storage/hacs.repositories`, read by the
+  daemon only and only while an abandoned integration is at stake (M5c),
+  or to find the repository of a custom integration whose manifest names
+  none (M5a);
+  and the allowlisted, cached fetcher of `opsd.evidence`
+  (`www.home-assistant.io`, `api.github.com`, and `raw.githubusercontent.com`
+  for one candidate's manifest, M5d). Every fetched or local text
   is untrusted data: cleaned, length-capped, matched by name and never
   followed. Tests `test_the_inventory_reads_what_the_install_uses`,
   `test_dashboards_are_only_read_through_the_self_guard`.
@@ -186,6 +192,146 @@ maintenance composition in `opsd/items.py`, the
   `test_a_fork_whose_changes_core_took_over_is_not_needed`,
   `test_a_fork_far_from_every_release_is_not_judged`,
   `test_only_code_files_of_its_own_make_a_fork_needed`.
+- M5a. **Abandoned custom integrations.** The weekly check of M5 reads
+  each custom integration's repository once (`EvidenceSource.repository`:
+  `archived`, `pushed_at`, stars, open issues; the same cache and GitHub
+  backoff as before). A custom integration whose manifest names no
+  repository takes the one HACS installed it from: the single catalog
+  entry of category `integration`, marked installed, with its domain
+  (`repos_from_hacs`); it is kept with the repository facts (M5h) and the
+  catalog is read for it again only at the weekly checks or for an
+  integration not seen before. An integration in use is **abandoned** when its
+  repository is archived, or its last push is at least `ABANDONED_AFTER`
+  (365 days) old; the reason is daemon words: "its repository is archived"
+  or "no change since <YYYY-MM-DD>". The abandoned set is kept in
+  `maintenance:meta` (`abandoned`); a repository that could not be read
+  keeps its earlier entry (M6), one read as maintained drops it, and an
+  integration no longer installed drops it. Abandonment alone is no
+  finding and no item.
+- M5b. **Alternatives only when something is at stake.** An abandoned
+  integration is researched only when it is **at stake**: an open
+  deprecation for its domain names its removal version (a repair, a
+  release note or a Core log line, M3; with or without a deadline), or its
+  repository is archived (M5). The alternatives go on the one with a
+  deadline first, then the nearest removal. Otherwise nothing runs and nothing is shown (an abandoned
+  integration with nothing at stake is not the admin's problem yet); with
+  nothing abandoned, no catalog read and no fetch happen at all. Tests
+  `test_an_integration_that_is_not_abandoned_gets_no_alternatives`,
+  `test_an_abandoned_integration_with_nothing_at_stake_gets_no_alternatives`,
+  `test_a_log_finding_with_a_named_removal_puts_an_abandoned_integration_at_stake`,
+  `test_a_repository_hacs_installed_counts_when_the_manifest_names_none`.
+- M5c. **Candidates come from HACS's own catalog, local first.** The
+  daemon (never the AI) reads `.storage/hacs.repositories` in the HA
+  config, read-only, as it reads `.storage/core.config_entries` (K12a): a
+  regular file, never through a link, at most `CATALOG_MAX_BYTES` (32 MiB),
+  JSON of the expected shape, else no catalog (fails closed: no facts, no
+  problem, no item; `inventory.hacs_catalog`). A catalog entry is a
+  **candidate** when its category is `integration` (never a card, plugin,
+  theme or anything else), it is not the abandoned integration's own
+  repository, HACS does not flag it archived, and the **brand** appears as
+  a whole word in its repository name, manifest name, description or
+  topics (lower-cased, split on everything but letters and digits). The
+  brand is the first word of the abandoned integration's manifest name, or
+  else of its domain, that is at least 3 characters and not a generic word
+  (`home`, `assistant`, `integration`, `custom`, `local`, `cloud`, `api`,
+  `hacs`, ... `GENERIC_WORDS`). Ranking is deterministic: updated within
+  `RECENT` (180 days, HACS's `last_updated`) first, then more stars, then
+  an entry whose domain HACS knows, then the repository name. No open-web
+  search. Tests
+  `test_an_abandoned_integration_at_stake_gets_at_most_three_ranked_alternatives`,
+  `test_the_hacs_catalog_read_is_bounded_and_fails_closed`.
+- M5d. **Evidence per candidate.** In rank order, at most
+  `MAX_ALTERNATIVE_LOOKUPS` (5) candidates are asked about until
+  `MAX_ALTERNATIVES` (3) are kept: the GitHub repository answer of M5a
+  (one GitHub says is archived is dropped), and, when the catalog names its
+  domain, its manifest's `iot_class` from
+  `https://raw.githubusercontent.com/<repo>/HEAD/custom_components/<domain>/manifest.json`
+  (the raw host only, the hardened fetch: HTTPS, that exact host, no
+  redirect off it, at most `MANIFEST_MAX_BYTES` (64 KiB), the GitHub
+  backoff honoured). `local_*` reads "local", `cloud_*` "cloud", anything
+  else or no answer "unknown". While GitHub backs off nothing is fetched:
+  the candidates keep the catalog's facts and say "GitHub facts unknown".
+  Migration cost counts references to the abandoned integration's
+  **entity ids** (its entity-registry rows), never to its name
+  (`Inventory.entity_usage`): in the readable config the inventory reads
+  (M8: automations, scripts, scenes, `alerts/`, `templates/`,
+  `configuration.yaml`, a bridge or exposure YAML, and
+  `custom_templates/*.jinja`) and in every dashboard's config, read with
+  the same `lovelace/config` reads as the card types (the entity ids any
+  string of it names). It reads "<used> of <n> entities are used: <k>
+  config files (<names>), <m> dashboards (<names>), exposed to voice
+  assistants/HomeKit" (exposed: a referencing file has a `homekit`,
+  `alexa`, `google_assistant`, `include_entities` or `exclude_entities`
+  key), or "none of <n> entities is used in the config or dashboards
+  read"; names fenced, at most `MAX_NAMED` (4), the rest counted. A
+  source that could not be read is never 0: "references: unknown for
+  <dashboard x | dashboards | config files | file>". Then the domain: the
+  same domain keeps entity ids when the unique ids match, a different
+  domain gives every entity a new id and every reference must be updated,
+  an unknown domain may change them. The impact is composed again at
+  every scan, also for a kept research (M5f). Tests
+  `test_alternatives_respect_the_github_backoff`,
+  `test_the_migration_impact_counts_the_entities_that_are_referenced`,
+  `test_a_third_party_manifest_is_read_only_from_the_raw_host_within_its_cap`.
+- M5e. **Facts on the existing finding, never a new item.** The
+  alternatives are facts on the one finding that is at stake: the
+  deprecation with a named removal for that domain (a deadline first, then
+  the nearest removal), else its archived-repository finding. They are `detail.alternatives`, which is not
+  part of the fingerprint (M13): adding or refreshing them never reopens a
+  verdict, a plan or a hidden finding. The facts are daemon words from
+  data: **Abandoned** (the reason of M5a), then **Alternatives** (how
+  many, "from HACS's catalog naming <brand>, unvetted: any listed
+  repository can name a brand; check each one yourself before switching"),
+  then **Alternative 1..3** (repository, same or different domain, last
+  activity, stars, latest release when HACS knows it, local/cloud,
+  migration impact; one GitHub could not vouch for ranks after every one
+  it could and says "unverified: GitHub facts unknown, activity and stars
+  are the catalog's own"), or
+  **Alternatives** "none in HACS's catalog matched <brand>". A
+  candidate's description is repository text: fenced (angle brackets
+  neutralised) and cut at `ALTERNATIVE_TEXT` (160) characters, quoted as
+  "HACS lists it as: …"; topics are only matched, never shown. The
+  finding's Needs-you, push and update-rule behaviour is unchanged
+  (M11, M12, M20): alternatives never by themselves make anything ask or
+  push. Tests `test_untrusted_repository_text_is_fenced_and_capped`,
+  `test_alternatives_never_make_an_item_ask_or_push`,
+  `test_an_unreadable_or_absent_catalog_fails_closed`.
+- M5f. **Refreshed at most every 30 days.** The research of one
+  integration is kept in `evidence:alternatives:<domain>` with its
+  fingerprint (domain, repository, archived or not) and time; a scan
+  reuses it while it is younger than `ALTERNATIVES_REFRESH` (30 days) and
+  the fingerprint holds, or `PARTIAL_REFRESH` (1 day) when GitHub facts
+  were missing. The store's evidence retention (storage.md S7) prunes a
+  record not written for 30 days; a domain no longer abandoned has its
+  record blanked. Test `test_alternatives_are_refreshed_at_most_every_30_days`.
+- M5g. **Suggest only.** The agent never installs, removes or switches an
+  integration for this, never adds or removes a HACS repository, never
+  calls a HACS service or websocket command, and never proposes a config
+  change for it: no capability, websocket command, REST call or service
+  was added (selfguard.md G2, G5). Test
+  `test_alternatives_add_no_write_path_and_no_allowlisted_call`.
+- M5h. **Stale repository facts are read again.** The scan keeps each
+  custom integration's repository facts in `maintenance:meta` (`repos`:
+  repository, `archived`, `pushed_at`, stars, open issues; the facts of
+  M5a). A kept record this code cannot use (none kept, as an earlier
+  version's scan left it, another repository, or a field of
+  `evidence.REPO_FIELDS` missing) is stale: the next scan reads that
+  repository again, also when the weekly checks are not due, so
+  abandonment (M5a) never waits a week for an upgrade. A read that fails
+  is noted (`tried`) and retried after `REPO_RETRY` (1 day); the GitHub
+  backoff applies as always, and an earlier complete record is kept when a
+  read fails (M6). Likewise a cached repository answer of the fetcher
+  without a field the code needs is fetched again at once. Each scan logs
+  one info line for the alternatives stage, `maintenance alternatives`,
+  with `custom` (custom integrations with a repository), `no_repo` (those
+  without one, from the manifest or HACS), `checked`
+  (repositories read this scan), `abandoned`, `at_stake`, `candidates`,
+  `github_backoff` and `skipped`: "nothing abandoned", "GitHub backoff"
+  (nothing abandoned while GitHub backs off), "nothing at stake",
+  "catalog unreadable", or empty when it researched or reused alternatives.
+  Tests `test_repository_facts_an_older_version_kept_are_read_again`,
+  `test_a_cached_repository_answer_without_a_needed_field_is_fetched_again`,
+  `test_the_alternatives_stage_logs_one_line_per_scan`.
 - M6. **Missing evidence never resolves a finding.** When a signal could
   not be read in a scan (offline, refused, unrecognised, or the weekly
   checks not due), its earlier findings are kept unchanged. Test
@@ -226,7 +372,8 @@ maintenance composition in `opsd/items.py`, the
 - M10. Variants and their kicker: **Deprecation ahead** (what is affected,
   the removal version, the releases left, a plan), **Replacement candidate**
   (parity of entity platforms, entity-id impact, risk `low`/`medium`/`high`;
-  never automatic).
+  never automatic). A deprecation of an abandoned custom integration that
+  is at stake also lists its maintained alternatives (M5e).
 - M11. **Escalation: 30 days before the deadline.** A finding's deadline
   is the first day of the month of its removal release (`deadline`; Core
   minors ship in the first week of their month), and only a deprecation
@@ -461,10 +608,58 @@ maintenance composition in `opsd/items.py`, the
   facts list the notes and whose The agent says adds the finding's
   checked verdict, so the update's review and approval are where the
   admin sees them (items-and-pushes.md I19). Named removals with a
-  deadline (M4b, M11) keep their deadline-driven asking and M20. Tests
+  deadline (M4b, M11) keep their deadline-driven asking and M20. A
+  `needs_owner` shown there, and the isolated review's own `needs_owner`
+  on a notes-only hold (`core:<minor>`, updates.md U9a), passes the same
+  guard (M13g): an ungrounded one is `unknown`, so a wrong verdict never
+  becomes something the admin must do on the update. Tests
   `test_a_needs_owner_core_minor_stays_in_coming_up`,
   `test_a_core_minors_verdict_is_shown_on_its_core_update`,
-  `test_a_no_fix_needed_plan_never_lands_in_needs_you`.
+  `test_a_no_fix_needed_plan_never_lands_in_needs_you`,
+  `test_an_ungrounded_stored_verdict_never_reaches_the_core_update`,
+  `test_an_ungrounded_review_needs_owner_is_unknown`.
+- M13f. **Decidable from source: decided from source.** A breaking change
+  that concerns the configuration syntax or behaviour of a Core
+  integration is decided from Core's own source, not from the note's
+  wording: the plan run and Plan a fix are told to run `opsctl core-compare
+  <integration> --to <minor>` (capabilities.md K13: Core's integration at
+  the installed tag against the `.0` tag of the finding's minor, read by
+  the daemon), compare what the diff changes with the exact form the
+  config uses (file and line), decide on that and cite it in `evidence`.
+  A note's linked pull request is not fetched (no capability reads it);
+  the comparison is the evidence. The `maintenance_plan` profile has
+  `ha.core_compare` (3 per run) and `MAINTENANCE_PLAN_MAX_TURNS` (24)
+  turns. Test
+  `test_the_check_is_told_to_decide_from_source_and_has_what_it_needs`.
+- M13g. **Hedged is unknown; `needs_owner` is grounded** (`verdicts.grounded`,
+  for the causes `maint:` and `core:`, in parsing, `record` and `load`, so
+  also for a verdict an earlier version stored; the admin's reopen is
+  exempt). The prompts say that a hedged conclusion is `unknown`. In code,
+  with keyword checks only:
+  - `needs_owner` is `unknown` when its reason or owner action is hedged
+    ("probably", "likely", "unlikely", "guess", "perhaps", "possibly",
+    "presumably", "might", "maybe", lower-case "may", "not sure",
+    "unsure", "unclear", "confirm after", "check after"), when no
+    `evidence` entry names a concrete read (a config file with an
+    extension, with or without its line; `core-compare`; an `opsctl`
+    verb; "entity/entities" or "entry/entries"; or a bare entity id), or
+    when its owner action only offers to keep the configuration ("keep",
+    "keeping", "or leave", "leave it/them/this", "as is", "unchanged");
+  - a hedged `not_affected` without a concrete read is `unknown`.
+  A health verdict (triage) keeps its own rules. Tests
+  `test_an_ungrounded_needs_owner_is_unknown`,
+  `test_an_ungrounded_stored_verdict_never_reaches_the_core_update`.
+- M13h. **No escalation without new evidence.** When a check answers
+  `needs_owner` for a finding (or a Core minor's notes) whose verdict for
+  the same fingerprint is already a checked `not_affected` or an answered
+  `unknown` (with a reason, not a queued or failed check, not the admin's
+  reopen), the earlier verdict is kept (`verdicts.holds`), an `unknown`
+  counts one more try (so it is exhausted as M13d says), and the finding's
+  item history records both: "Check kept as <earlier> (<its reason>): a
+  later check said it needs you (<new reason>) without new evidence". A
+  changed fingerprint is a new question; after the admin's reopen a new
+  verdict is kept. Test
+  `test_a_contradicting_needs_owner_keeps_the_earlier_verdict`.
 - M14. Stored findings of the wrong shape (key not 16 hex characters,
   unknown variant) are dropped. Test
   `test_stored_findings_of_the_wrong_shape_are_dropped`.
@@ -489,9 +684,10 @@ maintenance composition in `opsd/items.py`, the
   `owner_action` (M13d; null unless `needs_owner`); an answer for
   a finding that was not asked about is dropped. Its
   capabilities are the read `ha.core_compare` (`opsctl core-compare
-  <domain> [--fork]`, [capabilities.md](capabilities.md) K13), which it
+  <domain> [--fork | --to <minor>]`, [capabilities.md](capabilities.md) K13), which it
   uses for a finding about a custom integration that shadows or forks a
-  Core one and cites as fact, and `fork.propose`
+  Core one and, with `--to`, for a breaking change it decides from Core's
+  source (M13f), and cites as fact, and `fork.propose`
   ([proposals.md](proposals.md) C11): a fork rebase the admin approves,
   only for a domain with a finding from a repair or the release notes
   (`AUTHORITATIVE`); the daemon refuses it for one known only from a log
@@ -514,7 +710,11 @@ maintenance composition in `opsd/items.py`, the
   and the agent has no capability that writes a dashboard
   ([selfguard.md](selfguard.md) G8).
 - M18. **Integration replacement** is always a plan the admin carries out;
-  the daemon never removes or adds an integration.
+  the daemon never removes or adds an integration, and never installs or
+  removes a HACS repository (M5g). A finding's alternatives (M5e) reach the
+  plan run inside its `<evidence>` block, as untrusted repository text
+  (the description fenced, at most 160 characters each, 900 in all); the
+  plan may compare them, and the admin decides.
 
 ## Cadence and the update rule
 

@@ -108,14 +108,17 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   is still read only with git on). Its assessment may carry `verdict`
   (`not_affected`, `fixable`, `needs_owner`, `unknown`) with its `reason`
   (and for `needs_owner` its `owner_action`, else it is kept as `unknown`,
-  maintenance.md M13d).
+  maintenance.md M13d) and `evidence` (what it read); a `needs_owner`
+  that is not grounded (maintenance.md M13g) is kept as `unknown` and
+  asked again the next night.
   `not_affected` is kept under `verdict:core:<target minor>` for the
   fingerprint of the notes that hold it (their kinds, domains and titles)
   and releases that hold: the candidate is AUTO again with its own reason
   (it still soaks), tonight and in every later plan until those notes
   change. Anything else keeps the hold. Tests
   `test_a_checked_notes_only_hold_is_released`,
-  `test_a_repair_or_removal_hold_is_never_released_by_a_verdict`.
+  `test_a_repair_or_removal_hold_is_never_released_by_a_verdict`,
+  `test_an_ungrounded_review_needs_owner_is_unknown`.
 - U10. With `updates.hold_if_unreviewed` (default true) a review that did not
   run (AI off, capped, failed, or `updates.review` false) holds every AUTO
   item that has no earlier assessment of that version; false installs them

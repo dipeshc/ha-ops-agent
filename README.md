@@ -52,7 +52,16 @@ plain, tested code for everything that acts.
   days before a named removal's deadline (the month its release ships), or
   when its check says only you can act; until then the item and its one-tap
   fix wait under *Coming up*, ready to apply. Replacement candidates wait
-  under *Suggestions*. With git on, a YAML migration is a one-tap
+  under *Suggestions*. When a custom integration you use is abandoned
+  (its repository is archived, or has had no change for a year) and
+  something is at stake (its repository is archived, or a deprecation that
+  names its removal version affects it), the agent looks in HACS's own catalog on your
+  install for up to three maintained alternatives and lists them as facts
+  on that item: the repository, whether it keeps the same domain (and so
+  the entity ids), last activity, stars, local or cloud when known, and
+  what a switch would touch here. It only suggests: it never installs,
+  removes or switches an integration or a HACS repository, and the
+  alternatives never make an item ask or push. With git on, a YAML migration is a one-tap
   proposal; a dashboard change is a plan step you make by hand (the agent
   never writes a dashboard). A Core update that would remove something you still use always
   asks.

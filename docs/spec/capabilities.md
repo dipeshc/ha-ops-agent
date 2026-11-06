@@ -166,6 +166,12 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
   `test_entry_settings_never_reveal_secrets`,
   `test_entry_settings_keep_allowed_choices`,
   `test_entries_answer_with_settings_and_fail_closed`.
+  The daemon reads one other `.storage` file the same way, read-only and
+  failing closed: HACS's catalog `.storage/hacs.repositories`, for the
+  alternatives of an abandoned custom integration
+  ([maintenance.md](maintenance.md) M5c). No capability reads it; the AI
+  sees only the daemon's facts about at most three candidates, with their
+  descriptions fenced and capped (M5e).
 - K13. **`ha.core_compare`** (verb `core-compare <domain>`, executor
   `opsd.coresource:cmd_core_compare`, validator
   `opsd.coresource:validate_compare`) compares a custom integration with
@@ -218,6 +224,19 @@ Implementation: `opsd/capabilities.py` (registry), `opsd/policy.py`
     numbered hunks (`<file>#<n>`, with their added and removed lines),
     fenced in `<fork-hunks>`: the ids `propose-rebase --keep` takes
     ([proposals.md](proposals.md) C11–C12).
+  - **`--to <minor>`** (`YYYY.M`, the only model input besides the
+    domain): Core's own `homeassistant/components/<domain>/` at the
+    installed tag against the `.0` tag of that minor, which must be after
+    the installed one and at most `MAX_MINORS_AHEAD` (12) minors ahead
+    (`target_tag`); refused before any network use otherwise, and with
+    `--fork`. No custom integration is needed. Both listings are read as
+    above; only files whose blob SHA differs between the two are fetched,
+    from both tags. The answer (`release_report`) has the same shape:
+    files in both (changed, identical), only in either tag, changed
+    lines, then the diffs (`core/<installed>/<file>` against
+    `core/<tag>/<file>`) fenced in `<core-compare-diff>` within the same
+    budget. Used to decide a breaking change from source
+    ([maintenance.md](maintenance.md) M13f).
   - **Answer.** A header with the Core version and the GitHub tree URL; a
     summary (files compared, changed and identical; files only in the
     custom integration; files only in Core; changed lines per file as

@@ -27,4 +27,9 @@ upgraded. 0.24.0 removes the `llm.provider` option (a saved value is
 ignored; the AI switch is the off switch) and reads `claude.plan: auto` as
 `pro`. See the CHANGELOG and the README's Upgrading section.
 
+Maintenance can list maintained alternatives for an abandoned custom
+integration that is at stake. They come from HACS's catalog on your install
+(read only) and GitHub's public repository facts; the agent never installs,
+removes or switches anything for this.
+
 Support: GitHub issues, best effort.

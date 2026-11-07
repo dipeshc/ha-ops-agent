@@ -178,9 +178,10 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
 ## Triage
 
 - H14. The AI runs only when warning or critical items remain after
-  suppression; info items (`git:`) and the vacuums overlay's room drift
+  suppression; info items (`git:`), the vacuums overlay's room drift
   (pushed by the item book, [items-and-pushes.md](items-and-pushes.md) I10)
-  never start a run and are not in its prompt. No such items: the baseline
+  and Core-log errors with no observable effect (H16b) never start a run
+  and are not in its prompt. No such items: the baseline
   advances, the open items are saved, the result is "No changes since
   baseline." (or the drift's summary), no push. Tests
   `test_first_run_seeds_and_notifies_once`,
@@ -204,27 +205,96 @@ Keys are stable so acks survive (`entities:<platform>`, `custom:<domain>`,
   investigated, `{key, verdict: not_affected|fixed|needs_owner, reason}`
   (at most 40, only keys handed to the run, the reason cleaned and cut at
   300 characters), and for `needs_owner` an `owner_action` (what the
-  admin must do or decide, maintenance.md M13d); a `needs_owner` without a
-  usable one is dropped (no verdict). The daemon keeps each one under
-  `verdict:health:<key>` for that item's current summary (`opsd.verdicts`).
-  `needs_owner` keeps the item in Needs you with the reason under The
-  agent says and the owner action quoted in the need, and the item
-  book pushes it ([items-and-pushes.md](items-and-pushes.md) N1, the digest
-  unless time-sensitive); the run does not
-  push it. For `not_affected` and `fixed` the daemon snoozes the item for
-  at most 7 days (`WARNING_SNOOZE_MAX_DAYS`) with the reason (H13a); never
-  a critical item, `access:`, `assist:`, `core:down` or `custom:` (the
-  verdict guards, [maintenance.md](maintenance.md) M13d), which stay with
-  the admin. Without a verdict the item stays as the check raised it. Tests
+  admin must do or decide, maintenance.md M13d). The daemon parses it
+  strictly (`verdicts.answer(strict=True)`) with the run's own reads as
+  the evidence: the sources of the run's audit rows (the daemon's record of
+  the read capabilities that ran, `conversation.sources_of`, never the
+  model's list). So a health verdict is grounded like a maintenance one
+  ([maintenance.md](maintenance.md) M13g, cause `health:` in
+  `GROUNDED_CAUSES`): a `needs_owner` that is hedged, has no concrete read
+  among the run's reads, or whose owner action is missing, names nothing
+  or only keeps things as they are, and a hedged `not_affected` without a
+  concrete read, are no verdict. The daemon keeps each verdict under
+  `verdict:health:<key>` for that item's current summary
+  (`opsd.verdicts`), and an item handed to the run that got no usable
+  verdict is counted as unanswered (`verdicts.no_answer`, with the run's
+  own reason when the run could not finish: AI off, capped, usage limit,
+  failed). Triage can only close, quiet or hand over:
+  - `not_affected` and `fixed`: the daemon snoozes the item for at most 7
+    days (`WARNING_SNOOZE_MAX_DAYS`) with the reason (H13a); never a
+    critical item, `access:`, `assist:`, `core:down` or `custom:` (the
+    verdict guards, [maintenance.md](maintenance.md) M13d), which stay
+    with the admin;
+  - a grounded `needs_owner`: the item asks as `grounded_needs_owner`
+    ([items-and-pushes.md](items-and-pushes.md) I22) with the reason
+    under The agent says and the owner action quoted in the need; the
+    item book pushes it in the digest (N1), the run does not push it;
+  - no verdict, `unknown`, a dropped or rejected answer, a run that could
+    not run or finish: nothing changes. The item stays in Coming up,
+    "could not decide: <why> (next try <when>)", and the next daily check
+    looks at it again. A missing triage answer is never a reason to ask.
+  Tests
   `test_a_triage_verdict_anchors_the_reason_on_its_item`,
   `test_a_not_affected_verdict_snoozes_a_warning_for_at_most_a_week`,
-  `test_non_urgent_claude_push_does_not_suppress_critical`.
+  `test_non_urgent_claude_push_does_not_suppress_critical`,
+  `test_triage_needs_owner_is_grounded_by_the_runs_own_reads`.
+- H16b. **No observable effect: noise, without AI.** Every log item
+  (`log:<fp>`, `log:<fp>:growth`) carries the effect check, computed by
+  the daemon from the same snapshot and baseline (`baseline.log_effect`):
+  the integration that logged it (`homeassistant.components.<x>` or
+  `custom_components.<x>`, or a library logger whose top-level package is
+  a platform with entities here; otherwise none is named and the whole
+  house is checked), the entities of that integration (or any) that are
+  down now and were neither in the baseline nor expected unavailable
+  (H11a), its config entries (or
+  any) newly failed, and new ERROR lines from automations or scripts. With
+  none of them the item is "no observable effect": it is never triaged,
+  never asks and never pushes; it is shown in Coming up as a quiet fact
+  ("no observable effect; seen <n> times; checked again at each daily
+  check"), and the next check evaluates it again. With an effect it is
+  triaged as usual, and the effect is a fact on it ("Effect: 3 entities
+  unavailable since the baseline: …"). Tests
+  `test_a_library_error_with_its_devices_off_is_noise`,
+  `test_lock_timeouts_with_the_locks_available_are_noise`,
+  `test_an_error_with_an_effect_is_triaged`.
+- H16c. **Stuck and physical.** A warning item that stays open, still
+  reported, with no settled verdict, asks as `stuck` once `STUCK_DAYS` (7)
+  have passed since it opened (`source.open_since`, kept while the item
+  stays open), or once its own watch window (`needs_after`, `remote:down`
+  six hours) has passed; until then its gist says the day it would ask,
+  and `source.recheck_at` moves it then. An info item, a log item with no
+  observable effect and an item snoozed for a verdict are never stuck. A
+  warning `repair:` or `entry:` item whose repair issue id or translation
+  key, or whose config entry's reason, names re-authentication or
+  re-pairing (`reauth`, `authenticat…`, `re-pair`, `pairing`, `unpaired`; never the word "repair" itself), and
+  `power:undervoltage` (the host's own under-voltage sensor: the power
+  supply), ask at once as `physical`: Home Assistant itself says only the
+  admin can do it, in a vendor app or by hand. Tests
+  `test_an_undecided_warning_asks_only_once_it_is_stuck`,
+  `test_a_reauth_repair_asks_as_physical`.
+- H16d. **A failed entry is reloaded before it asks.** Before triage, in
+  act mode, the daemon reloads each integration with a failed config entry
+  (`entry:` in `setup_error`, `setup_retry`, `migration_error` or
+  `failed_unload`) once, through the same reload as the agent's
+  `integration.reload` ([reload.md](reload.md) L1-L5: the allowlist, the
+  never-list, the live checks, the 10-minute rate and the daily quota,
+  audited with principal `daemon`, channel `health`). An integration that
+  came back (every entry `loaded`, nothing lost) leaves this check's items,
+  with its `custom:` item, and a quiet History line says "Reloaded
+  <domain> before asking: it came back". Any other outcome (not
+  permitted, refused, observe mode, did not help) is recorded on its items
+  (`detail.tried`), shown to triage (which does not reload it again) and in
+  the need's `tried` if it asks
+  ([items-and-pushes.md](items-and-pushes.md) I22a). Test
+  `test_a_reloadable_entry_in_setup_retry_is_reloaded_before_any_ask`.
 - H17. **Safety net.** Whatever the AI did or whether it ran: any critical
-  item sends an urgent safety-class push (tag `ha-ops-fallback`); when
-  triage did not run, warnings send one non-urgent push; info-only sends
-  nothing; quietly waiting items are excluded. A preflight refusal (invalid
-  options, no token, no store, AI off, low memory) makes the
-  cycle result that status and the fallback applies. Tests
+  item sends an urgent safety-class push (tag `ha-ops-fallback`), and its
+  item asks as `critical`. A warning is never pushed for a triage that did
+  not run or gave no verdict (unknown never asks,
+  [items-and-pushes.md](items-and-pushes.md) I22): it waits in Coming up
+  for the next check, and asks only as `stuck` after 7 days. A preflight
+  refusal (invalid options, no token, no store, AI off, low memory) makes
+  the cycle result that status; the critical push still applies. Tests
   `test_silent_claude_on_critical_item_still_alerts`,
   `test_without_token_sends_deterministic_fallback`.
 - H18. Each cycle is recorded in `history.jsonl`, `state.json`, the status

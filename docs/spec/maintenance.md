@@ -374,12 +374,14 @@ maintenance composition in `opsd/items.py`, the
   (parity of entity platforms, entity-id impact, risk `low`/`medium`/`high`;
   never automatic). A deprecation of an abandoned custom integration that
   is at stake also lists its maintained alternatives (M5e).
-- M11. **Escalation: 30 days before the deadline.** A finding's deadline
+- M11. **Escalation: 30 days before the deadline.** A finding asks only
+  through the one escalation gate ([items-and-pushes.md](items-and-pushes.md)
+  I22): as `deadline` (below) or as `grounded_needs_owner` (M13d). A finding's deadline
   is the first day of the month of its removal release (`deadline`; Core
   minors ship in the first week of their month), and only a deprecation
   from a repair with a removal version, or a named removal of the release
   notes (M4b), has one. Such
-  a deprecation is in Needs you, with an `ack`, only from `ASK_BEFORE` (30
+  a deprecation is in Needs you, with an `ack` (`deadline`), only from `ASK_BEFORE` (30
   days) before its deadline, or once its removal is installed, and only
   when nothing else answers it (no proposal that is open or applying, not
   hidden). Until then it
@@ -388,7 +390,8 @@ maintenance composition in `opsd/items.py`, the
   log line, an archived repository, a deprecation without a removal
   version, a replacement candidate) never enters Needs you,
   except a repair or release-notes finding the agent's check says needs the
-  admin, naming what the admin must do (M13d); never a Core-minor finding
+  admin, naming what the admin must do, with a grounded verdict (M13d,
+  M13g: `grounded_needs_owner`); never a Core-minor finding
   (M13e). A verdict decides only within these bounds (M13d). Its
   `ack` (OK) hides it until one release closer (the ack token holds the releases
   left). Releases left count minors across years and are 0 once the
@@ -558,18 +561,24 @@ maintenance composition in `opsd/items.py`, the
     `test_a_not_affected_verdict_closes_a_finding_whose_plan_waits`); in History with the reason under The agent says and a
     **Reopen** action (`reopen`: the admin's own verdict, the finding
     behaves as without a verdict until its fingerprint changes);
-  - `needs_owner`: it asks as M11 says (a finding without a deadline asks
-    now, except a Core-minor finding, M13e), with the agent's reason under
+  - `needs_owner` (grounded, M13g): it asks as M11 says (a finding without
+    a deadline asks now as `grounded_needs_owner`, except a Core-minor
+    finding, M13e), with the agent's reason under
     The agent says. The need is daemon words around the owner action,
     which is redacted, fenced (angle brackets neutralised, cut at 160
     characters) and quoted as the agent's words: 'The agent says you need
     to: "<owner action>". Its reasons are under The agent says. OK hides
     this until its evidence changes.';
-  - `fixable`: the proposal path (M16); without a proposal it behaves
-    as without a verdict;
+  - `fixable`: the proposal path (M16), which asks only as the
+    proposal's `approval` once the finding may ask (M11a), never as
+    `needs_owner` (the self-resolve ladder, items-and-pushes.md I22a);
+    without a proposal it behaves as without a verdict;
   - `unknown`, a check that failed (AI off, capped, failed run), or no
-    answer for the finding in two runs: it behaves as without verdicts
-    (fail safe).
+    answer for the finding in two runs: it never asks on that account
+    (unknown never asks, items-and-pushes.md I22). It stays in Coming up
+    with its state ("checking whether it affects this install: …"); a
+    finding with a deadline still asks as `deadline` once M11 says so,
+    because its deadline, not the missing verdict, is the reason.
   - A check that could not run keeps the run's own reason on its verdict
     (`why`, `detail`) and the finding's gist says so in daemon words,
     composed when shown: "checking whether it affects this install: the
@@ -646,7 +655,9 @@ maintenance composition in `opsd/items.py`, the
     when its owner action only offers to keep the configuration ("keep",
     "keeping", "or leave", "leave it/them/this", "as is", "unchanged");
   - a hedged `not_affected` without a concrete read is `unknown`.
-  A health verdict (triage) keeps its own rules. Tests
+  A health verdict (triage, cause `health:`) is grounded the same way, with
+  the triage run's own reads as its evidence ([health.md](health.md) H16a).
+  Tests
   `test_an_ungrounded_needs_owner_is_unknown`,
   `test_an_ungrounded_stored_verdict_never_reaches_the_core_update`.
 - M13h. **No escalation without new evidence.** When a check answers

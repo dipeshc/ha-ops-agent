@@ -5,10 +5,11 @@ history. The daemon writes each item from its own records at the moment the
 record changes; the panel never infers state. The wire shape is in
 [panel.md](panel.md).
 
-Implementation: `opsd/items.py` (`ItemBook`, `Composer`), the transaction
-observer in `opsd/store.py`, `opsd/activity.py`, `opsd/notify.py`,
+Implementation: `opsd/items.py` (`ItemBook`, `Composer`), the escalation
+gate `opsd/escalation.py` (I22), the transaction observer in
+`opsd/store.py`, `opsd/activity.py`, `opsd/notify.py`,
 `opsd/channels.py`, `opsd/quiet.py`, `opsd/live.py`.
-Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
+Tests: `tests/test_items.py`, `tests/test_escalation.py`, `tests/test_needs_and_watches.py`,
 `tests/test_notify_triage.py`, `tests/test_quiet.py`, `tests/test_chat_ux.py`.
 
 ## Vocabulary
@@ -18,12 +19,15 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `window`, `maintenance`. States: `proposed`,
   `waiting`, `scheduled`, `running`, `done`, `failed`, `cancelled`,
   `expired`; the last four are terminal.
-- I2. Need kinds: `approval` and `ack`. Actors: `you`,
+- I2. Need kinds: `approval` and `ack`. Every need also carries `why`, one
+  reason of the closed list in I22, and `because`, the daemon's words for
+  it. Actors: `you`,
   `daemon`, `agent`. Action ids match `[a-z_]{1,32}`; item ids match
   `[a-z]-[0-9a-z]{1,40}`.
 - I3. **Needs you** is exactly `state == waiting`, or `failed` with a need.
   The store enforces it: `need` is non-null iff `waiting`, or the state is
   `failed`. Test `test_the_store_refuses_a_waiting_item_without_a_need`.
+  What may have a need is decided by one gate only (I22).
 - I4. Keys and ids: keys are `updates:<entity>@<version>`, `window:<run>`,
   `change:<id>`, `fact:<id>`, `task:<id>`, `health:<key>`, `maint:<finding>`,
   `activity:<id>`, `fork:<proposal>`, and `ask:<token>` (a
@@ -163,15 +167,32 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   agent's store, not proposed as a change"), never in Needs you; its later
   decision still resolves it (I5a). Task items are
   `scheduled` (investigations `running`) with `cancel` or `stop`. Health
-  items are `waiting` with an `ack` (`snooze` 7 days, `accept` 30 days),
-  urgent when critical, and not pushed by the item book (the health check
-  pushes its own, H17), except a triage `needs_owner` warning (below) and
-  the vacuums overlay's room drift, which the item book pushes on its own
-  (`push_now`, push title "Ops Agent: vacuum rooms changed", the drift as
-  its gist; triage never sees it). A health item whose `needs_after` is in
-  the future, or whose severity is `info`, is `proposed` without a need
-  (with `snooze` and `accept` as actions). Test
-  `test_an_info_health_item_is_shown_and_never_asks`. A health item acked
+  items carry `snooze` (7 days) and `accept` (30 days) and are not pushed
+  by the item book (the health check pushes its own critical items, H17),
+  except what asks as `grounded_needs_owner`, `stuck` or `physical`, which
+  goes out as N1 says. A health item asks only for a reason of I22:
+  - critical: `waiting` with an urgent `ack` (`critical`), whatever any
+    verdict says; a grounded `needs_owner` only adds its owner action to
+    the need text;
+  - a warning with a `needs_owner` verdict that is grounded (H16a): `waiting`
+    with an `ack` quoting the owner action (`grounded_needs_owner`);
+  - a warning HA itself says needs hands (H16c), or the vacuums overlay's
+    room drift: `waiting` with an `ack` (`physical`); the drift is pushed
+    on its own (`push_now`, push title "Ops Agent: vacuum rooms changed",
+    the drift as its gist; triage never sees it);
+  - a warning still reported and undecided `STUCK_DAYS` (7) after it
+    opened, or past its own watch window (`needs_after`): `waiting` with an
+    `ack` (`stuck`), its text saying how long it has been undecided and why;
+  - every other warning (no verdict, `unknown`, a check that could not run,
+    an ungrounded or hedged answer): `proposed` in Coming up, never a need,
+    its gist the state in daemon words ("could not decide: <why> (next try
+    <when>)", "watching; asks you if it lasts past <time>") and, while it
+    is open, the day it would become `stuck`;
+  - a Core-log error with no observable effect (H16b): `proposed`, "no
+    observable effect", a quiet fact with its count; never triaged;
+  - info: `proposed` without a need. Test
+    `test_an_info_health_item_is_shown_and_never_asks`.
+  A health item acked
   since the check ran (a baseline ack, which keeps the item it acked: by
   the daemon for a triage verdict, or by the admin) is `done` without a
   need, actor `agent` or `you`, with a gist that says who acked it, until
@@ -180,12 +201,11 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   carries follows that finding (no need, "tracked on its maintenance
   item"); a `backup:run_failed` item follows the failed backup's own item
   while that one asks. A triage verdict ([health.md](health.md) H16a) puts
-  the agent's reason under The agent says: `needs_owner` with its owner
-  action keeps the item in Needs you, the need quoting that action
-  (H16a), and lets the item book push it (N1); without a usable owner
-  action it is no verdict; `not_affected` or `fixed`
+  the agent's reason under The agent says; `not_affected` or `fixed`
   on an item that is not guarded snoozes it for at most 7 days (H16a), so
-  it shows resolved by the agent. Tests `test_health_items_wait_and_clear`,
+  it shows resolved by the agent. Every log-derived item carries the
+  effect check as a fact ("Effect: none observed", "Effect: 3 entities
+  unavailable since the baseline: …", H16b). Tests `test_health_items_wait_and_clear`,
   `test_a_deprecation_repair_is_one_item`,
   `test_a_triage_verdict_anchors_the_reason_on_its_item`,
   `test_the_items_engine_asks_only_once_remote_access_stays_down`,
@@ -220,7 +240,9 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   `activity:<n>` items, whose push is decided at the write like any other's. Quiet kinds
   (`check`, `suppressed`, `updates`, `reminder`, `investigation`, `note`)
   fold in History and never show on Home unless they need the admin; an
-  entry that needs the admin becomes `waiting` with an `ack`. No entry
+  entry that needs the admin is a failure of something the daemon did (a
+  backup, a reload) and becomes `failed` (or `waiting`) with an `ack`
+  (`failed`, I22). No entry
   posts into a conversation: the agent's own notes are items and History
   entries only. A config change's outcome is an event on its item. Tests `test_activity_entries_become_items_and_events`,
   `test_a_standalone_entry_is_pushed_when_it_is_written`. A failed backup's
@@ -294,32 +316,98 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
 
 ## The Needs-you rule
 
-- I22. **The Needs-you rule.** Needs you holds only what cannot happen or
-  be resolved without the admin: an approval only the admin can give, a
-  physical task, a decision, or a failure the agent cannot recover from by
-  itself. Everything else is Coming up, History or the agent's own
-  handling. The paths that set a need:
+- I22. **One escalation gate: unknown never asks.** Needs you holds only
+  what cannot happen or be resolved without the admin, and only for one
+  reason of a closed list (`escalation.Why`). A need is made only by
+  `escalation.need(why, …)`, and one function decides whether a record may
+  be in Needs you: `escalation.gate(state, need)`. The item book applies it
+  to every item it composes and the store applies it again to every record
+  it writes (`Store.put_item`), so nothing reaches Needs you without a
+  reason from the list, whatever composed it: a `waiting` record without
+  one is written `proposed` without its need, a `failed` one without its
+  need, and the daemon logs "need refused by the escalation gate" with
+  the item key. At start the book recomposes every source (health
+  included) and passes every stored record in Needs you through the gate
+  again (a stored `activity:` entry that needs the admin is `failed`).
+  The list:
 
-  | Source | Need | In Needs you when |
+  | `why` | Asks you because | Only from |
   | --- | --- | --- |
-  | Update to approve (I6) | `approval` | APPROVE tier, not soaking and not in the soak-unknown hold ([updates.md](updates.md) U5, U5a) |
-  | Update installed, reboot pending (I6) | `approval` | always (the host reboot is the admin's) |
-  | Update job failed (I6) | `ack` | rolled back, rollback failed, OS fallback, or a failed install nothing retries by itself (approved, no longer offered, gate off or paused, failed while verifying or in an unknown state, or the entity's second failure in 14 days) |
-  | Update night (I8) | `ack` | a failure before the install that repeats until fixed, or a whole-night regression (updates paused) |
-  | Config change (I9) | `approval` / `ack` | open and complete, except a maintenance fix before its finding may ask ([maintenance.md](maintenance.md) M11a); a failure that may be half applied |
-  | Maintenance finding (I19) | `ack` / `approval` | within 30 days of its deadline and not checked "not affected", or a `needs_owner` verdict with an owner action, never a Core-minor finding ([maintenance.md](maintenance.md) M11, M13d, M13e) |
-  | Health item (I10) | `ack` | warning or critical, not snoozed for a triage verdict, not following another item, and not waiting quietly |
-  | Activity entry (I16) | `ack` | a failed backup (self-heal or Back up now) that no later backup has superseded |
+  | `critical` | the safety net found something critical | a critical health item ([health.md](health.md) H9: Core down, config invalid, access hardware exposed or down, a broken custom integration, low memory, an OOM kill, no current backup, a critical repair); never AI-gated, never closed by a verdict |
+  | `approval` | it needs your approval | an update to approve (I6: APPROVE tier, not soaking, not in the soak-unknown hold, [updates.md](updates.md) U5, U5a), a reboot pending (I6), a complete open config change (I9, a maintenance fix only once its finding may ask, [maintenance.md](maintenance.md) M11a), a fork rebase in act mode (I21); bound to the action, with its expiry |
+  | `deadline` | its removal deadline is close | a maintenance deprecation within `ASK_BEFORE` (30 days) of its named removal, or with the removal installed, not checked "not affected" ([maintenance.md](maintenance.md) M11) |
+  | `grounded_needs_owner` | the agent checked it and found something you must do | a `needs_owner` verdict that passed `verdicts.grounded` (an unhedged reason and owner action, a concrete read among its evidence, an owner action that does more than keep things as they are), on a warning health item (H16a) or a maintenance finding without a deadline ([maintenance.md](maintenance.md) M13d), never a Core-minor finding (M13e); its need quotes the owner action. The only way in for model text |
+  | `stuck` | it has stayed undecided for 7 days | a warning health item still reported with no settled verdict `STUCK_DAYS` (7) after it opened, or past its own watch window (`needs_after`, [health.md](health.md) H16c); never an info item |
+  | `physical` | only you can do this, by hand | a warning health item that Home Assistant itself says needs hands (a repair or a failed config entry whose issue id, translation key or reason names re-authentication or re-pairing, or the host's under-voltage sensor, [health.md](health.md) H16c), or the vacuums overlay's room drift (I10) |
+  | `failed` | something the daemon did failed and nothing retries it | an update whose rollback failed, an OS update not activated after its reboot, a failed install nothing retries (I6); a night aborted by a failure that repeats, or a whole-night regression (I8); a change that may be half applied (I9); a fork rebase that did not stay (I21); a failed backup or reload (I16) |
 
-  Never in Needs you: soaking updates, updates without a known release
+  Not on the list, so never in Needs you: no verdict, a verdict
+  `unknown`, a check that could not run (AI off, capped, quota out, a
+  failed run), an answer the daemon rejected or dropped, an ungrounded or
+  hedged `needs_owner`, soaking updates, updates without a known release
   age (until U5a asks), an update failure the next window retries by
   itself, a skipped approved update no longer offered, a config change
-  that failed and was cleanly undone or cannot be shown in full, a maintenance fix before its 30 days, a
-  finding without a deadline (unless checked `needs_owner` with an owner action), a finding the agent checked
-  "not affected", a `needs_owner` verdict without an owner action, a
-  release-note breaking change without a named removal (a Core-minor finding, whatever its verdict), a
-  noted fact, info health items, items snoozed for a triage verdict, and
-  the agent's own notes and messages.
+  that failed and was cleanly undone or cannot be shown in full, a
+  maintenance fix before its finding may ask, a finding without a deadline
+  (unless `grounded_needs_owner`), a finding checked "not affected", a
+  Core-minor finding (whatever its verdict), a noted fact, information,
+  questions, investigations, reminders and the agent's own notes and
+  messages. Such an item stays in Coming up (or History) with its state in
+  daemon words ("checking whether it affects this install", "could not
+  decide: <why> (next try <when>)") and the daily cycle checks it again.
+  No capability, chat card, overlay hook or agent run sets a need: the
+  composers do, through `escalation.need`, and the gate admits it.
+
+  Every need carries `why`, `because` and `tried` (I22a); the panel shows
+  "Asks you because: <because>. Tried: <tried>." above its text, so any
+  escape is diagnosable at a glance. Tests
+  `test_the_store_refuses_a_need_without_a_reason`,
+  `test_no_need_is_made_outside_the_gate` (every call site that makes a
+  need, with its reason, is listed: a new one fails until it is), the
+  exhaustive path audit
+  `test_every_composed_health_need_names_a_reason_from_the_list`,
+  `test_every_composed_maintenance_need_names_a_reason_from_the_list`,
+  `test_every_composed_update_need_names_a_reason_from_the_list` and
+  `test_every_composed_change_fork_window_and_entry_need_names_a_reason_from_the_list`
+  (every composer over the product of its kinds, severities, verdict
+  states, deadline states and ages; each item in Needs you is checked
+  against the one reason it must give, and the gate must refuse nothing),
+  `test_each_reason_on_the_list_asks`, and the regression corpus in
+  `tests/test_escalation.py` (the incidents of 2026-11-04 to 2026-11-07,
+  each with Needs you empty).
+
+- I22a. **The self-resolve ladder.** Before an item may ask for any
+  reason but `critical` and `approval`, the agent climbs one ladder, and
+  the need records each rung as it went (`need.tried`, daemon words, at
+  most 8, e.g. "reload example_hub: refused (… cannot be unloaded …)",
+  "effect check: none observed", "check: not decided"). The gate refuses a
+  `deadline`, `grounded_needs_owner`, `stuck`, `physical` or `failed` need
+  without it, exactly like one without a reason. The rungs, in order:
+  1. deterministic checks: configured here (maintenance.md M4a, M13),
+     the effect check ([health.md](health.md) H16b), a real deadline
+     (maintenance.md M11), a reading held over two checks (H16c);
+  2. the daemon's own permitted repairs where they apply to the item's
+     kind: a failed config entry's integration is reloaded once before
+     anything about it may ask (H16d, within the reload allowlist,
+     never-list, rate and quota of [reload.md](reload.md)), a finding is
+     settled after a fix (maintenance.md M13c), stale evidence is read
+     again (M5h); an entry that came back leaves the check;
+  3. a grounded verdict of the agent's check (H16a, maintenance.md M13g);
+  4. a `fixable` verdict whose fix is within the proposal rules becomes a
+     proposal, which asks only as `approval` once its finding may ask
+     (maintenance.md M11a, M16), never as `grounded_needs_owner`; a finding
+     with an open or applying proposal never asks on its own;
+  5. only then `grounded_needs_owner` or `stuck`.
+  The exceptions stay deterministic: `critical` asks at once (after the
+  daemon's permitted reload of a stuck entry, whose outcome its need also
+  records), `approval` is the prepared action waiting only for the yes,
+  `physical` verifies its reading (two checks in a row for a reading,
+  Home Assistant's own repair or entry state otherwise) and then asks, and
+  `failed` records what the daemon attempted (the install, the rollback,
+  the restore, the backup). Tests
+  `test_a_fixable_finding_never_produces_needs_owner`,
+  `test_a_reloadable_entry_in_setup_retry_is_reloaded_before_any_ask`,
+  `test_every_needs_you_item_but_critical_and_approval_says_what_was_tried`.
 
 - I23. **Every item shown is actionable** ([panel.md](panel.md) N13):
   every item in Needs you, In progress, Coming up or Suggestions has a
@@ -363,7 +451,8 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   it once. A push or digest the daily budget refuses (`rate_limited`) is
   recorded once and tried again when the budget renews (the next UTC day),
   never every cycle; any other failed delivery is retried after 15 minutes.
-  A triage `needs_owner` warning is not time-sensitive: it goes out in the
+  A `grounded_needs_owner`, `stuck` or `physical` health item is not
+  time-sensitive (except the vacuums drift, `push_now`): it goes out in the
   digest. Test
   `test_a_rate_limited_need_waits_for_the_next_budget_not_every_cycle`.
 - N1b. **Withdrawn when resolved.** When an item whose push was delivered
@@ -380,8 +469,8 @@ Tests: `tests/test_items.py`, `tests/test_needs_and_watches.py`,
   (recorded with the action id, [chat.md](chat.md) T14a); nothing executes
   from a push. Test `test_approvals_ask_once_with_a_link_to_the_panel`.
 - N3. **Other push triggers.** The baseline seed ("the agent is watching"),
-  a critical health result (deterministic, urgent, whatever the AI said), a
-  warning summary when triage is unavailable, Core down (after 5 minutes;
+  a critical health result (deterministic, urgent, whatever the AI said;
+  a warning is never pushed for a triage that could not run, I22), Core down (after 5 minutes;
   20 in the update window; 45 while Supervisor jobs are busy; sent through
   the relay) and "Core is back" when the down
   push went out, a degraded store, kill-switch and usage notices (once per

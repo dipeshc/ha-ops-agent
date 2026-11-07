@@ -86,6 +86,35 @@ update window), when Home Assistant is down, or when you asked for it; any
 other new item in *Needs you* reaches you in at most one digest push a day.
 A push is withdrawn from your phone once its item no longer needs you.
 
+### What reaches you, and why
+
+Something enters *Needs you* for one of seven reasons, and the item says
+which ("Asks you because: …"):
+
+- **critical**: the health check found something critical (Core down, an
+  invalid config, a lock, alarm or garage door exposed or unavailable, a
+  broken custom integration, no current backup). Always, whatever the AI
+  said.
+- **approval**: an update, a reboot, a config change or a fork rebase only
+  you can approve.
+- **deadline**: something you use is removed within 30 days.
+- **grounded_needs_owner**: the agent checked it, read the evidence and
+  found something only you can do; the item says what.
+- **stuck**: a warning has stayed undecided for 7 days and is still there.
+- **physical**: Home Assistant says it needs you by hand (re-authenticate,
+  re-pair).
+- **failed**: something the agent did failed and nothing retries it.
+
+Nothing else asks, and before anything but a critical result or an approval
+asks, the agent first tries to settle it itself: the deterministic checks,
+its own permitted repairs (it reloads a failed integration it is allowed to
+reload), its check of the evidence, and a one-tap fix when one is possible.
+The item lists what it tried ("Tried: …"). When the agent could not decide (AI off, its daily
+allowance used, no clear answer), the item waits under *Coming up* with the
+reason and the next try, and the daily check looks at it again. A Core-log
+error with no observable effect (its integration's devices and entries are
+fine and no automation failed) is noted quietly, without the AI.
+
 <img src="docs/images/panel-phone-dark.png" width="300" alt="A question on a phone, in the dark theme: its answer and the box for a follow-up.">
 
 The screenshots show sample data.

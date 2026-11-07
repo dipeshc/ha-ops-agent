@@ -75,7 +75,9 @@ the `integration.reload` row in `opsd/capabilities.py`. Tests:
   `test_deadline_reports_a_partial_reload`.
 - L6. **Mode and origin.** In `observe` mode the request is report-only and
   nothing is posted. Only the `triage`, `chat` and `investigate` profiles
-  carry the capability; the chat origin may reload because RELOAD is in the
+  carry the capability, and the daemon itself reloads a failed entry's
+  integration before it may ask ([health.md](health.md) H16d) under the
+  same checks, rate and daily quota; the chat origin may reload because RELOAD is in the
   chat effect set. Tests `test_act_mode_executes_observe_mode_only_reports`,
   `test_socket_observe_mode_reports_only`, `test_profiles`,
   `test_socket_chat_run_may_reload`.

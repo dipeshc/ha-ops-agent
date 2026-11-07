@@ -32,4 +32,11 @@ integration that is at stake. They come from HACS's catalog on your install
 (read only) and GitHub's public repository facts; the agent never installs,
 removes or switches anything for this.
 
+What reaches *Needs you*: only a critical health result, an approval, a
+removal deadline within 30 days, a grounded finding of the agent naming
+what you must do, a warning undecided for 7 days, something Home Assistant
+says needs you by hand, or a failure nothing retries. Each item says why.
+When the agent could not decide, the item waits under *Coming up* and is
+checked again the next day; it never asks on that account.
+
 Support: GitHub issues, best effort.

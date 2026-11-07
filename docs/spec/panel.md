@@ -107,6 +107,8 @@ The record behind Home, History and the item page
 
   "need": {                           // non-null only while the item is in Needs you
     "kind": "approval",               // approval | ack
+    "why": "approval",                // the one reason (items-and-pushes.md I22): critical | approval | deadline | grounded_needs_owner | stuck | physical | failed
+    "because": "it needs your approval",  // the daemon's words for `why`; the panel shows "Asks you because: <because>"
     "text": "17.1 is installed and waiting for one reboot. …",  // what happens, when, cost, what cannot be undone
     "primary": { "id": "reboot_window", "label": "Reboot tonight at 04:00" },
     "secondary": [ { "id": "reject", "label": "Reject", "style": "text" } ],
@@ -135,7 +137,10 @@ The record behind Home, History and the item page
   above; any other value is a bug.
 - N11. **Needs you** is exactly `state == waiting`, or `failed` with
   `need.kind == "ack"`; `need` is non-null exactly then. The daemon
-  decides; the panel never counts or infers it. "Installed, reboot pending"
+  decides, through its one escalation gate
+  ([items-and-pushes.md](items-and-pushes.md) I22); the panel never counts
+  or infers it, and shows each need's `because` as "Asks you because:
+  <because>" above its text. "Installed, reboot pending"
   is `waiting` with a need and never `failed`; its only action is
   `reboot_window`.
 

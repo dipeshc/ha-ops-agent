@@ -272,6 +272,11 @@ Implementation: `opsd/assistant.py`, `opsd/conversation.py`,
   nothing is needed (`not_affected`) closes the finding (within the
   guards) and it stays closed until the fingerprint changes; a "No fix
   needed" plan never lands in Needs you. `needs_owner` needs its
-  `owner_action` (maintenance.md M13d), else it is kept as `unknown`.
+  `owner_action` (maintenance.md M13d), else it is kept as `unknown`, and
+  only a grounded one (M13g) asks, as `grounded_needs_owner`. Nothing a
+  chat run, a card, an investigation or a plan answers sets a need itself:
+  a verdict can only close, quiet or hand a grounded `needs_owner` to the
+  one escalation gate ([items-and-pushes.md](items-and-pushes.md) I22),
+  and an unanswered, rejected or failed run changes nothing.
   Tests `test_a_not_affected_plan_closes_the_finding_and_is_remembered`,
   `test_a_no_fix_needed_plan_never_lands_in_needs_you`.

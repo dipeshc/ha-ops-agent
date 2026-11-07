@@ -477,3 +477,23 @@ def test_every_action_is_a_button_that_goes_to_the_daemon() -> None:
     assert result["labels"] == ["Plan a fix", "Hide until it changes"]
     # There is no "Ask the agent" any more: asking is the item's conversation, never an action.
     assert result["calls"] == [["act", "plan_fix"], ["act", "dismiss"]]
+
+
+@needs_node
+def test_a_need_says_why_it_asks() -> None:
+    item = (
+        "{id: 'c-0123456789ab', title: 'acme_hub failed', revision: 2, state: 'waiting',"
+        " need: {kind: 'ack', why: 'stuck', because: 'it has stayed undecided for 7 days', text: 'Snooze it.',"
+        " tried: ['effect check: none observed', 'check: not decided'],"
+        " primary: {id: 'snooze', label: 'Snooze 7 days'}, secondary: []}}"
+    )
+    program = (
+        _RENDER
+        + f"const t = {item}; const block = actBlock(t);\n"
+        + "console.log(JSON.stringify(block.kids.filter((k) => k).map((k) => k.textContent || '')));"
+    )
+    texts = _run(program)
+    assert texts[0] == (
+        "Asks you because: it has stayed undecided for 7 days. Tried: effect check: none observed; check: not decided."
+    )
+    assert texts[1] == "Snooze it."

@@ -65,6 +65,8 @@ def check_wait(reason: str, detail: str, *, retry_at: datetime, now: datetime, t
         return f"the agent's check waits for its daily allowance {nxt}"
     if reason == "usage_limited":
         return f"the agent's check waits for the AI provider's usage limit to lift {nxt}"
+    if reason == "no_answer":
+        return f"the agent's check reached no conclusion and runs again by itself {nxt}"
     return f"the agent's check failed and will run again by itself {nxt}"
 
 

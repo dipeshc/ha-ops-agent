@@ -22,6 +22,8 @@ class TriageResult:
     verdicts: dict[str, tuple[str, str]] = field(default_factory=dict)
     # Health key -> what the admin must do or decide, for each `needs_owner` verdict (model text).
     owner_actions: dict[str, str] = field(default_factory=dict)
+    # Health key -> the evidence its verdict was grounded on: the run's own reads (the daemon's audit record).
+    evidence: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _detail(item: Item) -> str:
@@ -80,22 +82,32 @@ def _str(value: Any, limit: int) -> str:
     return value.strip()[:limit] if isinstance(value, str) else ""
 
 
-def validate_result(raw: dict[str, Any] | None, keys: set[str] | frozenset[str] = frozenset()) -> TriageResult:
+def validate_result(raw: dict[str, Any] | None, keys: set[str] | frozenset[str] = frozenset(),
+                    read: list[str] | tuple[str, ...] = ()) -> TriageResult:  # fmt: skip
     """Never trust the model's JSON: the outcome, a clamped summary, and a verdict only for a key handed to the run
-    (`keys`), one each, at most `MAX_ITEMS_IN_PROMPT`. The daemon acts on the verdicts (`daemon.checked_acks`)."""
+    (`keys`), one each, at most `MAX_ITEMS_IN_PROMPT`. Each verdict is grounded with the run's own reads (`read`,
+    spec health.md H16a): an ungrounded `needs_owner` or a hedged `not_affected` without a concrete read is no
+    verdict, and no verdict changes nothing. The daemon acts on the verdicts (`daemon.checked_acks`)."""
     if not isinstance(raw, dict):
         return TriageResult(result="failed", summary="no structured result", rejected=["missing result"])
     outcome = raw.get("result") if raw.get("result") in ("ok", "escalated", "failed") else "failed"
     found: dict[str, tuple[str, str]] = {}
     actions: dict[str, str] = {}
+    evidence: dict[str, list[str]] = {}
+    seen: set[str] = set()
     entries = raw.get("verdicts")
     for entry in entries[:MAX_ITEMS_IN_PROMPT] if isinstance(entries, list) else []:
         key = entry.get("key") if isinstance(entry, dict) else None
-        checked = verdicts.answer(entry, allowed=verdicts.TRIAGE_VERDICTS)
-        if not isinstance(key, str) or key not in keys or key in found or checked is None:
+        if not isinstance(key, str) or key not in keys or key in seen:
+            continue
+        # The first answer for a key is its answer, also when it is dropped: a later one never stands in for it.
+        seen.add(key)
+        checked = verdicts.answer(entry, allowed=verdicts.TRIAGE_VERDICTS, strict=True, read=read)
+        if checked is None or checked.verdict not in verdicts.TRIAGE_VERDICTS:
             continue
         found[key] = (checked.verdict, checked.reason)
+        evidence[key] = list(checked.evidence)
         if checked.owner_action:
             actions[key] = checked.owner_action
     return TriageResult(result=str(outcome), summary=_str(raw.get("summary"), 600), verdicts=found,
-                        owner_actions=actions)  # fmt: skip
+                        owner_actions=actions, evidence=evidence)  # fmt: skip

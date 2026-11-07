@@ -11,7 +11,9 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
+from opsd import escalation
 from opsd.conversation import clean_text, fence
+from opsd.escalation import Why
 from opsd.items import item_id
 from opsd.live import Hub
 from opsd.store import Store, StoreError
@@ -61,10 +63,17 @@ def standalone(entry: dict[str, Any], *, needs_admin: bool) -> dict[str, Any]:
                              "not_read": [], "run_id": None}}  # fmt: skip
         return record
     if needs_admin:
-        record |= {"state": "failed" if failed else "waiting", "resolved_at": at if failed else None,
-                   "needs_since": at,
-                   "need": {"kind": "ack", "text": clean_text(f"{title}. {detail}" if detail else title, 600),
-                            "primary": {"id": "ack", "label": "OK"}, "secondary": [], "expires_at": None}}  # fmt: skip
+        # An entry that needs the admin is a failure of something the daemon did (a backup, a reload): the one
+        # reason the escalation list has for it (spec items-and-pushes.md I16, I22).
+        text = clean_text(f"{title}. {detail}" if detail else title, 600)
+        record |= {
+            "state": "failed" if failed else "waiting",
+            "resolved_at": at if failed else None,
+            "needs_since": at,
+            "need": escalation.need(
+                Why.FAILED, "ack", text, {"id": "ack", "label": "OK"}, tried=[clean_text(title, 200)]
+            ),
+        }
     return record
 
 

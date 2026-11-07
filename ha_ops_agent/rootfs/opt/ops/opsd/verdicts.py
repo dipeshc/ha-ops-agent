@@ -2,8 +2,8 @@
 
 A verdict (`not_affected`, `fixed`, `fixable`, `needs_owner`, `unknown`) is kept per cause (`maint:<finding>`,
 `health:<key>`, `core:<minor>`) in kv `verdict:<cause>` with the fingerprint of the evidence it was made for; a
-changed fingerprint is a new question. Fail safe: no usable verdict behaves as before verdicts. Spec maintenance.md
-M13d, health.md H16a; the reason is model text, shown as data only.
+changed fingerprint is a new question. No usable verdict is no reason to ask (spec items-and-pushes.md I22: unknown
+never asks). Spec maintenance.md M13d, health.md H16a; the reason is model text, shown as data only.
 """
 
 import hashlib
@@ -35,9 +35,9 @@ _NO_ACTION = re.compile(
     r"(needed|required|to do)?)\W*$"
 )
 EVIDENCE_MAX = 6
-# Causes whose verdicts must be grounded (`grounded`, spec maintenance.md M13g): a maintenance finding and a Core
-# minor's notes. A health verdict (triage) keeps its own rules.
-GROUNDED_CAUSES = ("maint:", "core:")
+# Causes whose verdicts must be grounded (`grounded`, spec maintenance.md M13g, health.md H16a): a maintenance
+# finding, a Core minor's notes and a health item (triage, grounded by the run's own reads).
+GROUNDED_CAUSES = ("maint:", "core:", "health:")
 # Hedged reasoning is no conclusion (small keyword checks, never more prose parsing than this).
 _HEDGED = re.compile(
     r"(?i:\b(?:probably|likely|unlikely|guess(?:ed|ing)?|perhaps|possibly|presumably|might|maybe|"
@@ -146,10 +146,12 @@ def holds(earlier: Verdict | None, verdict: str) -> bool:
             and earlier.verdict in ("not_affected", "unknown") and not earlier.failed)  # fmt: skip
 
 
-def answer(raw: Any, *, allowed: Iterable[str] = VERDICTS, strict: bool = False) -> Answer | None:
+def answer(raw: Any, *, allowed: Iterable[str] = VERDICTS, strict: bool = False,
+           read: Iterable[str] = ()) -> Answer | None:  # fmt: skip
     """A model's verdict (`{verdict, reason, evidence, owner_action}`), strictly shaped and cleaned; None when there
     is none. A `needs_owner` without a usable owner action is `unknown` (spec maintenance.md M13d), or None where
-    `unknown` is not allowed (triage: no verdict)."""
+    `unknown` is not allowed (triage: no verdict). `read`: what the run read by the daemon's own record (its audit
+    rows' sources), added to the evidence (triage gives none of its own, health.md H16a)."""
     if not isinstance(raw, Mapping):
         return None
     verdict = raw.get("verdict")
@@ -159,6 +161,8 @@ def answer(raw: Any, *, allowed: Iterable[str] = VERDICTS, strict: bool = False)
     found = raw.get("evidence")
     refs: list[Any] = found if isinstance(found, list) else []
     evidence = [clean_text(str(r), 120) for r in refs[:EVIDENCE_MAX] if str(r).strip()]
+    evidence += [clean_text(str(r), 120) for r in read if str(r).strip() and str(r) not in evidence]
+    evidence = evidence[:EVIDENCE_MAX]
     if not reason and verdict != "unknown":
         # A conclusion without a reason is no conclusion.
         return None

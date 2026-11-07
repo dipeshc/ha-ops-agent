@@ -20,7 +20,7 @@ import signal
 import sqlite3
 import subprocess
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -51,22 +51,25 @@ from opsd.baseline import (
     apply_ack,
     diff,
     honoured_expected,
+    noise,
     seed,
     seed_exclusions,
     waits_quietly,
 )
 from opsd.budget import Period
+from opsd.capabilities import CAPABILITIES, CapabilityError
 from opsd.changepaths import SUPPRESS_PATH
 from opsd.changes import ChangeManager, ChangeRefused, LiveFiles, push, registry_entities
 from opsd.channels import BudgetClass, Message
+from opsd.chatcards import split_reason
 from opsd.claude_runner import RunResult
 from opsd.config import Options, Paths, claude_token, credential_kind
-from opsd.conversation import clean_text, context_block
+from opsd.conversation import clean_text, context_block, sources_of
 from opsd.coresource import CoreSource, CoreSourceError, read_custom
 from opsd.events import Dispatcher, Event, EventQueue, Priority, Schedule, TaskScheduler
 from opsd.evidence import EvidenceCache, EvidenceSource
 from opsd.gitops import Repo
-from opsd.health import CONFIG_CHECK_TIMEOUT_S, Snapshot, collect, custom_domains, parse_time
+from opsd.health import CONFIG_CHECK_TIMEOUT_S, FAILED_ENTRY_STATES, Snapshot, collect, custom_domains, parse_time
 from opsd.inbound import EVENT_TYPE, AdminIdentity, InboundGate, admin_identity
 from opsd.items import Context, ItemBook
 from opsd.jsonstore import append_jsonl, read_json, read_jsonl, write_json_atomic
@@ -75,9 +78,11 @@ from opsd.maintenance import Finding, Gathered, MaintenanceManager
 from opsd.notify import Notifier, own_slug, set_panel_slug
 from opsd.panel import PanelServer
 from opsd.panelapi import PanelHandlers
+from opsd.policy import Origin, PolicyTier, decide
 from opsd.privsep import ops_account
 from opsd.profile import PROFILE_PATH
 from opsd.redact import Redactor, build_redactor
+from opsd.reload import reload_domain, static_refusal
 from opsd.rpc import RpcServer
 from opsd.runctx import AGENT_SELF, ExecEnv, RunEffects
 from opsd.runner import (
@@ -1005,11 +1010,15 @@ class Daemon:
                      power_entity=self.options.profile.health.power_entity,
                      remote_entity=self.options.profile.health.remote_entity)  # fmt: skip
         items = self._suppress(items, snapshot, now)
-        # Never triaged: information (the config repository's state) is only shown, and the vacuum overlay's room
-        # drift is pushed by the item book.
+        items = await self._self_resolve(items, now)
+        # Never triaged: information (the config repository's state) is only shown, the vacuum overlay's room
+        # drift is pushed by the item book, and a Core-log error with no observable effect is a quiet fact (no AI,
+        # spec health.md H16b).
         info = [i for i in items if i.severity == "info"]
         drift = [i for i in items if i.kind == VACUUM_ROOMS_KIND and i.severity != "info"]
-        items = [i for i in items if i.severity != "info" and i.kind != VACUUM_ROOMS_KIND]
+        quiet_logs = [i for i in items if i.severity == "warning" and noise(i.to_json())]
+        info += quiet_logs
+        items = [i for i in items if i.severity != "info" and i.kind != VACUUM_ROOMS_KIND and i not in quiet_logs]
         if not items:
             write_json_atomic(self.paths.baseline_file, advance(baseline, snapshot, now).to_json())
             # Clear the panel's open items once whatever raised them has resolved.
@@ -1057,25 +1066,110 @@ class Daemon:
             snapshot=snapshot,
         )
 
+    async def _self_resolve(self, items: list[Item], now: datetime) -> list[Item]:
+        """The daemon's own permitted repair, before anything about a failed config entry may ask (the self-resolve
+        ladder, spec items-and-pushes.md I22a, health.md H16d): each integration with a failed entry is reloaded
+        once, within the reload allowlist, never-list, rate and daily quota (reload.md L1-L5), in act mode only.
+        One that came back leaves the check's items (a quiet History line says so); every other outcome is recorded
+        on its items (`tried`), so what was tried is shown when it asks."""
+        domains = sorted({str(i.detail.get("domain")) for i in items if i.key.startswith("entry:")
+                          and i.detail.get("state") in FAILED_ENTRY_STATES and i.detail.get("domain")})  # fmt: skip
+        if not domains:
+            return items
+        tried: dict[str, str] = {}
+        settled: set[str] = set()
+        for domain in domains:
+            outcome, ok = await self._permitted_reload(domain, now)
+            tried[domain] = outcome
+            if ok:
+                settled.add(domain)
+        kept = []
+        for item in items:
+            domain = str(item.detail.get("domain") or "") if item.key.startswith("entry:") else ""
+            if item.key.startswith("custom:"):
+                domain = item.key.removeprefix("custom:")
+            if domain in settled:
+                continue
+            if domain in tried:
+                kept.append(
+                    replace(item, detail=item.detail | {"tried": [*item.detail.get("tried", []), tried[domain]]})
+                )
+            else:
+                kept.append(item)
+        if settled and self.activity is not None:
+            self.activity.record("reload", f"Reloaded {', '.join(sorted(settled))} before asking: it came back",
+                                 "; ".join(tried[d] for d in sorted(settled)))  # fmt: skip
+        return kept
+
+    async def _permitted_reload(self, domain: str, now: datetime) -> tuple[str, bool]:
+        """One reload the daemon may make itself (the same capability, checks, rate and quota as the agent's):
+        `(what was tried, in daemon words; whether it came back)`."""
+        cap = CAPABILITIES["integration.reload"]
+        caps = self.options.capabilities
+        deny = self.options.profile.reload.deny
+        refusal = static_refusal(domain, self.options.reloadable, caps.never, deny)
+        if refusal is not None:
+            return f"reload {domain}: not permitted ({refusal})", False
+        tighten = {name: PolicyTier.APPROVE for name in caps.require_approval}
+        tighten.update({name: PolicyTier.NEVER for name in caps.never})
+        verdict = decide(capability=cap.name, default_tier=cap.tier, effects=cap.effects, origin=Origin.AGENT_SELF,
+                         allowed_origins=cap.origins, acting=self.options.acting, tighten=tighten)  # fmt: skip
+        store = self.store
+        if not verdict.execute or store is None:
+            return f"reload {domain}: not tried ({'observe mode' if not self.options.acting else 'not allowed'})", False
+        day = self.day(now)
+        audit: dict[str, int] = {}
+
+        def reserve() -> bool:
+            # Called by reload_domain only once every check has passed.
+            if not store.bump(day, f"cap:{cap.name}", limit=cap.quota.per_day):
+                return False
+            audit["id"] = store.audit_begin(at=now, run_id=None, principal="daemon", channel="health",
+                                            capability=cap.name, args={"domain": domain}, tier=str(verdict.tier),
+                                            decision=verdict.outcome)  # fmt: skip
+            return True
+
+        try:
+            async with LiveAPI(self.client) as api:
+                result = await reload_domain(api, store, domain, allowed=self.options.reloadable, never=caps.never,
+                                             deny=deny, now=now, reserve=reserve)  # fmt: skip
+        except CapabilityError as err:
+            if "id" in audit:
+                store.unbump(day, f"cap:{cap.name}")
+                store.audit_finish(audit["id"], "refused", str(err)[:300])
+            return f"reload {domain}: refused ({clean_text(str(err), 140)})", False
+        except Exception as err:  # noqa: BLE001 - a failed self-repair is recorded on the item, never fatal
+            if "id" in audit:
+                store.unbump(day, f"cap:{cap.name}")
+                store.audit_finish(audit["id"], "failed", f"{type(err).__name__}: {str(err)[:200]}")
+            _LOGGER.warning("self-repair reload failed", extra={"domain": domain, "error": type(err).__name__})
+            return f"reload {domain}: failed ({type(err).__name__})", False
+        text = self.redactor().redact(str(result.get("message") or ""))[:300]
+        if "id" in audit:
+            store.audit_finish(audit["id"], "ok" if result.get("ok") else "failed", text)
+        return (
+            f"reload {domain}: {'it came back' if result.get('ok') else 'did not help'} ({clean_text(text, 140)})",
+            bool(result.get("ok")),
+        )
+
     async def _notify(
         self, items: list[Item], triage: TriageResult | None, *, core_up: bool, now: datetime
     ) -> str | None:
         """The deterministic safety net.
 
         Critical items ALWAYS produce a deterministic urgent push from the
-        reserved safety bucket, whatever the AI did or said. Without a usable
-        triage, warnings get a non-urgent deterministic summary.
+        reserved safety bucket, whatever the AI did or said. A warning is never
+        pushed because triage could not run or gave no verdict: unknown never
+        asks (spec health.md H17, items-and-pushes.md I22); it waits in Coming
+        up and asks only once it is stuck.
         """
+        del triage
         outcomes: list[str] = []
         critical = [i for i in items if i.severity == "critical"]
         if critical:
             safety = fallback_push(critical)
             if safety is not None:
                 outcomes.append(await self.send(safety, core_up=core_up, now=now))
-        elif triage is None:
-            fallback = fallback_push(items)
-            if fallback is not None:
-                outcomes.append(await self.send(fallback, core_up=core_up, now=now))
         return "+".join(outcomes) or None
 
     def _expected_unavailable(self, snapshot: Snapshot) -> frozenset[str]:
@@ -1158,9 +1252,11 @@ class Daemon:
             self.state.last_run_status = run.status
         effects = outcome.context.effects
         if run.status != "ok":
+            self._unanswered(items, now, failed=True, run=run)
             return run, None, effects
-        triage = validate_result(run.structured, {i.key for i in items})
+        triage = validate_result(run.structured, {i.key for i in items}, self._run_reads(outcome.context.run_id))
         self._keep_verdicts(items, triage, now)
+        self._unanswered([i for i in items if i.key not in triage.verdicts], now, failed=False, run=run)
         if outcome.run_dir is not None:
             write_json_atomic(
                 outcome.run_dir / "result.json",
@@ -1183,11 +1279,39 @@ class Daemon:
                 for key, (verdict, reason) in triage.verdicts.items():
                     verdicts.record(self.store, f"health:{key}", verdict=verdict, reason=reason, by="triage", now=now,
                                     fingerprint=verdicts.health_fingerprint(key, by_key[key].summary),
+                                    evidence=triage.evidence.get(key, ()),
                                     owner_action=triage.owner_actions.get(key, ""))  # fmt: skip
         except (StoreError, sqlite3.Error) as err:
             _LOGGER.warning("triage verdicts not kept", extra={"error": str(err)[:160]})
             return
         _LOGGER.info("triage verdicts", extra={"verdicts": {k: v[0] for k, v in triage.verdicts.items()}})
+
+    def _run_reads(self, run_id: str) -> list[str]:
+        """What a run read, by the daemon's own audit rows (never the model's list): a triage verdict's evidence
+        (spec health.md H16a)."""
+        if self.store is None or not run_id:
+            return []
+        try:
+            rows = self.store.audit_rows(run_id=run_id, limit=300)
+        except (StoreError, sqlite3.Error) as err:
+            _LOGGER.warning("no reads for the triage run", extra={"error": str(err)[:160]})
+            return []
+        return list(sources_of(rows, {c.name: c.verb for c in CAPABILITIES.values()}).get("sources") or [])
+
+    def _unanswered(self, items: list[Item], now: datetime, *, failed: bool, run: RunResult) -> None:
+        """Items triage gave no usable verdict: counted with the run's own reason (`verdicts.no_answer`), so the item
+        says why it is undecided. Nothing else changes: a missing answer never makes an item ask (health.md H16a)."""
+        if self.store is None or not items:
+            return
+        why, detail = split_reason(run.status, run.error) if failed else ("", "")
+        try:
+            with self.store.atomic():
+                for item in items:
+                    verdicts.no_answer(self.store, f"health:{item.key}", by="triage", now=now, failed=failed,
+                                       fingerprint=verdicts.health_fingerprint(item.key, item.summary),
+                                       why=why or ("error" if failed else ""), detail=detail)  # fmt: skip
+        except (StoreError, sqlite3.Error) as err:
+            _LOGGER.warning("unanswered triage items not kept", extra={"error": str(err)[:160]})
 
     def _finish(
         self,

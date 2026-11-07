@@ -102,6 +102,7 @@ svg.i{width:20px;height:20px;flex:none}
 .elapsed{font-size:12px;color:var(--muted);margin-top:4px}
 .act{margin-top:16px;padding:16px;border-radius:12px;background:var(--card-2)}
 .act>p{font-size:15px;line-height:1.45;max-width:60ch}
+.act>p.why{font-size:13px;color:var(--muted);margin-bottom:6px}
 .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:44px;padding:0 18px;border-radius:12px;font-size:15px;font-weight:600;color:var(--primary);background:color-mix(in srgb,var(--primary) 13%,transparent)}
 .btn.fill{background:var(--primary);color:var(--on-primary)}
@@ -681,7 +682,10 @@ function actBlock(t) {
   const all = [...(n && n.primary ? [{ ...n.primary, style: "fill" }] : []), ...(n ? n.secondary || [] : []), ...extra];
   // Every action is the daemon's (api/items/<id>/act); asking about the item is its conversation below.
   const b = (a) => h("button", { class: `btn ${a.style || ""}`, onclick: () => act(t, a) }, a.label);
-  return h("div", { class: "act" }, text ? h("p", { text }) : null, all.length ? h("div", { class: "btns" }, all.map(b)) : null);
+  // Why it is in Needs you: the daemon's words for its one reason (spec items-and-pushes.md I22).
+  const tried = n && Array.isArray(n.tried) && n.tried.length ? ` Tried: ${n.tried.join("; ")}.` : "";
+  const why = n && n.because ? h("p", { class: "why", text: `Asks you because: ${n.because}.${tried}` }) : null;
+  return h("div", { class: "act" }, why, text ? h("p", { text }) : null, all.length ? h("div", { class: "btns" }, all.map(b)) : null);
 }
 els.tried = new Set();
 setInterval(() => {

@@ -78,8 +78,15 @@ def test_the_items_engine_asks_only_once_remote_access_stays_down(tmp_path: Path
     found = {r["key"]: r for r in store.items_all() if r["kind"] == "check"}
     assert found["health:remote:down"]["state"] == "proposed" and not found["health:remote:down"]["needs"]
     assert {a["id"] for a in found["health:remote:down"]["actions"]} == {"snooze", "accept"}
-    assert found["health:power:undervoltage"]["state"] == "waiting"
-    assert found["health:power:undervoltage"]["need"]["kind"] == "ack"
+    # A reading asks only once two checks in a row read it (spec health.md H16c), never on one glitch.
+    first = found["health:power:undervoltage"]
+    assert not first["needs"] and "one reading" in first["gist"]
+    ctx = Context(health_at=(NOW + timedelta(hours=1)).isoformat(), health_items=[remote, power])
+    clock["now"] = NOW + timedelta(hours=1)
+    book.write_health()
+    power_item = store.item(found["health:power:undervoltage"]["id"])
+    assert power_item is not None and power_item["need"]["kind"] == "ack" and power_item["need"]["why"] == "physical"
+    assert any(t.startswith("reading: reported in two checks in a row") for t in power_item["need"]["tried"])
     clock["now"] = NOW + timedelta(hours=4, minutes=59)
     book.tick()
     assert not store.item(found["health:remote:down"]["id"])["needs"]  # type: ignore[index]
@@ -98,7 +105,7 @@ async def test_the_status_sensor_carries_the_needs_you_count_and_top_title(h: An
     assert d.store is not None and d.items is not None
     view = d.status_view()
     assert view["needs_you"] == 0 and view["needs_you_top"] is None and "pending_items" not in view
-    health = [{"key": "power:undervoltage", "kind": "power", "severity": "warning",
+    health = [{"key": "config:invalid", "kind": "config", "severity": "critical",
                "summary": "the host reports under-voltage " + "x" * 200, "detail": {}}]  # fmt: skip
     d._save_open_items([], datetime.now(UTC).isoformat(timespec="seconds"))
     d.items._context = lambda: Context(health_at=datetime.now(UTC).isoformat(), health_items=health)  # type: ignore[method-assign]

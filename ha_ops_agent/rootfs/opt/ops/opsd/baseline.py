@@ -1,5 +1,6 @@
 """Baseline of accepted state, and the diff that decides whether the AI runs (spec health.md H10-H13a)."""
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -69,6 +70,93 @@ class Baseline:
             if until is None or datetime.fromisoformat(until) > now:
                 active.add(key)
         return active
+
+
+# The integration whose logger logged a line: `homeassistant.components.<x>` or `custom_components.<x>`.
+_LOGGER_DOMAIN = re.compile(r"^(?:homeassistant\.components|custom_components)\.([a-z0-9_]{1,64})(?:\.|$)")
+# A library's top-level package (`example_ble.push` -> `example_ble`).
+_PACKAGE = re.compile(r"^([a-z0-9_]{1,64})(?:\.|$)")
+# Automations and scripts: a new error of theirs is an observable effect of anything (health.md H16b).
+_RUNS = re.compile(r"^homeassistant\.components\.(?:automation|script)(?:\.|$)")
+# Home Assistant's own words for something only the admin can do by hand (health.md H16c).
+_HANDS = re.compile(r"(?i)re-?auth|authenticat|re-pair|\bpairing\b|unpaired")
+EFFECT_SHOWN = 6
+
+
+def log_domain_of(logger: str, platforms: Iterable[str]) -> str | None:
+    """The integration a Core-log line is from: the one its logger names, or a library logger whose top-level
+    package is a platform with entities here (`example_ble.push`); None when the line names none (the whole house is
+    then checked for an effect)."""
+    named = _LOGGER_DOMAIN.match(logger)
+    if named is not None:
+        return named.group(1)
+    package = _PACKAGE.match(logger)
+    return package.group(1) if package is not None and package.group(1) in set(platforms) else None
+
+
+def log_effect(logger: str, snapshot: Snapshot, baseline: Baseline,
+               expected_unavailable: frozenset[str] = frozenset()) -> dict[str, Any]:  # fmt: skip
+    """The observable effect of a Core-log error (spec health.md H16b), deterministic: the entities of its
+    integration (or of any, when none is named) down now and not in the baseline or expected, its config entries
+    (or any) newly failed, and new automation or script errors. `none` when there is none of them."""
+    domain = log_domain_of(logger, snapshot.entity_counts)
+    known = set(baseline.unavailable) | expected_unavailable
+    down = sorted(e for e, info in snapshot.unavailable.items()
+                  if e not in known and (domain is None or info.get("platform") == domain))  # fmt: skip
+    failed = sorted(e for e, info in snapshot.failed_entries.items() if e not in baseline.failed_entries
+                    and (domain is None or info.get("domain") == domain))  # fmt: skip
+    runs = sorted(fp for fp, info in snapshot.log_errors.items()
+                  if fp not in baseline.log_fps and _RUNS.match(str(info.get("logger") or "")))  # fmt: skip
+    return {"domain": domain, "entities": down[:EFFECT_SHOWN], "entities_count": len(down),
+            "entries_count": len(failed), "runs_count": len(runs),
+            "none": not (down or failed or runs)}  # fmt: skip
+
+
+def effect_words(effect: Mapping[str, Any]) -> str:
+    """The effect check as a fact: "none observed", or what was seen since the baseline (daemon words)."""
+    if effect.get("none"):
+        scope = f"{effect['domain']}'s entities, config entries" if effect.get("domain") else "entities, config entries"
+        return f"none observed ({scope} and automations are as in the baseline)"
+    parts = []
+    count = int(effect.get("entities_count") or 0)
+    if count:
+        names = ", ".join(str(e) for e in _list_of(effect.get("entities"))[:EFFECT_SHOWN])
+        parts.append(f"{count} entit{'y' if count == 1 else 'ies'} unavailable since the baseline ({names})")
+    if effect.get("entries_count"):
+        parts.append(f"{effect['entries_count']} config entr{'y' if effect['entries_count'] == 1 else 'ies'} failed")
+    if effect.get("runs_count"):
+        parts.append(f"{effect['runs_count']} new automation or script error(s)")
+    return "; ".join(parts) or "unknown"
+
+
+def _list_of(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def noise(raw: Mapping[str, Any]) -> bool:
+    """A log item whose effect check saw nothing (health.md H16b): never triaged, never a question."""
+    found = raw.get("detail")
+    effect = found.get("effect") if isinstance(found, Mapping) else None
+    return raw.get("kind") == "log" and isinstance(effect, Mapping) and effect.get("none") is True
+
+
+def hands(raw: Mapping[str, Any]) -> bool:
+    """Something Home Assistant itself says only the admin can fix by hand (health.md H16c): a repair or failed
+    config entry that needs re-authentication or re-pairing, or the host's own under-voltage sensor (the power
+    supply)."""
+    found = raw.get("detail")
+    detail: Mapping[str, Any] = found if isinstance(found, Mapping) else {}
+    if raw.get("kind") == "power":
+        return True
+    if raw.get("kind") == "repair":
+        # The issue id and translation key only: the key's `repair:` prefix is no word of Home Assistant's.
+        issue = str(raw.get("key") or "").removeprefix("repair:").partition(":")[2]
+        said = f"{issue} {detail.get('translation_key') or ''}"
+    elif raw.get("kind") == "config_entry":
+        said = str(detail.get("reason") or "")
+    else:
+        return False
+    return bool(_HANDS.search(said))
 
 
 def honoured_expected(listed: Iterable[str], unavailable: Mapping[str, Mapping[str, Any]] | None = None,
@@ -332,7 +420,9 @@ def diff(
     for fp, info in sorted(snapshot.log_errors.items()):
         seen = baseline.log_fps.get(fp)
         if seen is None:
-            items.append(Item(f"log:{fp}", "log", "warning", f"new {info['level']} from {info['logger']}", dict(info)))
+            items.append(Item(f"log:{fp}", "log", "warning", f"new {info['level']} from {info['logger']}",
+                              dict(info) | {"effect": log_effect(str(info.get("logger") or ""), snapshot, baseline,
+                                                                 expected_unavailable)}))  # fmt: skip
         elif info["count"] >= LOG_GROWTH_FACTOR * max(1, int(seen.get("count", 1))):
             items.append(
                 Item(
@@ -340,7 +430,8 @@ def diff(
                     "log",
                     "warning",
                     f"{info['logger']} error count grew {seen.get('count')} -> {info['count']}",
-                    dict(info),
+                    dict(info)
+                    | {"effect": log_effect(str(info.get("logger") or ""), snapshot, baseline, expected_unavailable)},
                 )
             )
 

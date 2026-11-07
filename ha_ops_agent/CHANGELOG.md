@@ -2,6 +2,40 @@
 
 ## 0.25.0
 
+- **One escalation gate: unknown never asks.** An item enters *Needs you*
+  only for one of seven reasons, and says which ("Asks you because: …"):
+  `critical` (the health check's safety net), `approval`, `deadline` (a
+  removal within 30 days), `grounded_needs_owner` (the agent's check,
+  unhedged and backed by what it actually read, names what you must do),
+  `stuck` (a warning still undecided after 7 days), `physical` (Home
+  Assistant says it needs you by hand: re-authenticate, re-pair, the host's
+  power supply over two checks) and `failed` (something the agent did failed
+  and nothing retries it). One function decides it, and the store applies it
+  again to every record it writes, so nothing else can put an item there.
+  No verdict, an `unknown` one, AI off, a capped or failed check, or an
+  answer the daemon rejected now leaves the item under *Coming up* saying
+  why and when it is checked again; before, it asked you. A warning is no
+  longer pushed because triage could not run (critical results still are).
+  Items an earlier version put in *Needs you* without a reason leave it at
+  the first start.
+- **The agent settles what it can first.** Before anything but a critical
+  result or an approval asks, the agent climbs one ladder and the item
+  lists what it tried ("Tried: …"): the deterministic checks, its own
+  permitted repairs (the daemon now reloads an integration with a failed
+  config entry itself, within the reload allowlist, never-list, rate and
+  daily quota, in act mode, before triage; one that comes back leaves the
+  check), its grounded check, and a one-tap fix as an approval when one is
+  possible (never "needs you" for something it can propose).
+- **Core-log errors with no observable effect are noted without AI.** A new
+  ERROR is "no observable effect" when its integration's entities and
+  config entries are as in the baseline and no automation or script newly
+  failed (the whole house is checked when the line names no integration):
+  it is a quiet fact under *Coming up*, never triaged or pushed. Every log
+  item shows the effect check as a fact.
+- **Triage verdicts are grounded by what the run read.** The run's own
+  audited reads are the evidence of a triage verdict; a `needs_owner` that
+  is hedged or read nothing concrete is no verdict, as for maintenance.
+
 - **Alternatives for abandoned custom integrations (suggest only).** A custom
   integration whose GitHub repository is archived, or has had no push for a
   year, is abandoned. When something is at stake (its repository is archived,

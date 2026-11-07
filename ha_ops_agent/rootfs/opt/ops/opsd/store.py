@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from opsd import escalation
 from opsd.budget import MIN_RUN_SECONDS, MIN_RUN_USD, WINDOW, WINDOWS, Caps, Period, Reservation
 
 _LOGGER = logging.getLogger(__name__)
@@ -2149,7 +2150,15 @@ class Store:
         return [_item(r) for r in rows]
 
     def put_item(self, record: dict[str, Any]) -> None:
-        """Insert or replace one item (the caller computed every column)."""
+        """Insert or replace one item (the caller computed every column). Every record passes the one escalation
+        gate here (`escalation.gate`, spec items-and-pushes.md I22): a need without a reason from its list never
+        reaches Needs you, whatever composed it."""
+        state, found = escalation.gate(str(record.get("state") or ""), record.get("need"),
+                                       key=str(record.get("key") or ""))  # fmt: skip
+        if (state, found) != (record.get("state"), record.get("need")):
+            record = dict(record) | {"state": state, "need": found}
+            if found is None:
+                record["needs_since"] = None
         values = []
         for name in self._ITEM_COLUMNS:
             value = record.get(name)

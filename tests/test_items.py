@@ -132,8 +132,10 @@ def test_health_items_wait_and_clear(tmp_path: Path) -> None:
     book = ItemBook(store, Hub(), tz=lambda: UTC, context=lambda: holder["ctx"], clock=lambda: START)
     book.write_health()
     [item] = [r for r in store.items_all() if r["kind"] == "check"]
-    assert item["state"] == "waiting" and item["need"]["primary"]["id"] == "snooze" and "s3cr3t" not in item["gist"]
-    assert book.outbox == []  # the health check pushes its own items
+    # A warning without a verdict never asks (unknown never asks, I22): Coming up, saying why, with its actions.
+    assert item["state"] == "proposed" and item["need"] is None and not item["needs"] and "s3cr3t" not in item["gist"]
+    assert "could not decide" in item["gist"] and [a["id"] for a in item["actions"]] == ["snooze", "accept"]
+    assert book.outbox == [] and book.digest is None
     holder["ctx"] = Context(health_at="2026-01-28T06:30:00+00:00", health_items=[])
     book.write_health()
     cleared = store.item(item["id"])
@@ -373,7 +375,8 @@ async def test_the_host_reboot_warning_follows_the_os_update_that_rebooted(tmp_p
     unexplained = rig.store.item(item_id("health:host:reboot:123"))
     assert expected is not None and expected["state"] == "done" and expected["follows"] == f"updates:{OS}@17.4"
     assert "expected: the reboot that activated" in expected["gist"] and not expected["needs"]
-    assert unexplained is not None and unexplained["needs"]  # a reboot nothing explains stays a warning
+    # A reboot nothing explains stays a warning, in Coming up until it is decided (or stuck).
+    assert unexplained is not None and unexplained["state"] == "proposed" and not unexplained["needs"]
     rig.store.close()
 
 
@@ -861,11 +864,12 @@ def test_a_need_an_earlier_version_composed_is_recomposed_at_start(tmp_path: Pat
     fact = store.add_fact("the cellar pump runs at night", thread_id=None, turn_id=None, now=START)
     item = store.item_by_key(f"fact:{fact}")
     assert item is not None and not item["needs"]
-    # As 0.19 wrote it: waiting with an acknowledgement.
-    old = item | {"state": "waiting", "need": {"kind": "ack", "text": "t", "primary": {"id": "dismiss", "label": "x"},
-                                               "secondary": [], "expires_at": None},
-                  "resolved_at": None, "needs_since": START.isoformat()}  # fmt: skip
+    # As 0.19 wrote it: waiting with an acknowledgement. The store's gate refuses it without a reason from the list.
+    need = {"kind": "ack", "text": "t", "primary": {"id": "dismiss", "label": "x"}, "secondary": [], "expires_at": None}
+    old = item | {"state": "waiting", "need": need, "resolved_at": None, "needs_since": START.isoformat()}
     store.put_item(old)
+    assert store.needs_count() == 0
+    store.put_item(old | {"need": need | {"why": "approval"}})
     assert store.needs_count() == 1
     book.recompose()
     assert store.needs_count() == 0 and store.item_by_key(f"fact:{fact}")["state"] == "done"  # type: ignore[index]
@@ -880,8 +884,8 @@ def waiting(store: Store, key: str, title: str, **source: Any) -> dict[str, Any]
     stamp = START.isoformat()
     record = {"id": item_id(key), "key": key, "kind": "check", "title": title, "state": "waiting", "gist": "needs you",
               "kicker": "", "ref": "", "revision": 1,
-              "need": {"kind": "ack", "text": "t", "primary": {"id": "ack", "label": "OK"}, "secondary": [],
-                       "expires_at": None},
+              "need": {"kind": "ack", "why": "failed", "tried": ["the source's own retry"], "text": "t",
+                       "primary": {"id": "ack", "label": "OK"}, "secondary": [], "expires_at": None},
               "as_of": stamp, "at": stamp, "needs_since": stamp, "created_at": stamp, "updated_at": stamp,
               "source": {"pushes": True, **source}, "push": {}}  # fmt: skip
     store.put_item(record)
@@ -952,7 +956,7 @@ async def test_a_resolved_item_clears_its_push(tmp_path: Path) -> None:
         for entry in raw:
             verdicts.record(store, f"health:{entry['key']}", verdict="needs_owner", reason="the hub is unplugged",
                             fingerprint=verdicts.health_fingerprint(entry["key"], entry["summary"]), by="triage",
-                            now=START, owner_action="Plug the hub back in")  # fmt: skip
+                            now=START, owner_action="Plug the hub back in", evidence=["config entries"])  # fmt: skip
     book.write_health()
     await book.deliver()
     [digest] = sent
@@ -991,7 +995,8 @@ def test_a_deprecation_repair_is_one_item(tmp_path: Path) -> None:
     book, _ = book_for(store, Hub(), START, health_at=START.isoformat(), health_items=raw)
     book.write_health()
     health = store.item_by_key("health:repair:acme_hub:deprecated_yaml")
-    assert health is not None and health["needs"]
+    # Undecided: Coming up, not a question (unknown never asks).
+    assert health is not None and not health["needs"] and health["state"] == "proposed"
     finding = Finding(key="0123456789abcdef", variant="deprecation", signal="repair", what="deprecated",
                       domain="acme_hub", removal="2030.9", sources=["repair acme_hub:deprecated_yaml"])  # fmt: skip
     with store.atomic():
@@ -1056,6 +1061,7 @@ def test_a_triage_verdict_anchors_the_reason_on_its_item(tmp_path: Path) -> None
             verdict, reason = said[entry["key"]]
             verdicts.record(store, f"health:{entry['key']}", verdict=verdict, reason=reason, by="triage", now=START,
                             fingerprint=verdicts.health_fingerprint(entry["key"], entry["summary"]),
+                            evidence=["config entries"],
                             owner_action="Power-cycle the <b>hub</b>" if verdict == "needs_owner" else "")  # fmt: skip
     # A `needs_owner` that names nothing for the admin to do is kept as `unknown`: no verdict that asks.
     vague = verdicts.record(store, "health:entry:vague", verdict="needs_owner", reason="something is off", by="triage",
@@ -1067,9 +1073,10 @@ def test_a_triage_verdict_anchors_the_reason_on_its_item(tmp_path: Path) -> None
     assert "power cycle" not in owner["need"]["text"] and owner["source"]["pushes"]
     # The need quotes what the admin must do, fenced as the agent's words.
     assert '"Power-cycle the \u2039b\u203ahub\u2039/b\u203a"' in owner["need"]["text"]
-    # A closing verdict on an item still open (the daemon snoozes the ones it may) changes nothing but the text.
+    # A closing verdict on an item still open (the daemon snoozes the ones it may): its text, never a question.
     harmless = store.item_by_key("health:log:0123456789ab")
-    assert harmless is not None and harmless["needs"] and "harmless timeout" in harmless["agent"]["text"]
+    assert harmless is not None and not harmless["needs"] and "harmless timeout" in harmless["agent"]["text"]
+    assert owner["need"]["why"] == "grounded_needs_owner"
     # Never for access hardware (or anything critical): it keeps asking.
     lock = store.item_by_key("health:access:lock.side_entrance")
     assert lock is not None and lock["needs"] and lock["source"]["urgent"]
@@ -1099,7 +1106,7 @@ async def test_a_rate_limited_need_waits_for_the_next_budget_not_every_cycle(tmp
                     context=lambda: Context(health_at=START.isoformat(), health_items=raw))  # fmt: skip
     verdicts.record(store, "health:entry:abc", verdict="needs_owner", reason="it needs a restart of the speaker",
                     fingerprint=verdicts.health_fingerprint("entry:abc", raw[0]["summary"]), by="triage",
-                    now=START, owner_action="Restart the speaker")  # fmt: skip
+                    now=START, owner_action="Restart the speaker", evidence=["config entries"])  # fmt: skip
     book.write_health()
     item = store.item_by_key("health:entry:abc")
     assert item is not None and item["needs"] and not book.timely(item, START)
@@ -1142,7 +1149,7 @@ async def test_an_item_push_waits_through_quiet_hours_and_is_retried_if_the_morn
                     context=lambda: Context(health_at=START.isoformat(), health_items=raw))  # fmt: skip
     verdicts.record(store, "health:entry:abc", verdict="needs_owner", reason="it needs a restart of the speaker",
                     fingerprint=verdicts.health_fingerprint("entry:abc", raw[0]["summary"]), by="triage",
-                    now=START, owner_action="Restart the speaker")  # fmt: skip
+                    now=START, owner_action="Restart the speaker", evidence=["config entries"])  # fmt: skip
     book.write_health()
     await book.deliver()
     assert sent == [] and book.digest is None  # the critical one is the safety net's; the warning waits

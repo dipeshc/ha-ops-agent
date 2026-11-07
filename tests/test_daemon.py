@@ -967,9 +967,42 @@ async def test_triage_verdicts_are_kept_on_their_items(h: Harness) -> None:
          "owner_action": "Switch the garden light back on at the wall"},
         {"key": "not:handed", "verdict": "not_affected", "reason": "a key the run was not given"}]}  # fmt: skip
     d = h.daemon()
+    # The run read the light's state: the daemon's audit record of it grounds the verdict (H16a).
+    d._run_reads = lambda run_id: ["entity states light.garden"]  # type: ignore[method-assign]
     await d.health_cycle("daily")
     assert d.store is not None
     item = d.store.item_by_key("health:entities:zha")
     assert item is not None and item["needs"] and "lost power" in item["agent"]["text"]
     assert '"Switch the garden light back on at the wall"' in item["need"]["text"]
+    assert item["need"]["why"] == "grounded_needs_owner"
     assert not d.store.kv_get("verdict:health:not:handed")
+
+
+def test_a_runs_reads_come_from_the_daemons_audit_rows(h: Harness) -> None:
+    d = h.daemon()
+    assert d.store is not None
+    for capability, args, outcome in (("ha.entities", {"entity": "light.garden"}, "ok"),
+                                      ("ha.entries", {}, "error"), ("notify.admin", {}, "ok")):  # fmt: skip
+        d.store.audit(at=datetime.now(UTC), run_id="r-example", principal="agent", channel="rpc",
+                      capability=capability, args=args, tier=None, decision="allowed", outcome=outcome)  # fmt: skip
+    assert d._run_reads("r-example") == ["entity states light.garden"]
+    assert d._run_reads("r-other") == []
+
+
+async def test_triage_needs_owner_is_grounded_by_the_runs_own_reads(h: Harness) -> None:
+    """A `needs_owner` from a run that read nothing concrete is no verdict: the item waits in Coming up, unpushed."""
+    await h.daemon().health_cycle("catch_up")
+    h.fake.states.append({"entity_id": "light.garden", "state": "unavailable",
+                          "last_changed": "2026-01-01T00:00:00+00:00", "attributes": {}})  # fmt: skip
+    h.fake.registry.append({"entity_id": "light.garden", "platform": "zha", "config_entry_id": "zha1"})
+    h.claude_reply = {"result": "ok", "summary": "checked", "verdicts": [
+        {"key": "entities:zha", "verdict": "needs_owner", "reason": "the garden light lost power",
+         "owner_action": "Switch the garden light back on at the wall"}]}  # fmt: skip
+    pushes = len(h.pushes())
+    d = h.daemon()
+    await d.health_cycle("daily")
+    assert d.store is not None
+    item = d.store.item_by_key("health:entities:zha")
+    assert item is not None and not item["needs"] and item["state"] == "proposed"
+    assert "could not decide" in item["gist"] and d.store.needs_count() == 0
+    assert len(h.pushes()) == pushes

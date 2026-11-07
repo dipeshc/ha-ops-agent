@@ -132,10 +132,14 @@ def test_triage_verdicts_are_kept_only_for_keys_handed_to_the_run() -> None:
         {"key": "entry:other", "verdict": "fixed", "reason": "not handed to the run"},
         {"key": "log:abc", "verdict": "approve_it", "reason": "not a verdict"},
         {"key": "log:def", "verdict": "fixed", "reason": ""}]}  # fmt: skip
-    found = validate_result(raw, {"entry:abc", "log:abc", "log:def", "log:ghi"})
+    # The run read the config entries (the daemon's audit record): that grounds the `needs_owner`.
+    found = validate_result(raw, {"entry:abc", "log:abc", "log:def", "log:ghi"}, ["config entries"])
     assert found.verdicts == {"entry:abc": ("needs_owner", "the hub lost power")}
     # A `needs_owner` that names nothing for the admin to do is no verdict.
     assert found.owner_actions == {"entry:abc": "Plug the hub back in"}
+    assert found.evidence == {"entry:abc": ["config entries"]}
+    # Without a concrete read it is no verdict either, and the next one for the key is not taken in its place.
+    assert validate_result(raw, {"entry:abc"}).verdicts == {}
 
 
 def items() -> list[Item]:

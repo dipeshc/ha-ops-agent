@@ -41,12 +41,42 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   `test_fragile_pieces_from_the_house_profile`,
   `test_hacs_frontend_plugins_always_need_approval`.
 - U5. Soak: `max(7, updates.min_age_days)` days for a PATCH, twice that for
-  a MINOR. Age unknown or younger than the soak is `approve` with
-  `waits=True` (approvable early, shown as proposed, never pushed); else
-  `auto`. Age comes from the GitHub release date for Core and HACS, else the
-  number of days since the agent first saw the version pending. Tests
+  a MINOR, counted from when this install, at its installed version, first
+  had an update **genuinely soaking** (the trailing clock,
+  `update_behind:<entity>@<installed>`, started by the plan that finds the
+  candidate `approve` with `waits=True`, not held and not waiting for a
+  config change, while updates may install at all), so a newer release
+  does not restart it; and the newest version must be at least 2 days old
+  (`NEWEST_MIN_AGE_DAYS`), so a release pulled or replaced within days is
+  never the one installed. The wait is the larger of the newest version's
+  age and the time soaking. Time a pending version was held for cause
+  never counts: the clock is dropped by any plan that finds the candidate
+  held (by the release-note review, a rollback or escalation hold, a
+  repair, a version gate, an urgent or soak-unknown ask, or
+  `need_approval`) or that runs while nothing may install (observe mode,
+  `auto_install` off, paused, a failed night), and by every hold the
+  daemon records; the next version then soaks in full. A due candidate
+  (`auto`) keeps it, so a "Plan now" or a refresh never restarts it, and
+  so does a hold only because the review could not run (AI off, capped,
+  failed, beyond one run's size: `unreviewed`), which is a hold for
+  availability, not for cause. Accepted residual risk: a maintainer can
+  publish a harmless release, let the clock run out its soak, then ship a
+  version that installs once it is 2 days old; the 2-day floor
+  (`NEWEST_MIN_AGE_DAYS`) is the bound on that version's public exposure.
+  Test `test_a_review_that_could_not_run_keeps_the_trailing_clock`. Age
+  unknown, a wait shorter than the soak, or a newest version under 2 days
+  old is `approve` with `waits=True` (approvable early, shown as proposed,
+  never pushed); else `auto`. The newest version's age comes from the
+  GitHub release date for Core and HACS, else the number of days since the
+  agent first saw that version pending. Tests
   `test_a_core_addon_minor_soaks_14_days_then_installs`,
-  `test_every_kind_needs_a_known_age`, `test_first_seen_age_is_remembered`.
+  `test_every_kind_needs_a_known_age`, `test_first_seen_age_is_remembered`,
+  `test_the_soak_counts_from_falling_behind_not_from_the_newest_release`,
+  `test_behind_age_is_kept_per_installed_version`,
+  `test_a_project_that_releases_faster_than_the_soak_still_installs`,
+  `test_time_held_for_cause_never_shortens_the_next_versions_soak`,
+  `test_a_rolled_back_version_lends_no_time_to_the_next_one`,
+  `test_a_gated_or_paused_install_is_not_soaking`.
 - U5a. **Soak-unknown hold.** A candidate whose release age is unknown
   (`age_unknown`) waits like a soaking one (proposed, never pushed,
   approvable early) and every nightly plan checks it again. It asks (an
@@ -87,7 +117,9 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
 ## The AI release-note review
 
 - U8. Runs only on the nightly trigger when `updates.review` is true and
-  there are AUTO or asking candidates; a refresh applies cached assessments;
+  there are AUTO, asking or soaking candidates (soaking ones last, marked
+  `[soaking]`, read for U9b; one beyond the 8 simply waits for a later
+  night, and one the review did not assess is not held for it); a refresh applies cached assessments;
   a manual plan runs none. The prompt holds each candidate's release notes
   fenced (4000 characters, redacted); the profile has no capabilities and a
   10-minute wait. Schema: `assessments[<=20]{entity_id, risk, hold, reason,
@@ -98,7 +130,8 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   `test_a_config_change_is_written_only_by_its_own_run_over_home_assistants_notes`.
 - U9. **Hold only.** The review can move an AUTO item to `approve` (when
   `hold` is true or risk is high) and never the reverse; a non-AUTO item
-  only gets a note. An unassessed candidate is held "not assessed"; beyond 8
+  only gets a note (U9b is the one way it makes a soaking item ask; it
+  still installs nothing). An unassessed candidate is held "not assessed"; beyond 8
   candidates the rest are held "not reviewed yet". Tests
   `test_review_can_only_hold_updates_back`, `test_apply_review_never_lowers`.
 - U9a. **The one release: a checked notes-only hold.** A Core candidate held
@@ -119,6 +152,21 @@ Implementation: `opsd/policy.py` (`classify`), `opsd/updates.py`
   `test_a_checked_notes_only_hold_is_released`,
   `test_a_repair_or_removal_hold_is_never_released_by_a_verdict`,
   `test_an_ungrounded_review_needs_owner_is_unknown`.
+- U9b. **An urgent fix asks to cut the soak short.** For a soaking
+  candidate (not one waiting for a config change), an assessment may carry
+  `urgent` `{quote, affects}`. It is kept only when the quote (20-300
+  characters) occurs in that candidate's notes word for word and names the
+  issue as a whole word: a CVE or GHSA id, or a word starting security,
+  vulnerab, exploit or critical; a quote that negates it (not, no, non-,
+  never, without) is no claim. The candidate then stops waiting quietly
+  and asks: an approval in Needs you, its reason reporting what the notes
+  say ("its release notes say … and the review thinks it applies here"),
+  never stating the claim as the daemon's own finding. It installs only
+  once the admin approves; otherwise the soak ends as usual. The claim is kept with the
+  assessment for that version. It changes nothing on any other item. Tests
+  `test_a_labelled_security_fix_asks_to_cut_the_soak_short`,
+  `test_an_urgent_claim_needs_a_named_issue_quoted_from_the_notes`,
+  `test_an_urgent_fix_only_shortens_a_soak`.
 - U10. With `updates.hold_if_unreviewed` (default true) a review that did not
   run (AI off, capped, failed, or `updates.review` false) holds every AUTO
   item that has no earlier assessment of that version; false installs them

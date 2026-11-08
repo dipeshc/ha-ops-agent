@@ -1650,6 +1650,15 @@ class Store:
             )
             self._touch("kv", key)
 
+    def kv_delete(self, key: str, *, prefix: bool = False) -> None:
+        """Drop one key, or (`prefix`) every key starting with it; a missing key is nothing."""
+        with self._tx() as conn:
+            if prefix:
+                conn.execute("DELETE FROM kv WHERE substr(key, 1, ?) = ?", (len(key), key))
+            else:
+                conn.execute("DELETE FROM kv WHERE key = ?", (key,))
+            self._touch("kv", key)
+
     def kv_json(self, key: str) -> dict[str, Any] | None:
         """A kv value holding a JSON object; None when it is missing, empty, unreadable or not an object."""
         try:
@@ -2099,7 +2108,8 @@ class Store:
                 " AND (json_extract(backup, '$.slug') IS NULL OR json_extract(backup, '$.deleted_at') IS NOT NULL)",
                 (_iso(now - UPDATE_KEEP),),
             )
-            conn.execute("DELETE FROM kv WHERE (key LIKE 'update_review:%' OR key LIKE 'update_seen:%')"
+            conn.execute("DELETE FROM kv WHERE (key LIKE 'update_review:%' OR key LIKE 'update_seen:%'"
+                         " OR key LIKE 'update_behind:%')"
                          " AND updated_at < ?", (_iso(now - UPDATE_KEEP),))  # fmt: skip
             tasks = conn.execute(
                 "DELETE FROM tasks WHERE (system_key IS NULL OR kind = 'retry')"

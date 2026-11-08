@@ -2,6 +2,23 @@
 
 ## 0.25.0
 
+- **The soak counts from when you fell behind.** Before, an add-on that
+  released more often than its soak (7 days for a patch, 14 for a minor)
+  never installed: each new version restarted the count, and a soaking
+  update never asks. Now the soak counts from when the install first had an
+  update genuinely soaking, and the newest version only has to be 2 days
+  old, so a release pulled or replaced within days is still never the one
+  installed. Time a version spent held (by the release-note review, after a
+  rollback, by a repair or version gate, or while updates were off or
+  paused) never counts: the version after a held one soaks in full.
+- **An urgent fix asks to cut the soak short.** The nightly release-note
+  review also reads updates that are still soaking, once per version. When
+  the notes name a security or critical fix (a CVE or advisory id, or
+  security, vulnerability, exploit or critical) that applies to this house,
+  and the quoted sentence really is in the notes (and does not negate
+  it), the update asks you whether to install it early, reporting what the
+  notes say rather than vouching for it. It installs only if you approve;
+  otherwise it waits out its soak as before.
 - **One escalation gate: unknown never asks.** An item enters *Needs you*
   only for one of seven reasons, and says which ("Asks you because: …"):
   `critical` (the health check's safety net), `approval`, `deadline` (a

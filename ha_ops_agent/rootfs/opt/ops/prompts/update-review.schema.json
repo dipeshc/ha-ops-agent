@@ -77,6 +77,24 @@
               }
             }
           },
+          "urgent": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "quote",
+              "affects"
+            ],
+            "properties": {
+              "quote": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "affects": {
+                "type": "string",
+                "maxLength": 300
+              }
+            }
+          },
           "verdict": {
             "enum": [
               "not_affected",

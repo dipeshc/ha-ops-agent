@@ -20,10 +20,14 @@ plain, tested code for everything that acts.
   AI says.
 - **Nightly updates.** Every night it plans the pending updates. If you let
   it, patches and minor versions that have soaked (7 and 14 days by
-  default) install one at a time in a window you choose, after an encrypted
+  default, counted from when the install fell behind, so a project that
+  releases often still installs) install one at a time in a window you
+  choose, after an encrypted
   backup made with your own automatic backup settings, with a health check
   before and after each one and a rollback if things got worse. Majors,
   HAOS, firmware and anything in your profile's fragile list ask you first.
+  A soaking update whose release notes name a security or critical fix
+  that applies to you asks whether to install it now instead of waiting.
 - **Conversations on the item.** Every item has its own conversation: open
   it and ask, or reply to its push, and the answer stays with the item. For
   anything without an item, *Ask* starts a question, which becomes an item

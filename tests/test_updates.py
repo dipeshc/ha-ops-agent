@@ -326,6 +326,8 @@ class Rig:
         self.reviews: list[str] = []
         self.review_result = RunResult(status="ai_disabled")
         self.ages: dict[str, float | None] = {}
+        # How long each install has had an update soaking (the trailing soak); unset: the manager's own clock.
+        self.behind: dict[str, float | None] = {}
         self.evidence = FakeEvidence()
         # The integrations the house uses (config entries and Core's components).
         self.domains: frozenset[str] | None = frozenset({"acme_solar", "matter", "zha", "template"})
@@ -383,8 +385,11 @@ class Rig:
         async def snapshot() -> Snapshot:
             states = [{"entity_id": e, **copy.deepcopy(v)} for e, v in self.ops.entities.items()]
             ages = {e: self.ages.get(e, 9.0) for e in self.ops.entities}
+            behind = {e: self.behind[e] if e in self.behind
+                      else self.manager.behind_age(e, str(v["attributes"]["installed_version"]))
+                      for e, v in self.ops.entities.items()}  # fmt: skip
             updates = derive_updates(states, self.ops.registry, self.options, {}, self.ages.get(CORE, 9.0),
-                                     hacs_repos=self.ops.hacs, ages=ages)  # fmt: skip
+                                     hacs_repos=self.ops.hacs, ages=ages, behind=behind)  # fmt: skip
             return Snapshot(taken_at=self.now.isoformat(), updates=updates, repairs=dict(self.repairs))
 
         async def house_domains() -> frozenset[str] | None:
@@ -927,6 +932,101 @@ async def test_review_can_only_hold_updates_back(tmp_path: Path) -> None:
     rig.store.close()
 
 
+URGENT_NOTES = (
+    "## 4.3.0\n- Fixes CVE-2026-31337, a remote code execution vulnerability in the listener.\n- Faster start."
+)
+
+
+async def test_a_labelled_security_fix_asks_to_cut_the_soak_short(tmp_path: Path) -> None:
+    """A soaking update whose notes name a security fix that applies here asks the admin (U9b); it never installs
+    early on its own, and the answer is kept for that version."""
+    rig = Rig(tmp_path, updates__review=True)
+    only_auto(rig)
+    rig.ops.entities[BROKER] = entity("4.2.0", "4.3.0", 29, "Example Broker")
+    rig.ages = {BROKER: 3.0}
+    rig.ops.notes[BROKER] = URGENT_NOTES
+    quote = "Fixes CVE-2026-31337, a remote code execution vulnerability in the listener."
+    rig.review_result = RunResult(status="ok", structured={"assessments": [
+        {"entity_id": BROKER, "risk": "low", "hold": False, "reason": "security fix",
+         "urgent": {"quote": quote, "affects": "the broker add-on runs here, listener in use"}}]})  # fmt: skip
+    await rig.manager.run_window()
+    [item] = [i for i in rig.run()["plan"] if i["entity_id"] == BROKER]
+    assert (item["tier"], item["waits"]) == ("approve", False) and "CVE-2026-31337" in item["reason"]
+    # The claim is reported as the notes' own words, never as the daemon's finding or an instruction.
+    assert item["reason"].startswith("its release notes say \u201c")
+    assert "the review thinks it applies here" in item["reason"]
+    assert "install it now" not in item["reason"] and "it fixes a security" not in item["reason"]
+    assert rig.ops.installs() == []
+    found = rig.item(BROKER, "4.3.0")
+    assert found["state"] == "waiting" and found["need"]["kind"] == "approval"
+    assert [m for m in await rig.flush() if m.tag == found["id"]]
+    # Kept for this version: the next night asks again without a new review.
+    rig.now += timedelta(days=1)
+    rig.ages = {BROKER: 4.0}
+    await rig.manager.run_window()
+    [item] = [i for i in rig.run()["plan"] if i["entity_id"] == BROKER]
+    assert item["waits"] is False and len(rig.reviews) == 1 and rig.ops.installs() == []
+    rig.store.close()
+
+
+@pytest.mark.parametrize(
+    ("notes", "quote"),
+    [
+        # Not in the notes word for word.
+        (URGENT_NOTES, "Fixes CVE-2026-99999, a critical flaw in the listener."),
+        # In the notes, but it names no security or critical issue.
+        (
+            "## 4.3.0\n- Fixes a crash on start when the listener port is busy.",
+            "Fixes a crash on start when the listener port is busy.",
+        ),
+        # The notes call themselves urgent without naming an issue.
+        (
+            "URGENT: everyone must install this release right now.",
+            "URGENT: everyone must install this release right now.",
+        ),
+        # The quote negates what it names.
+        (
+            "## 4.3.0\n- This is not a security release; it fixes a typo in the log line.",
+            "This is not a security release; it fixes a typo in the log line.",
+        ),
+        ("Non-critical fix: the listener logs its port twice.", "Non-critical fix: the listener logs its port twice."),
+        # The word is only part of another ("securities", "criticality" are matched; "insecure" is not a flag here).
+        (
+            "Fixes the insecurely named helper that logs the listener port.",
+            "Fixes the insecurely named helper that logs the listener port.",
+        ),
+    ],
+)
+async def test_an_urgent_claim_needs_a_named_issue_quoted_from_the_notes(tmp_path: Path, notes: str,
+                                                                         quote: str) -> None:  # fmt: skip
+    rig = Rig(tmp_path, updates__review=True)
+    only_auto(rig)
+    rig.ops.entities[BROKER] = entity("4.2.0", "4.3.0", 29, "Example Broker")
+    rig.ages = {BROKER: 3.0}
+    rig.ops.notes[BROKER] = notes
+    rig.review_result = RunResult(status="ok", structured={"assessments": [
+        {"entity_id": BROKER, "risk": "low", "hold": False, "reason": "x",
+         "urgent": {"quote": quote, "affects": "it runs here"}}]})  # fmt: skip
+    await rig.manager.run_window()
+    [item] = [i for i in rig.run()["plan"] if i["entity_id"] == BROKER]
+    assert item["waits"] is True and "urgent" not in item and rig.item(BROKER, "4.3.0")["state"] == "proposed"
+    rig.store.close()
+
+
+def test_an_urgent_fix_only_shortens_a_soak() -> None:
+    """`urgent` changes only a soaking candidate: a due one, a held one or a never one is untouched."""
+    urgent = {"risk": "low", "hold": False, "reason": "x", "urgent": {"quote": "q", "affects": "a"}}
+    plan = [{"entity_id": "update.a", "tier": "auto", "kind": "addon", "installed": "1", "latest": "2"},
+            {"entity_id": "update.b", "tier": "approve", "kind": "addon", "installed": "1", "latest": "2",
+             "waits": False, "held": True},
+            {"entity_id": "update.c", "tier": "never", "kind": "core", "installed": "1", "latest": "2"},
+            {"entity_id": "update.d", "tier": "approve", "kind": "addon", "installed": "1", "latest": "2",
+             "waits": True, "fix": {"change": 1}}]  # fmt: skip
+    out = apply_review(plan, {i["entity_id"]: urgent for i in plan})
+    assert [i.get("urgent") for i in out] == [None, None, None, None]
+    assert [i["tier"] for i in out] == ["auto", "approve", "never", "approve"] and out[3]["waits"] is True
+
+
 def test_apply_review_never_lowers() -> None:
     plan = [{"entity_id": "update.a", "tier": "approve", "reason": "minor"},
             {"entity_id": "update.b", "tier": "never", "reason": "firmware"}]  # fmt: skip
@@ -1298,6 +1398,160 @@ async def test_first_seen_age_is_remembered(rig: Rig) -> None:
     assert rig.manager.seen_age(CARD, "v1.16.14") == 0.0
 
 
+async def test_behind_age_is_kept_per_installed_version(rig: Rig) -> None:
+    """The trailing clock starts only when a plan finds the candidate genuinely soaking, and is keyed by the
+    installed version, so a newer release does not restart it (U5)."""
+    only_auto(rig, CARD)
+    assert rig.manager.behind_age(CARD, "v1.16.12") is None
+    rig.ages = {CARD: 1.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    assert rig.manager.behind_age(CARD, "v1.16.12") == 0.0
+    rig.now += timedelta(days=5)
+    assert rig.manager.behind_age(CARD, "v1.16.12") == pytest.approx(5.0)
+    assert rig.manager.behind_age(CARD, "v1.16.14") is None
+    # A "Plan now" or a refresh while it is due keeps the clock; nothing else restarts it.
+    rig.ops.entities[CARD]["attributes"]["latest_version"] = "v1.16.14"
+    rig.ages = {CARD: 3.0}
+    assert (await rig.manager.run_window("manual"))["result"] == "reported"
+    assert rig.manager.behind_age(CARD, "v1.16.12") == pytest.approx(5.0)
+
+
+async def test_time_held_for_cause_never_shortens_the_next_versions_soak(tmp_path: Path) -> None:
+    """A version held by the release-note review for 9 days lends nothing to the version after it: that one
+    soaks its full 7 days (U5). Before, release notes alone could cut the next version's soak to 2 days."""
+    rig = Rig(tmp_path, updates__review=True)
+    only_auto(rig, BROKER)
+    rig.review_result = RunResult(status="ok", structured={"assessments": [
+        {"entity_id": BROKER, "risk": "high", "hold": True, "reason": "BREAKING CHANGE in the notes"}]})  # fmt: skip
+    # Soaking for 3 days: the clock runs.
+    rig.ages = {BROKER: 3.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    assert rig.manager.behind_age(BROKER, "4.2.0") == 0.0
+    # Due at 7 days, the review holds it: the clock stops and is forgotten.
+    rig.now += timedelta(days=4)
+    rig.ages = {BROKER: 7.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    [held] = [i for i in rig.run()["plan"] if i["entity_id"] == BROKER]
+    assert held["tier"] == "approve" and "held by the release-note review" in held["reason"]
+    assert rig.manager.behind_age(BROKER, "4.2.0") is None
+    # Nine days later a clean 4.2.2 appears, 2 days old: it waits its own 7 days, nothing is installed.
+    rig.now += timedelta(days=9)
+    rig.ops.entities[BROKER]["attributes"]["latest_version"] = "4.2.2"
+    rig.ages = {BROKER: 2.0}
+    rig.review_result = RunResult(status="ok", structured={"assessments": [
+        {"entity_id": BROKER, "risk": "low", "hold": False, "reason": "bug fix"}]})  # fmt: skip
+    assert (await rig.manager.run_window())["result"] == "reported"
+    [item] = [i for i in rig.run()["plan"] if i["entity_id"] == BROKER]
+    assert item["waits"] is True and item["reason"] == "addon patch: soaking for 7 days (2 so far)"
+    assert rig.ops.installs() == []
+    rig.now += timedelta(days=4)
+    rig.ages = {BROKER: 6.0}
+    assert (await rig.manager.run_window())["result"] == "reported" and rig.ops.installs() == []
+    rig.now += timedelta(days=1)
+    rig.ages = {BROKER: 7.0}
+    assert (await rig.manager.run_window())["result"] == "executed"
+    assert rig.ops.installs() == [("update_addon", "core_example_broker")]
+
+
+async def test_a_review_that_could_not_run_keeps_the_trailing_clock(tmp_path: Path) -> None:
+    """A hold because the review could not run (AI off, capped, failed) is not a hold for cause: the trailing
+    clock is kept, so a project that releases faster than its soak installs the night the review is back (U5).
+    A verdict of the review that holds still drops it."""
+    rig = Rig(tmp_path, updates__review=True, updates__hold_if_unreviewed=True)
+    only_auto(rig, BROKER)
+    rig.ages = {BROKER: 1.0}
+    # Claude is down all week: a soaking candidate is not held by that, so the clock starts.
+    rig.review_result = RunResult(status="error")
+    assert (await rig.manager.run_window())["result"] == "reported"
+    assert rig.manager.behind_age(BROKER, "4.2.0") == 0.0
+    # Due through the trailing clock (8 days behind, the newest 2 days old), the review still down.
+    rig.now += timedelta(days=8)
+    rig.ages = {BROKER: 2.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    [held] = [i for i in rig.run()["plan"] if i["entity_id"] == BROKER]
+    assert "release notes not reviewed (error)" in held["reason"] and held["unreviewed"] is True
+    assert rig.manager.behind_age(BROKER, "4.2.0") == pytest.approx(8.0)
+    # The review is back: it installs, no new soak.
+    rig.now += timedelta(days=1)
+    rig.ages = {BROKER: 3.0}
+    rig.review_result = RunResult(status="ok", structured={"assessments": [
+        {"entity_id": BROKER, "risk": "low", "hold": False, "reason": "bug fix"}]})  # fmt: skip
+    assert (await rig.manager.run_window())["result"] == "executed"
+    assert rig.ops.installs() == [("update_addon", "core_example_broker")]
+    # Whereas the review's own verdict holding the next version drops the clock (held for cause).
+    rig.ops.entities[BROKER]["attributes"]["latest_version"] = "4.2.3"
+    rig.ops.entities[BROKER]["state"] = "on"
+    rig.ages = {BROKER: 1.0}
+    rig.now += timedelta(days=1)
+    rig.review_result = RunResult(status="ok", structured={"assessments": [
+        {"entity_id": BROKER, "risk": "high", "hold": True, "reason": "BREAKING CHANGE"}]})  # fmt: skip
+    assert (await rig.manager.run_window())["result"] == "reported"
+    assert rig.manager.behind_age(BROKER, "4.2.1") == 0.0
+    rig.now += timedelta(days=7)
+    rig.ages = {BROKER: 8.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    [item] = [i for i in rig.run()["plan"] if i["entity_id"] == BROKER]
+    assert "held by the release-note review" in item["reason"] and "unreviewed" not in item
+    assert rig.manager.behind_age(BROKER, "4.2.1") is None
+
+
+async def test_a_rolled_back_version_lends_no_time_to_the_next_one(rig: Rig) -> None:
+    """After the agent rolled v1.16.13 back (held), v1.16.14 soaks the full period, however long the install has
+    been behind (U5): the version after a known-bad one gets no less soak."""
+    only_auto(rig, CARD)
+    rig.ops.bad.add((CARD, "v1.16.13"))
+    assert (await rig.manager.run_window())["result"] == "executed"
+    assert rig.manager.holds()[f"{CARD}@v1.16.13"]["state"] == "rolled back"
+    assert rig.manager.behind_age(CARD, "v1.16.12") is None
+    rig.now += timedelta(days=12)
+    assert (await rig.manager.run_window())["result"] == "reported"
+    assert rig.manager.behind_age(CARD, "v1.16.12") is None
+    rig.now += timedelta(days=1)
+    rig.ops.entities[CARD]["attributes"]["latest_version"] = "v1.16.14"
+    rig.ages = {CARD: 2.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    [item] = [i for i in rig.run()["plan"] if i["entity_id"] == CARD]
+    assert item["waits"] is True and "soaking for 7 days (2 so far)" in item["reason"]
+    # Nothing installed since the night of the rollback (the install and its rollback).
+    assert [c[1][1] for c in rig.ops.installs()] == ["v1.16.13", "v1.16.12"]
+
+
+async def test_a_gated_or_paused_install_is_not_soaking(rig: Rig) -> None:
+    """While nothing may install (paused here; observe mode and auto_install off are the same gate) the trailing
+    clock is dropped, so a Core patch blocked for weeks does not install 2 days after the block lifts (U5)."""
+    only_auto(rig, BROKER)
+    rig.ages = {BROKER: 3.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    assert rig.manager.behind_age(BROKER, "4.2.0") == 0.0
+    rig.manager.set_paused(True, by="test")
+    rig.now += timedelta(days=10)
+    rig.ages = {BROKER: 13.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    assert rig.manager.behind_age(BROKER, "4.2.0") is None
+    rig.manager.set_paused(False, by="test")
+    rig.now += timedelta(days=1)
+    rig.ops.entities[BROKER]["attributes"]["latest_version"] = "4.2.2"
+    rig.ages = {BROKER: 2.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    [item] = [i for i in rig.run()["plan"] if i["entity_id"] == BROKER]
+    assert item["waits"] is True and "(2 so far)" in item["reason"]
+
+
+async def test_a_project_that_releases_faster_than_the_soak_still_installs(rig: Rig) -> None:
+    """The soak counts from when the install fell behind; the newest release only needs 2 days (U5)."""
+    only_auto(rig, BROKER)
+    # Behind for 9 days, but the newest release came out yesterday: it waits for that one to be 2 days old.
+    rig.ages, rig.behind = {BROKER: 1.0}, {BROKER: 9.0}
+    assert (await rig.manager.run_window())["result"] == "reported"
+    [item] = [i for i in rig.run()["plan"] if i["entity_id"] == BROKER]
+    assert item["waits"] is True and "the newest version is under 2 days old" in item["reason"]
+    assert rig.ops.installs() == []
+    rig.now += timedelta(days=1, hours=1)
+    rig.ages, rig.behind = {BROKER: 2.1}, {BROKER: 10.1}
+    assert (await rig.manager.run_window())["result"] == "executed"
+    assert rig.ops.installs() == [("update_addon", "core_example_broker")]
+
+
 async def test_young_releases_wait(rig: Rig) -> None:
     rig.ages = {BROKER: 2.0, CARD: None}
     only_auto(rig, BROKER, CARD)
@@ -1561,7 +1815,8 @@ async def test_a_core_addon_minor_soaks_then_installs_after_its_review() -> None
         assert (item["tier"], item["waits"], item["bump"]) == ("approve", True, "minor")
         assert rig.item(BROKER, "4.3.0")["state"] == "proposed" and rig.ops.installs() == []
         assert not [m for m in await rig.flush() if m.tag == rig.item(BROKER, "4.3.0")["id"]]  # soaking is quiet
-        assert not any(BROKER in r for r in rig.reviews)  # nothing to review while it soaks
+        # While it soaks its notes are read for an urgent fix only (U9b); this review could not run, so it just waits.
+        assert any(f"{BROKER} " in r and "[soaking]" in r for r in rig.reviews)
         # Day 14: no repair or held version touches it, and the release-note review lets it through.
         rig.now += timedelta(days=11)
         rig.ages = {BROKER: 14.0}

@@ -110,6 +110,25 @@ def test_a_core_addon_minor_soaks_14_days_then_installs() -> None:
     assert ripe.tier is Tier.AUTO and not ripe.waits and ripe.reason == "addon minor, soaked 14 days"
 
 
+def test_the_soak_counts_from_falling_behind_not_from_the_newest_release() -> None:
+    """A project that releases faster than the soak still installs: the soak counts from when this install fell
+    behind, and the newest version must be at least 2 days old (U5)."""
+    vpn = info("update.example_vpn_update", "0.30.4", "0.30.6", "hassio")
+    young = classify(vpn, release_age_days=3, behind_days=5, addon_slug="example_vpn")
+    assert young.waits and young.reason == "addon patch: soaking for 7 days (5 so far)"
+    fresh = classify(vpn, release_age_days=1, behind_days=8, addon_slug="example_vpn")
+    assert fresh.tier is Tier.APPROVE and fresh.waits
+    assert fresh.reason == "addon patch: soaked 7 days; the newest version is under 2 days old"
+    assert classify(vpn, release_age_days=2, behind_days=8, addon_slug="example_vpn").tier is Tier.AUTO
+    # Without a behind age the newest release's own age decides, as before.
+    assert classify(vpn, release_age_days=8, addon_slug="example_vpn").tier is Tier.AUTO
+    # An unknown release age still waits, however long the install has been behind.
+    assert classify(vpn, behind_days=30, addon_slug="example_vpn").age_unknown
+    # A minor still needs 14 days behind.
+    minor = info("update.example_vpn_update", "1.30.4", "1.31.0", "hassio")
+    assert classify(minor, release_age_days=3, behind_days=13, addon_slug="example_vpn").waits
+
+
 def test_fragile_pieces_from_the_house_profile() -> None:
     house = SAMPLE_PROFILE.updates.fragile
     acme_pool = hacs("update.acme_pool_update", "v3.0.4", "v3.1.0", hacs_category="integration")

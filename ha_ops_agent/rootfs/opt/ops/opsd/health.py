@@ -419,6 +419,7 @@ def derive_updates(
     *,
     hacs_repos: dict[str, dict[str, Any]] | None = None,
     ages: Mapping[str, float | None] | None = None,
+    behind: Mapping[str, float | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Pending updates (state `on`) with their policy tier.
 
@@ -463,6 +464,7 @@ def derive_updates(
         decision = policy.classify(
             info,
             release_age_days=age,
+            behind_days=(behind or {}).get(entity_id),
             min_age_days=float(options.updates.min_age_days),
             approval_updates=options.need_approval,
             never_updates=frozenset(options.updates.never),
@@ -541,6 +543,7 @@ async def collect(
     core_release_age: Callable[[str], float | None] | None = None,
     release_age: Callable[[str, str], float | None] | None = None,
     seen_age: Callable[[str, str], float | None] | None = None,
+    behind_age: Callable[[str, str], float | None] | None = None,
     run_config_check: bool = True,
     classify_updates: bool = True,
     meminfo_path: Path = Path("/proc/meminfo"),
@@ -622,7 +625,7 @@ async def collect(
         snap.updates = pending_updates(states)
     else:
         snap.updates = await _classified_updates(states, registry, addons.get("addons", []), options, api, guarded,
-                                                 core_release_age, release_age, seen_age)  # fmt: skip
+                                                 core_release_age, release_age, seen_age, behind_age)  # fmt: skip
 
     if run_config_check and snap.core["api_up"]:
         try:
@@ -696,6 +699,7 @@ async def _classified_updates(  # noqa: PLR0917
     core_release_age: Callable[[str], float | None] | None,
     release_age: Callable[[str, str], float | None] | None,
     seen_age: Callable[[str, str], float | None] | None,
+    behind_age: Callable[[str, str], float | None] | None = None,
 ) -> list[dict[str, Any]]:
     """The pending updates with their policy tier and release ages, for the update planner."""
     addon_slugs = _addon_update_entities(states, addons)
@@ -719,6 +723,8 @@ async def _classified_updates(  # noqa: PLR0917
     # Release ages for everything else: GitHub for HACS repositories, else how long the
     # agent has seen the version pending (a lower bound). Unknown means WAIT.
     ages: dict[str, float | None] = {}
+    # How long each install has had an update pending, whatever the newest version (the soak counts from there).
+    behind: dict[str, float | None] = {}
     by_entity = {e.get("entity_id"): e for e in registry}
     for st in states:
         entity_id = str(st.get("entity_id", ""))
@@ -732,10 +738,16 @@ async def _classified_updates(  # noqa: PLR0917
         if age is None and seen_age is not None and latest:
             age = seen_age(entity_id, latest)
         ages[entity_id] = age
+        installed = str((st.get("attributes") or {}).get("installed_version") or "")
+        if behind_age is not None and installed:
+            behind[entity_id] = behind_age(entity_id, installed)
     if core_update is not None and core_age is None and seen_age is not None and core_update.get("state") == "on":
         latest = str((core_update.get("attributes") or {}).get("latest_version") or "")
         core_age = seen_age(policy_core_entity, latest) if latest else None
-    return derive_updates(states, registry, options, addon_slugs, core_age, hacs_repos=hacs, ages=ages)
+    if core_update is not None and behind_age is not None and core_update.get("state") == "on":
+        installed = str((core_update.get("attributes") or {}).get("installed_version") or "")
+        behind[policy_core_entity] = behind_age(policy_core_entity, installed) if installed else None
+    return derive_updates(states, registry, options, addon_slugs, core_age, hacs_repos=hacs, ages=ages, behind=behind)
 
 
 async def _hacs_info(api: HealthAPI, repo_id: str) -> dict[str, Any]:

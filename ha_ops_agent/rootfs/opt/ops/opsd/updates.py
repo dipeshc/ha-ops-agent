@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import sqlite3
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -68,11 +69,19 @@ FAILED_KEY = "updates.failed_run"
 FAILED_ACK_KEY = "updates.failed_ack"
 HOLD_KEY = "update_hold:"
 SEEN_KEY = "update_seen:"
+# `<entity>@<installed version>`: when the agent first saw that install with an update pending.
+BEHIND_KEY = "update_behind:"
 # A night aborted by a failure (backup, health before it), `<prefix><run id>`: its item needs the admin.
 ABORT_FAILED_KEY = "updates.abort_failed:"
 REVIEW_KEY = "update_review:"
 # A candidate whose release age stays unknown asks after this many days pending (else it waits quietly).
 UNKNOWN_AGE_ASK_DAYS = 30
+# An urgent fix (U9b) is asked about only on a quote the notes hold word for word that names the issue.
+URGENT_WORDS = re.compile(r"\bCVE-\d{4}-\d{4,}\b|\bGHSA(?:-[0-9a-z]{4}){3}\b|\b(?:secur|vulnerab|exploit|critical)\w*",
+                          re.I)  # fmt: skip
+# A quote that negates what it names ("not a security release", "non-critical", "no known exploit") is no claim.
+URGENT_NEGATION = re.compile(r"\b(?:not|no|non|never|without)\b[ -]", re.I)
+URGENT_QUOTE_CHARS = (20, 300)
 TIER_ORDER = {"auto": 0, "approve": 1, "pinned": 3, "never": 4, "manual": 5}
 # HAOS last: it reboots the host (the daemon resumes the run afterwards).
 KIND_ORDER = {"addon": 0, "hacs": 1, "core": 2, "firmware": 3, "os": 4}
@@ -137,6 +146,17 @@ def apply_review(plan: list[dict[str, Any]], assessments: Mapping[str, Mapping[s
             # Shown to the admin next to an approval; it changes nothing.
             note = {"risk": found.get("risk") if found.get("risk") in ("low", "medium", "high") else "high",
                     "reason": clean_text(str(found.get("reason") or ""), 200)}  # fmt: skip
+            urgent = found.get("urgent")
+            if isinstance(urgent, Mapping) and item in soaking_items([item]):
+                # U9b: a labelled security or critical fix asks the admin to cut the soak short; it installs
+                # only once he approves (the soak still ends as usual if he does not). The quote is the
+                # maintainer's claim, reported as such, never stated as the daemon's own finding.
+                why = (f"its release notes say \u201c{urgent['quote']}\u201d and the review thinks it applies here "
+                       f"({urgent['affects']}); you may install it early instead of waiting "
+                       f"({item.get('reason')})")  # fmt: skip
+                result.append(item | {"review": note, "urgent": dict(urgent), "waits": False,
+                                      "reason": clean_text(why, 600)})  # fmt: skip
+                continue
             result.append(item | {"review": note} if approvable(item) else item)
             continue
         risk = found.get("risk") if found.get("risk") in ("low", "medium", "high") else "high"
@@ -144,11 +164,40 @@ def apply_review(plan: list[dict[str, Any]], assessments: Mapping[str, Mapping[s
         hold = found.get("hold") is not False or risk == "high"
         review = {"risk": risk, "hold": hold, "reason": reason}
         if hold:
-            result.append(item | {"tier": str(Tier.APPROVE), "reason": f"held by the release-note review: {reason}",
-                                  "review": review})  # fmt: skip
+            # `unreviewed`: the review could not run (AI off, capped, failed, beyond one run's size), a hold for
+            # availability, not for cause: the trailing soak clock is kept (`_mark_soaking`), never started.
+            held = {"tier": str(Tier.APPROVE), "reason": f"held by the release-note review: {reason}", "review": review}
+            result.append(item | held | ({"unreviewed": True} if found.get("unreviewed") else {}))
         else:
             result.append(item | {"review": review})
     return result
+
+
+def soaking(item: Mapping[str, Any]) -> bool:
+    """A candidate genuinely soaking (U5): approvable, waiting quietly, not held, not waiting for a config change."""
+    return approvable(item) and waits_quietly(item) and not item.get("held") and not item.get("fix")
+
+
+def soaking_items(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Candidates that wait only for their soak (not for a config change): reviewed for an urgent fix (U9b)."""
+    return [i for i in plan if soaking(i)]
+
+
+def urgent_fix(raw: Any, notes: str | None) -> dict[str, str] | None:
+    """The review's `urgent` claim, kept only when its quote is in the notes word for word and names a security or
+    critical issue (U9b). The notes are untrusted: at worst a forged claim asks the admin, it never installs."""
+    if not isinstance(raw, Mapping) or not notes:
+        return None
+    quote = " ".join(str(raw.get("quote") or "").split())
+    affects = clean_text(str(raw.get("affects") or ""), 200)
+    low, high = URGENT_QUOTE_CHARS
+    if not affects or not low <= len(quote) <= high or not URGENT_WORDS.search(quote):
+        return None
+    if URGENT_NEGATION.search(quote):
+        return None
+    if quote.casefold() not in " ".join(notes.split()).casefold():
+        return None
+    return {"quote": quote, "affects": affects}
 
 
 def gate_block(gate: VersionGate, item: Mapping[str, Any], snapshot: Snapshot | None) -> str | None:
@@ -264,6 +313,7 @@ def build_review_prompt(items: list[dict[str, Any]], notes: Mapping[str, str | N
         lines.append(
             f"- {item['entity_id']} ({fence(str(item.get('title') or ''), 80)}): {item.get('kind')}"
             f" {fence(str(item.get('installed')), 40)} -> {fence(str(item.get('latest')), 40)} ({item.get('bump')})"
+            + (" [soaking]" if item.get("waits") is True else "")
         )
     lines.append("</candidates>")
     for item in items:
@@ -518,10 +568,44 @@ class UpdateManager:
         record = {"at": self._clock().isoformat(timespec="seconds"), "state": state.replace("_", " "),
                   "entity_id": job.entity_id, "version": job.to_version, "reason": clean_text(why, 200)}  # fmt: skip
         self.store.kv_set(f"{HOLD_KEY}{job.entity_id}@{job.to_version}", json.dumps(record), now=self._clock())
+        # A held version was never soaking: the next one soaks in full (U5).
+        self.store.kv_delete(f"{BEHIND_KEY}{job.entity_id}@", prefix=True)
 
     def seen_age(self, entity_id: str, version: str) -> float:
         """Days since the agent first saw this version pending (a lower bound for its release age)."""
-        key = f"{SEEN_KEY}{entity_id}@{version}"
+        return self._days_since_first(f"{SEEN_KEY}{entity_id}@{version}")
+
+    def behind_age(self, entity_id: str, installed: str) -> float | None:
+        """Days this install, at `installed`, has had an update genuinely soaking, whichever version is newest: the
+        soak counts from here, so a project that releases faster than the soak still installs
+        (`policy.NEWEST_MIN_AGE_DAYS`). None until a plan has marked it soaking (`_mark_soaking`), and again after
+        any night it was held, blocked or gated: time held for cause never counts (U5)."""
+        try:
+            raw = self.store.kv_get(f"{BEHIND_KEY}{entity_id}@{installed}")
+        except StoreError, sqlite3.Error:
+            return None
+        first = parse_time(raw) if raw else None
+        return None if first is None else max(0.0, (self._clock() - first).total_seconds() / 86400)
+
+    def _mark_soaking(self, plan: Sequence[Mapping[str, Any]]) -> None:
+        """The trailing soak's clock (U5): started the first plan that finds a candidate genuinely soaking at this
+        installed version, kept while it is (or is due, or held only because the review could not run), and dropped
+        the moment the pending version is held for cause (the review's verdict, a rollback, a repair, a version
+        gate, an ask) or nothing may install (`gate`): a version held for cause lends no time to the next one."""
+        now = self._clock()
+        blocked = self.gate() is not None
+        for item in plan:
+            key = f"{BEHIND_KEY}{item.get('entity_id')}@{item.get('installed')}"
+            kept = item.get("tier") == Tier.AUTO or item.get("unreviewed") is True
+            try:
+                if blocked or not (soaking(item) or kept):
+                    self.store.kv_delete(key)
+                elif soaking(item) and not self.store.kv_get(key):
+                    self.store.kv_set(key, now.isoformat(timespec="seconds"), now=now)
+            except StoreError, sqlite3.Error:
+                _LOGGER.warning("soak clock not recorded", extra={"entity_id": item.get("entity_id")})
+
+    def _days_since_first(self, key: str) -> float:
         now = self._clock()
         try:
             raw = self.store.kv_get(key)
@@ -715,7 +799,8 @@ class UpdateManager:
         # may still be loading), "Plan now" and an approved-now run only read them.
         plan = self.approvals.annotate(plan, now_only=trigger == "approved", void=trigger == "window")
         gate = "manual plan (report only)" if trigger == "manual" else self.gate()
-        reviewed = auto_items(plan) + [i for i in plan if approvable(i) and not waits_quietly(i)]
+        reviewed = (auto_items(plan) + [i for i in plan if approvable(i) and not waits_quietly(i)]
+                    + soaking_items(plan))  # fmt: skip
         if trigger == "window" and reviewed and self.options.updates.review:
             plan = await self._apply_review(plan)
         elif trigger == "refresh" or (trigger == "window" and reviewed and self.options.updates.hold_if_unreviewed):
@@ -726,7 +811,8 @@ class UpdateManager:
             for item in reviewed:
                 cached.update(self._cached_review(item))
             if not self.options.updates.review and self.options.updates.hold_if_unreviewed:
-                off = {"risk": "high", "hold": True, "reason": "release notes not reviewed (the review is off)"}
+                off = {"risk": "high", "hold": True, "reason": "release notes not reviewed (the review is off)",
+                       "unreviewed": True}  # fmt: skip
                 for item in auto_items(plan):
                     cached.setdefault(str(item["entity_id"]), off)
             plan = apply_review(plan, cached)
@@ -735,6 +821,7 @@ class UpdateManager:
         plan = [i | {"execute": str(i["entity_id"]) in auto_ids or bool(i.get("approved"))} for i in plan]
         if report_only:
             plan = [i | {"execute": False} for i in plan]
+        self._mark_soaking(plan)
         todo = exec_items(plan)
         mode = "act" if gate is None and todo else "report"
         run_id = self.store.start_update_run(window_day=day, trigger=trigger, mode=mode, plan=plan, now=now)
@@ -893,6 +980,9 @@ class UpdateManager:
         """Cached assessments first; unreviewed AUTO candidates (and updates that ask) go to one AI run, and a
         held Core update that may need a config change to a second run of its own."""
         autos = auto_items(plan) + [i for i in plan if approvable(i) and not waits_quietly(i)]
+        # Soaking candidates last: they are read for an urgent fix (U9b) and never take a due one's place.
+        soaking = soaking_items(plan)
+        autos += soaking
         cached: dict[str, dict[str, Any]] = {}
         missing = []
         for item in autos:
@@ -905,13 +995,16 @@ class UpdateManager:
             else:
                 missing.append(item)
         if len(missing) > REVIEW_MAX_ITEMS:
-            # Beyond one review's size: held this night, reviewed on a later one.
+            # Beyond one review's size: held this night (a soaking one simply waits), reviewed on a later one.
             for item in missing[REVIEW_MAX_ITEMS:]:
-                cached[str(item["entity_id"])] = {"risk": "high", "hold": True, "reason": "not reviewed yet"}
+                if item not in soaking:
+                    cached[str(item["entity_id"])] = {"risk": "high", "hold": True, "reason": "not reviewed yet",
+                                                      "unreviewed": True}  # fmt: skip
             missing = missing[:REVIEW_MAX_ITEMS]
         if missing and self._review is None and self.options.updates.hold_if_unreviewed:
             for item in [i for i in missing if i.get("tier") == Tier.AUTO]:
-                cached[str(item["entity_id"])] = {"risk": "high", "hold": True, "reason": "release notes not reviewed"}
+                cached[str(item["entity_id"])] = {"risk": "high", "hold": True, "reason": "release notes not reviewed",
+                                                  "unreviewed": True}  # fmt: skip
         if missing and self._review is not None:
             # A candidate whose answer may carry a config change is reviewed in its own run, so that only
             # Home Assistant's own words (its Core notes and the needs_change block) shape the edits.
@@ -943,15 +1036,25 @@ class UpdateManager:
         if result.status != "ok":
             if self.options.updates.hold_if_unreviewed:
                 # The review could not run (AI off, capped, failed): hold, but do not remember it.
-                held = {"risk": "high", "hold": True, "reason": f"release notes not reviewed ({result.status})"}
+                held = {"risk": "high", "hold": True, "reason": f"release notes not reviewed ({result.status})",
+                        "unreviewed": True}  # fmt: skip
                 for item in [i for i in batch if i.get("tier") == Tier.AUTO]:
                     cached[str(item["entity_id"])] = held
             return None
         fresh = parse_review(result.structured, {str(i["entity_id"]) for i in batch})
+        raw = result.structured.get("assessments") if isinstance(result.structured, Mapping) else None
+        claims = {str(a.get("entity_id")): a.get("urgent") for a in raw or [] if isinstance(a, Mapping)}
+        soaking = soaking_items(batch)
+        for item in soaking:
+            entity = str(item["entity_id"])
+            urgent = urgent_fix(claims.get(entity), notes.get(entity))
+            if entity in fresh and urgent is not None:
+                fresh[entity]["urgent"] = urgent
         for item in batch:
-            # A candidate the review did not assess is held (fail closed).
-            fresh.setdefault(str(item["entity_id"]), {"risk": "high", "hold": True,
-                                                      "reason": "not assessed by the review"})  # fmt: skip
+            # A candidate the review did not assess is held (fail closed); a soaking one is assessed again later.
+            if item not in soaking:
+                fresh.setdefault(str(item["entity_id"]), {"risk": "high", "hold": True,
+                                                          "reason": "not assessed by the review"})  # fmt: skip
         now = self._clock()
         for item in batch:
             assessment = fresh.get(str(item["entity_id"]))
@@ -1038,7 +1141,12 @@ class UpdateManager:
             return {}
         if not isinstance(stored, dict):
             return {}
-        return parse_review({"assessments": [stored | {"entity_id": item["entity_id"]}]}, {str(item["entity_id"])})
+        found = parse_review({"assessments": [stored | {"entity_id": item["entity_id"]}]}, {str(item["entity_id"])})
+        urgent = stored.get("urgent")
+        if isinstance(urgent, dict) and isinstance(urgent.get("quote"), str) and isinstance(urgent.get("affects"), str):
+            # Checked against the notes when it was stored (U9b).
+            found[str(item["entity_id"])]["urgent"] = {"quote": urgent["quote"], "affects": urgent["affects"]}
+        return found
 
     def _report_summary(self, plan: list[dict[str, Any]], gate: str | None) -> str:
         autos = auto_items(plan)

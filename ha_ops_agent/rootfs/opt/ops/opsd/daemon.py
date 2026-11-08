@@ -1603,6 +1603,7 @@ class Daemon:
             return await collect(api, self.paths, self.options, now=datetime.now(UTC),
                                  core_release_age=core_release_age_days, release_age=github_release_age_days,
                                  seen_age=self.updates.seen_age if self.updates is not None else None,
+                                 behind_age=self.updates.behind_age if self.updates is not None else None,
                                  run_config_check=False)  # fmt: skip
 
     async def _house_domains(self) -> frozenset[str]:

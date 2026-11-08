@@ -14,6 +14,9 @@ from typing import Protocol
 from opsd.selfguard import SELF_TITLE, SELF_UPDATE_ENTITY, is_self_slug
 
 CORE_PATCH_MIN_AGE_DAYS = 7.0
+# The soak counts from when the install fell behind, so a project that releases often still installs; the newest
+# version must still be this old, so a release pulled or replaced within days is never the one installed.
+NEWEST_MIN_AGE_DAYS = 2.0
 
 _HASSIO_SPECIAL = {
     "update.home_assistant_core_update": "core",
@@ -187,14 +190,19 @@ def soak_days(bump: Bump, min_age_days: float) -> float:
     return floor if bump is Bump.PATCH else 2 * floor
 
 
-def _candidate(label: str, bump: Bump, age: float | None, min_age_days: float) -> Decision:
+def _candidate(label: str, bump: Bump, age: float | None, min_age_days: float, behind: float | None) -> Decision:
+    """`age` is the newest version's; `behind` how long this install has had an update pending (any version)."""
     soak = soak_days(bump, min_age_days)
     if age is None:
         return Decision(Tier.APPROVE, bump, f"{label} {bump}: release age unknown, so it waits (checked again daily)",
                         waits=True, age_unknown=True)  # fmt: skip
-    if age < soak:
-        return Decision(Tier.APPROVE, bump, f"{label} {bump}: soaking for {soak:g} days ({int(age)} so far)",
+    waited = max(age, behind or 0.0)
+    if waited < soak:
+        return Decision(Tier.APPROVE, bump, f"{label} {bump}: soaking for {soak:g} days ({int(waited)} so far)",
                         waits=True)  # fmt: skip
+    if age < NEWEST_MIN_AGE_DAYS:
+        return Decision(Tier.APPROVE, bump, f"{label} {bump}: soaked {soak:g} days; the newest version is under "
+                                            f"{NEWEST_MIN_AGE_DAYS:g} days old", waits=True)  # fmt: skip
     return Decision(Tier.AUTO, bump, f"{label} {bump}, soaked {soak:g} days")
 
 
@@ -202,6 +210,7 @@ def classify(
     info: UpdateInfo,
     *,
     release_age_days: float | None = None,
+    behind_days: float | None = None,
     min_age_days: float = CORE_PATCH_MIN_AGE_DAYS,
     approval_updates: frozenset[str] = frozenset(),
     never_updates: frozenset[str] = frozenset(),
@@ -234,7 +243,7 @@ def classify(
                 return Decision(Tier.APPROVE, bump, f"Core {bump} update needs approval")
             if info.entity_id in approval_updates:
                 return Decision(Tier.APPROVE, bump, "listed in updates.need_approval")
-            return _candidate("Core", bump, release_age_days, min_age_days)
+            return _candidate("Core", bump, release_age_days, min_age_days, behind_days)
         case "os":
             return Decision(Tier.APPROVE, bump, "operating system updates reboot the host: you approve each one")
         case "supervisor":
@@ -262,7 +271,7 @@ def classify(
     rollback = _rollback_problem(info, addon_slug)
     if rollback is not None:
         return Decision(Tier.APPROVE, bump, rollback)
-    return _candidate(info.kind, bump, release_age_days, min_age_days)
+    return _candidate(info.kind, bump, release_age_days, min_age_days, behind_days)
 
 
 def _rollback_problem(info: UpdateInfo, addon_slug: str | None) -> str | None:

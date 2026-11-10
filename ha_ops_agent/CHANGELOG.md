@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.25.2
+
+- **Up-to-date image packages.** The base image moves to the current
+  ghcr.io/home-assistant/base:3.24 build (newer curl, libcurl and libapk), the
+  image also pins the current krb5-libs (1.22.3) and zlib (1.4) builds, which
+  the base image still lags, and Claude Code moves to 2.1.311. No code changes.
+
 ## 0.25.1
 
 - **The add-on builds again.** Alpine 3.24 replaced openssh 10.3_p1-r1 with

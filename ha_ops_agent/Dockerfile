@@ -1,12 +1,12 @@
 # The base image is pinned here, by digest per architecture, and not taken from BUILD_FROM: Supervisor
 # 2026.10 deprecates build.yaml and can pass `base:latest` instead of its pinned `build_from`. Both
 # digests are the per-platform manifests of the ghcr.io/home-assistant/base:3.24 index
-# sha256:992dc6a5727b97a30da8dd259b489739299c324407557df540165e2f0dbb7763. The Supervisor passes
+# sha256:58422480a299b16b6ea376c2167463206d430619ed02b40cd687c8bd6875519e. The Supervisor passes
 # BUILD_ARCH; only that stage is used. No default: a build without it fails instead of silently taking
 # another architecture's image.
 ARG BUILD_ARCH
-FROM ghcr.io/home-assistant/base:3.24@sha256:05db94c3586b93426cc9699d8740e4e38be94705cd6c6994d0eccf81235f6e53 AS base-aarch64
-FROM ghcr.io/home-assistant/base:3.24@sha256:1bfa4a633f741853641d3014ec23d00ed5f133f34c9daba9bafce2dc734a4882 AS base-amd64
+FROM ghcr.io/home-assistant/base:3.24@sha256:2eed1dd7bd4fa0de08b31739dc1690d148f56d2aa5b0e933765c434b55d75fa3 AS base-aarch64
+FROM ghcr.io/home-assistant/base:3.24@sha256:ed340acf0a3a77a761b4d3ee2977ab5ddc44038304597e66b0ccfd859b8d8a1f AS base-amd64
 # hadolint ignore=DL3006
 FROM base-${BUILD_ARCH}
 
@@ -16,16 +16,18 @@ FROM base-${BUILD_ARCH}
 # so the binary is fixed per image build and never self-updates.
 # Pinned for reproducible builds. Bump deliberately; see the stable indexes at
 # https://downloads.claude.ai/claude-code/apk/stable/{aarch64,x86_64}/APKINDEX.tar.gz
-ARG CLAUDE_CODE_VERSION=2.1.308-r1
+ARG CLAUDE_CODE_VERSION=2.1.311-r1
 ARG CLAUDE_APK_KEY_SHA256=395759c1f7449ef4cdef305a42e820f3c766d6090d142634ebdb049f113168b6
 # Alpine packages are pinned to the exact v3.24 versions too (from the v3.24 main/community
 # aarch64 and x86_64 indexes, which carry the same versions). Alpine keeps only the newest build
 # of each package in a branch, so a security update there makes this build fail until these
-# are bumped: deliberate, never silent.
+# are bumped: deliberate, never silent. krb5-libs and zlib come with the base image and are pinned
+# here too, because the base image can lag the branch's security builds.
 RUN apk add --no-cache \
         bash=5.3.9-r1 \
         ca-certificates=20261020-r0 \
         git=2.54.0-r0 \
+        krb5-libs=1.22.3-r0 \
         libgcc=15.2.0-r5 \
         libstdc++=15.2.0-r5 \
         openssh-client-default=10.3_p1-r2 \
@@ -35,6 +37,7 @@ RUN apk add --no-cache \
         ripgrep=15.1.0-r0 \
         setpriv=2.42.3-r1 \
         tzdata=2026f-r0 \
+        zlib=1.4-r0 \
     && wget -q -O /etc/apk/keys/claude-code.rsa.pub \
         https://downloads.claude.ai/keys/claude-code.rsa.pub \
     && echo "${CLAUDE_APK_KEY_SHA256}  /etc/apk/keys/claude-code.rsa.pub" | sha256sum -c - \

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.25.1
+
+- **The add-on builds again.** Alpine 3.24 replaced openssh 10.3_p1-r1 with
+  -r2 and tzdata 2026e with 2026f, so the pinned versions could no longer be
+  installed and the image build failed. The pins now name the current builds.
+  No code changes.
+
 ## 0.25.0
 
 - **The soak counts from when you fell behind.** Before, an add-on that

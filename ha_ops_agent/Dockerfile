@@ -28,13 +28,13 @@ RUN apk add --no-cache \
         git=2.54.0-r0 \
         libgcc=15.2.0-r5 \
         libstdc++=15.2.0-r5 \
-        openssh-client-default=10.3_p1-r1 \
-        openssh-keygen=10.3_p1-r1 \
+        openssh-client-default=10.3_p1-r2 \
+        openssh-keygen=10.3_p1-r2 \
         python3=3.14.10-r1 \
         py3-yaml=6.0.3-r2 \
         ripgrep=15.1.0-r0 \
         setpriv=2.42.3-r1 \
-        tzdata=2026e-r0 \
+        tzdata=2026f-r0 \
     && wget -q -O /etc/apk/keys/claude-code.rsa.pub \
         https://downloads.claude.ai/keys/claude-code.rsa.pub \
     && echo "${CLAUDE_APK_KEY_SHA256}  /etc/apk/keys/claude-code.rsa.pub" | sha256sum -c - \
